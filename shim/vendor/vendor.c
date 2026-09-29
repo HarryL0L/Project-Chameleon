@@ -176,9 +176,11 @@ static void *get_proc_address(const char *name)
     return cham_egl_get_proc(name); /* EGL, and GL extensions via Android's eglGetProcAddress */
 }
 
-/* chameleon-kwin points glvnd at this library for KWin only; once glvnd has
- * loaded its vendors, KWin's own children (Konsole, ...) get the setting
- * they were started with back. */
+/* A launcher that pins glvnd to this library for one process can save the
+ * previous __EGL_VENDOR_LIBRARY_FILENAMES in CHAMELEON_ORIG_...; it is put
+ * back once glvnd has loaded its vendors. (bin/kwin_wayland doesn't: KWin
+ * hands its startup environment to the programs it starts, so it lists this
+ * vendor first and the installed ones after it instead.) */
 static void restore_environment(void)
 {
     const char *saved = getenv("CHAMELEON_ORIG___EGL_VENDOR_LIBRARY_FILENAMES");
