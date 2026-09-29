@@ -64,6 +64,7 @@ static void *real(const char *name)
     EGLAPI ret EGLAPIENTRY name params     \
     {                                      \
         REAL(ret, name, params)            \
+        CHAM_NOTE_CALL(#name);             \
         if (!p_##name)                     \
             return fail;                   \
         return p_##name args;              \
@@ -338,13 +339,82 @@ static const struct {
     {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
 };
 
+/* Extension entry points KWin fetches with eglGetProcAddress (so they bypass
+ * the libGLESv2.so.2 forwarders) get a thin wrapper that records the call
+ * for the crash report, then calls the driver. */
+#define TRACED_VOID(id, str, params, args)             \
+    static void (*p_tr_##id) params;                   \
+    static void tr_##id params                         \
+    {                                                  \
+        CHAM_NOTE_CALL(str);                           \
+        p_tr_##id args;                                \
+    }
+#define TRACED(ret, id, str, params, args)             \
+    static ret (*p_tr_##id) params;                    \
+    static ret tr_##id params                          \
+    {                                                  \
+        CHAM_NOTE_CALL(str);                           \
+        return p_tr_##id args;                         \
+    }
+TRACED_VOID(QueryCounterEXT, "glQueryCounterEXT", (unsigned id, unsigned target), (id, target))
+TRACED_VOID(GetQueryObjecti64vEXT, "glGetQueryObjecti64vEXT", (unsigned id, unsigned pname, int64_t *v), (id, pname, v))
+TRACED_VOID(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT", (unsigned id, unsigned pname, uint64_t *v),
+            (id, pname, v))
+TRACED_VOID(BeginQueryEXT, "glBeginQueryEXT", (unsigned target, unsigned id), (target, id))
+TRACED_VOID(EndQueryEXT, "glEndQueryEXT", (unsigned target), (target))
+TRACED_VOID(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES", (unsigned target, void *image),
+            (target, image))
+TRACED_VOID(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES",
+            (unsigned target, void *image), (target, image))
+TRACED(unsigned, GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT", (void), ())
+TRACED(unsigned, GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR", (void), ())
+TRACED(unsigned, GetGraphicsResetStatus, "glGetGraphicsResetStatus", (void), ())
+TRACED(EGLSyncKHR, CreateSyncKHR, "eglCreateSyncKHR", (EGLDisplay d, EGLenum t, const EGLint *a), (d, t, a))
+TRACED(EGLBoolean, DestroySyncKHR, "eglDestroySyncKHR", (EGLDisplay d, EGLSyncKHR s), (d, s))
+TRACED(EGLint, ClientWaitSyncKHR, "eglClientWaitSyncKHR", (EGLDisplay d, EGLSyncKHR s, EGLint f, EGLTimeKHR t),
+       (d, s, f, t))
+TRACED(EGLint, WaitSyncKHR, "eglWaitSyncKHR", (EGLDisplay d, EGLSyncKHR s, EGLint f), (d, s, f))
+TRACED(EGLint, DupNativeFenceFDANDROID, "eglDupNativeFenceFDANDROID", (EGLDisplay d, EGLSyncKHR s), (d, s))
+
+#define TR(id, str) {str, (void **)&p_tr_##id, (void *)tr_##id}
+static const struct {
+    const char *name;
+    void **real;
+    void *wrapper;
+} k_traced[] = {
+    TR(QueryCounterEXT, "glQueryCounterEXT"),
+    TR(GetQueryObjecti64vEXT, "glGetQueryObjecti64vEXT"),
+    TR(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT"),
+    TR(BeginQueryEXT, "glBeginQueryEXT"),
+    TR(EndQueryEXT, "glEndQueryEXT"),
+    TR(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES"),
+    TR(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES"),
+    TR(GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT"),
+    TR(GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR"),
+    TR(GetGraphicsResetStatus, "glGetGraphicsResetStatus"),
+    TR(CreateSyncKHR, "eglCreateSyncKHR"),
+    TR(DestroySyncKHR, "eglDestroySyncKHR"),
+    TR(ClientWaitSyncKHR, "eglClientWaitSyncKHR"),
+    TR(WaitSyncKHR, "eglWaitSyncKHR"),
+    TR(DupNativeFenceFDANDROID, "eglDupNativeFenceFDANDROID"),
+};
+
 EGLAPI __eglMustCastToProperFunctionPointerType EGLAPIENTRY eglGetProcAddress(const char *name)
 {
     for (size_t i = 0; i < sizeof k_overrides / sizeof k_overrides[0]; i++)
         if (strcmp(name, k_overrides[i].name) == 0)
             return (__eglMustCastToProperFunctionPointerType)k_overrides[i].fn;
     real("eglGetProcAddress"); /* makes sure real_get_proc is loaded */
-    return real_get_proc ? (__eglMustCastToProperFunctionPointerType)real_get_proc(name) : NULL;
+    if (!real_get_proc)
+        return NULL;
+    void *fn = (void *)real_get_proc(name);
+    for (size_t i = 0; fn && i < sizeof k_traced / sizeof k_traced[0]; i++) {
+        if (strcmp(name, k_traced[i].name) == 0) {
+            *k_traced[i].real = fn;
+            return (__eglMustCastToProperFunctionPointerType)k_traced[i].wrapper;
+        }
+    }
+    return (__eglMustCastToProperFunctionPointerType)fn;
 }
 
 #pragma GCC visibility pop

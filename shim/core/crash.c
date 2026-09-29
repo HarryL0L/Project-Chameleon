@@ -25,6 +25,8 @@
 #include "internal.h"
 
 CHAM_EXPORT const char *volatile cham_last_gl;
+CHAM_EXPORT const char *volatile cham_call_ring[CHAM_CALL_RING];
+CHAM_EXPORT volatile unsigned cham_call_pos;
 static char g_note[256];
 
 CHAM_EXPORT void cham_crash_note(const char *fmt, ...)
@@ -181,6 +183,23 @@ static void report(int sig, siginfo_t *si, void *ucv)
     out(gl ? gl : "(none)");
     out("\nchameleon: last texture upload: ");
     out(g_note[0] ? g_note : "(none)");
+    out("\n");
+
+    /* Oldest first, runs of the same call folded into "name xN". */
+    unsigned end = cham_call_pos, start = end > CHAM_CALL_RING ? end - CHAM_CALL_RING : 0;
+    out_dec("chameleon: last GL/EGL calls (of ", (long)end);
+    out("):");
+    for (unsigned i = start; i < end;) {
+        const char *name = cham_call_ring[i % CHAM_CALL_RING];
+        unsigned run = 1;
+        while (i + run < end && cham_call_ring[(i + run) % CHAM_CALL_RING] == name)
+            run++;
+        out(" ");
+        out(name ? name : "?");
+        if (run > 1)
+            out_dec(" x", (long)run);
+        i += run;
+    }
     out("\n");
 
 #if defined(__aarch64__)

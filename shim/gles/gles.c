@@ -401,7 +401,7 @@ GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint inter
     unbind_framebuffer(&fb);
     if (g_trace)
         trace_upload("glTexImage2D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
-    cham_last_gl = "glTexImage2D";
+    CHAM_NOTE_CALL("glTexImage2D");
     cham_crash_note("glTexImage2D %dx%d internal 0x%x format 0x%x type 0x%x data %p (from %p) framebuffer %d%s",
                     width, height, internalformat, format, type, data, pixels, fb.draw,
                     fb.unbound ? " (unbound)" : "");
@@ -427,7 +427,7 @@ GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xo
     unbind_framebuffer(&fb);
     if (g_trace)
         trace_upload("glTexSubImage2D", 0, width, height, format, type, pixels, data, &fb);
-    cham_last_gl = "glTexSubImage2D";
+    CHAM_NOTE_CALL("glTexSubImage2D");
     cham_crash_note("glTexSubImage2D %dx%d at %d,%d format 0x%x type 0x%x data %p (from %p) framebuffer %d%s",
                     width, height, xoffset, yoffset, format, type, data, pixels, fb.draw,
                     fb.unbound ? " (unbound)" : "");
@@ -451,7 +451,7 @@ GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint inter
     unbind_framebuffer(&fb);
     if (g_trace)
         trace_upload("glTexImage3D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
-    cham_last_gl = "glTexImage3D";
+    CHAM_NOTE_CALL("glTexImage3D");
     p_glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, data);
     restore_framebuffer(&fb);
 }
@@ -466,7 +466,7 @@ GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xo
     unbind_framebuffer(&fb);
     if (g_trace)
         trace_upload("glTexSubImage3D", 0, width, height, format, type, pixels, data, &fb);
-    cham_last_gl = "glTexSubImage3D";
+    CHAM_NOTE_CALL("glTexSubImage3D");
     p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, data);
     restore_framebuffer(&fb);
 }

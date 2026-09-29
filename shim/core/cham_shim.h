@@ -53,6 +53,16 @@ CHAM_EXPORT int cham_format_supported(uint32_t format);
 CHAM_EXPORT void *cham_bo_lock(struct cham_bo *bo);
 CHAM_EXPORT void cham_bo_unlock(struct cham_bo *bo);
 
+/* Crash-report breadcrumbs (crash.c): the last GL/EGL entry points called,
+ * recorded by the forwarders in libGLESv2.so.2 and libEGL.so.1. */
+#define CHAM_CALL_RING 64
+CHAM_EXPORT extern const char *volatile cham_last_gl;
+CHAM_EXPORT extern const char *volatile cham_call_ring[CHAM_CALL_RING];
+CHAM_EXPORT extern volatile unsigned cham_call_pos;
+#define CHAM_NOTE_CALL(name) \
+    (cham_last_gl = (name), cham_call_ring[cham_call_pos++ % CHAM_CALL_RING] = (name))
+CHAM_EXPORT void cham_crash_note(const char *fmt, ...);
+
 /* Formats scanned out and imported by EGL (DRM fourcc). */
 CHAM_EXPORT const uint32_t *cham_formats(int *count);
 
