@@ -80,7 +80,7 @@ def leg(angle_deg, toe_dir):
     a = math.radians(angle_deg)
     hip = (C[0] + (BODY_R - 6) * math.cos(a), C[1] + (BODY_R - 6) * math.sin(a))
     b = math.radians(angle_deg + 9 * toe_dir)
-    knee = (C[0] + (DISC_R + 20) * math.cos(b), C[1] + (DISC_R + 16) * math.sin(b))
+    knee = (C[0] + (DISC_R + 20) * math.cos(b), C[1] + (DISC_R + 20) * math.sin(b))
     c = math.radians(angle_deg + 17 * toe_dir)
     foot = (C[0] + (DISC_R + 2) * math.cos(c), C[1] + (DISC_R + 2) * math.sin(c))
     return f"M{hip[0]:.1f} {hip[1]:.1f} L{knee[0]:.1f} {knee[1]:.1f} L{foot[0]:.1f} {foot[1]:.1f}"
@@ -120,3 +120,101 @@ svg = f"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 </svg>
 """
 open("logo.svg", "w").write(svg)
+
+
+# ---- Android adaptive launcher icon (same geometry) ----
+# Foreground/monochrome layers are 108dp; launchers may mask everything
+# outside the central 66dp circle, so the logo is fitted inside it.
+import os
+import re
+
+RES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "android", "app", "src", "main", "res")
+BG = "#101828"
+
+
+def circle_path(cx, cy, r):
+    return f"M{cx - r:.1f} {cy:.1f} a{r:.1f} {r:.1f} 0 1 0 {2 * r:.1f} 0 a{r:.1f} {r:.1f} 0 1 0 {-2 * r:.1f} 0 Z"
+
+
+def head_points():
+    rot = math.radians(head_rot)
+    for x, y in zip(*[iter(map(float, re.findall(r"-?\d+\.?\d*", head)))] * 2):
+        yield (neck[0] + x * math.cos(rot) - y * math.sin(rot), neck[1] + x * math.sin(rot) + y * math.cos(rot))
+
+
+xs, ys = zip(*(list(pts) + list(head_points()) + [(C[0] - DISC_R, C[1] - DISC_R), (C[0] + DISC_R, C[1] + DISC_R)]))
+pad = W_BODY / 2
+x0, x1, y0, y1 = min(xs) - pad, max(xs) + pad, min(ys) - pad, max(ys) + pad
+# Launcher masks are round: fit by the farthest point from the centre, into
+# a 31dp radius (the guaranteed-visible circle is 33dp).
+mx, my = (x0 + x1) / 2, (y0 + y1) / 2
+reach = max(math.hypot(x - mx, y - my) for x, y in zip(xs, ys)) + pad
+scale = 31.0 / reach
+tx = 54 - mx * scale
+ty = 54 - my * scale
+
+A = 'xmlns:android="http://schemas.android.com/apk/res/android" xmlns:aapt="http://schemas.android.com/aapt"'
+
+
+def gradient(attr, x_1, y_1, x_2, y_2, stops):
+    items = "".join(f'<item android:offset="{o}" android:color="{c}"/>' for o, c in stops)
+    return (f'<aapt:attr name="android:{attr}"><gradient android:type="linear" android:startX="{x_1}" '
+            f'android:startY="{y_1}" android:endX="{x_2}" android:endY="{y_2}">{items}</gradient></aapt:attr>')
+
+
+BODY_STOPS = [(0, "#FF6C4CF1"), (0.55, "#FF22B8E6"), (1, "#FF3DDC84")]
+body_fill = lambda attr: gradient(attr, 90, 450, 420, 120, BODY_STOPS)
+disc_fill = gradient("fillColor", C[0], C[1] - DISC_R, C[0], C[1] + DISC_R, [(0, "#FFFFD23F"), (1, "#FFFFA62B")])
+head_fill = gradient("fillColor", -6, 0, 92, 0, [(0, "#FF2CC9C4"), (1, "#FF3DDC84")])
+w_path = (f"M{C[0]-70:.0f} {C[1]-36:.0f} L{C[0]-35:.0f} {C[1]+54:.0f} L{C[0]:.0f} {C[1]-6:.0f} "
+          f"L{C[0]+35:.0f} {C[1]+54:.0f} L{C[0]+70:.0f} {C[1]-36:.0f}")
+stroke = 'android:strokeLineCap="round" android:strokeLineJoin="round"'
+
+
+def layer(mono):
+    out = [f'<vector {A} android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">',
+           f'<group android:translateX="{tx:.3f}" android:translateY="{ty:.3f}" android:scaleX="{scale:.5f}" android:scaleY="{scale:.5f}">']
+    ink = "#FFFFFFFF"
+    if mono:
+        # One colour (the system tints it): the disc becomes a ring.
+        out.append(f'<path android:pathData="{circle_path(C[0], C[1], DISC_R - 9)}" android:strokeColor="{ink}" android:strokeWidth="18"/>')
+        out.append(f'<path android:pathData="{w_path}" android:strokeColor="{ink}" android:strokeWidth="27" {stroke}/>')
+    else:
+        out.append(f'<path android:pathData="{circle_path(C[0], C[1], DISC_R)}">{disc_fill}</path>')
+        out.append(f'<path android:pathData="{w_path}" android:strokeColor="#FF1B1F3B" android:strokeWidth="27" {stroke}/>')
+    for d in legs:
+        paint = f'android:strokeColor="{ink}"' if mono else ""
+        out.append(f'<path android:pathData="{d}" {paint} android:strokeWidth="17" {stroke}>'
+                   f'{"" if mono else body_fill("strokeColor")}</path>')
+    for d in (body, circle_path(tip[0], tip[1], tip_w / 2)):
+        out.append(f'<path android:pathData="{d}" android:fillColor="{ink}"/>' if mono
+                   else f'<path android:pathData="{d}">{body_fill("fillColor")}</path>')
+    out.append(f'<group android:translateX="{neck[0]:.2f}" android:translateY="{neck[1]:.2f}" android:rotation="{head_rot:.2f}">')
+    if mono:
+        # eye punched out of the head
+        out.append(f'<path android:fillType="evenOdd" android:fillColor="{ink}" '
+                   f'android:pathData="{head} {circle_path(44, -8, 11)}"/>')
+    else:
+        out.append(f'<path android:pathData="{head}">{head_fill}</path>')
+        out.append(f'<path android:pathData="{mouth}" android:strokeColor="#8C1B1F3B" android:strokeWidth="4" android:strokeLineCap="round"/>')
+        out.append(f'<path android:pathData="{circle_path(44, -8, 15)}" android:fillColor="#FFFFFFFF"/>')
+        out.append(f'<path android:pathData="{circle_path(48, -8, 7.5)}" android:fillColor="#FF1B1F3B"/>')
+    out.append("</group></group></vector>")
+    return "\n".join(out) + "\n"
+
+
+if os.path.isdir(RES):
+    os.makedirs(os.path.join(RES, "drawable"), exist_ok=True)
+    os.makedirs(os.path.join(RES, "mipmap-anydpi-v26"), exist_ok=True)
+    open(os.path.join(RES, "drawable", "ic_launcher_foreground.xml"), "w").write(layer(False))
+    open(os.path.join(RES, "drawable", "ic_launcher_monochrome.xml"), "w").write(layer(True))
+    open(os.path.join(RES, "values", "ic_launcher_colors.xml"), "w").write(
+        f'<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">{BG}</color>\n</resources>\n')
+    adaptive = ('<?xml version="1.0" encoding="utf-8"?>\n'
+                '<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">\n'
+                '    <background android:drawable="@color/ic_launcher_background"/>\n'
+                '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>\n'
+                '    <monochrome android:drawable="@drawable/ic_launcher_monochrome"/>\n'
+                '</adaptive-icon>\n')
+    for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+        open(os.path.join(RES, "mipmap-anydpi-v26", name), "w").write(adaptive)
