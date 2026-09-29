@@ -10,7 +10,7 @@
     <string name="mode_direct">Direct touch</string>
     <string name="mode_direct_hint">Touch the screen as a touchscreen: taps and drags go where your finger is.</string>
     <string name="mode_trackpad">Trackpad</string>
-    <string name="mode_trackpad_hint">Drag to move the pointer. Tap to click, tap then drag to hold the button, two-finger tap for right click, three-finger tap for middle click, two-finger drag to scroll.</string>
+    <string name="mode_trackpad_hint">Drag to move the pointer. Tap to click. Long-press, or tap then drag, to hold the button (move windows, select text), two-finger tap for right click, three-finger tap for middle click, two-finger drag to scroll.</string>
     <string name="pointer_speed">Pointer speed: %1$.2fx</string>
     <string name="tap_to_click">Tap to click</string>
     <string name="back_button">Back button</string>

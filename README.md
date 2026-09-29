@@ -356,7 +356,8 @@ with KWin installed.
 
 4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ switches between
    **direct touch** and **trackpad** (tap to click, two-finger tap for right
-   click, two-finger drag to scroll, tap-and-drag to hold).
+   click, two-finger drag to scroll, long-press or tap-and-drag to hold, e.g. to
+   move a window).
 
 **Optional:** `chameleon-vendor-install` registers the EGL vendor with glvnd
 for all Termux programs (`--remove` undoes it; removing the package does too).

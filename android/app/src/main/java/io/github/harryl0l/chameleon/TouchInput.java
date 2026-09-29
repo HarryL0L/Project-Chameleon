@@ -1,6 +1,9 @@
 package io.github.harryl0l.chameleon;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
+import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
 import android.view.MotionEvent;
 import android.view.View;
@@ -9,8 +12,9 @@ import android.view.View;
  * Turns touches and mouse events on the surface into input for KWin.
  *
  * Direct touch: every finger is a touch point where it lands.
- * Trackpad: one finger moves the pointer, a tap clicks, tap then drag holds
- * the button (drag and drop, selection), two-finger tap = right click,
+ * Trackpad: one finger moves the pointer, a tap clicks, tap then drag or a
+ * long press holds the button (moving windows, drag and drop, selection),
+ * two-finger tap = right click,
  * three-finger tap = middle click, two-finger drag scrolls.
  * A mouse always drives the pointer directly, in either mode.
  */
@@ -19,6 +23,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
 
     private static final long TAP_MS = 250;
     private static final long DOUBLE_TAP_MS = 300;
+    private static final long LONG_PRESS_MS = 500;
 
     private Mode mMode = Mode.DIRECT;
     private float mSpeed = 1f;
@@ -31,6 +36,17 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     private float mLastX, mLastY, mTravel;
     private boolean mDragging;
     private float mScrollX, mScrollY;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+    private View mView;
+    // One finger held still: press the button, as tap-then-drag does.
+    private final Runnable mLongPress = () -> {
+        if (mDragging || mMaxPointers != 1 || mTravel >= mTouchSlop)
+            return;
+        mDragging = true;
+        InputSender.button(InputSender.BTN_LEFT, true);
+        if (mView != null)
+            mView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+    };
 
     private int mMouseButtons;
 
@@ -47,6 +63,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     }
 
     private void reset() {
+        mHandler.removeCallbacks(mLongPress);
         if (mDragging)
             InputSender.button(InputSender.BTN_LEFT, false);
         mDragging = false;
@@ -136,9 +153,13 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                 if (mTapToClick && now - mLastTapUp < DOUBLE_TAP_MS) {
                     mDragging = true; // tap, then touch again: hold the button
                     InputSender.button(InputSender.BTN_LEFT, true);
+                } else {
+                    mView = v;
+                    mHandler.postDelayed(mLongPress, LONG_PRESS_MS);
                 }
                 break;
             case MotionEvent.ACTION_POINTER_DOWN:
+                mHandler.removeCallbacks(mLongPress);
                 mMaxPointers = Math.max(mMaxPointers, e.getPointerCount());
                 centroid(e, -1);
                 break;
@@ -150,6 +171,8 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                 centroid(e, -1);
                 float dx = mLastX - x, dy = mLastY - y;
                 mTravel += Math.abs(dx) + Math.abs(dy);
+                if (mTravel >= mTouchSlop)
+                    mHandler.removeCallbacks(mLongPress);
                 if (e.getPointerCount() == 1) {
                     if (dx != 0 || dy != 0)
                         InputSender.motion(InputSender.delta(dx * mSpeed, dy * mSpeed, w, h));
@@ -169,9 +192,10 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                 break;
             }
             case MotionEvent.ACTION_UP: {
+                mHandler.removeCallbacks(mLongPress);
                 boolean tap = mTapToClick && mTravel < mTouchSlop && now - mDownTime < TAP_MS;
                 if (mDragging) {
-                    InputSender.button(InputSender.BTN_LEFT, false); // a second tap: double click
+                    InputSender.button(InputSender.BTN_LEFT, false); // end of the drag (or a double click)
                     mDragging = false;
                     mLastTapUp = 0;
                 } else if (tap) {
