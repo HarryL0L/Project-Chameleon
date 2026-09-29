@@ -310,6 +310,13 @@ int main(void)
     CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0,
           "any other mode size accepted (1800x1080)");
     drmModeAtomicFree(req);
+    /* Right after a mode change KWin may still commit the old frame size. */
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_dst[2], 1800);
+    drmModeAtomicAddProperty(req, plane_id, p_dst[3], 1800);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) == 0,
+          "plane bigger than the mode accepted (clipped, as real drivers do)");
+    drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, rotated_blob);
 
     printf("page flips (presenter at 120 Hz)\n");

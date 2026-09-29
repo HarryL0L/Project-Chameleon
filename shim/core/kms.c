@@ -565,6 +565,17 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
     struct kms_state s = g_state;
     s.in_fence = -1;
+    /* A refused real commit is a bug somewhere; say why (tests fail often). */
+    static int refusals;
+#define REFUSE(err, ...)                                                                 \
+    do {                                                                                 \
+        if (!(a->flags & DRM_MODE_ATOMIC_TEST_ONLY) && refusals < 20) {                 \
+            refusals++;                                                                  \
+            cham_log("refusing KWin's commit: " __VA_ARGS__);                            \
+        }                                                                                \
+        return (err);                                                                    \
+    } while (0)
+
     const uint32_t *objs = U2P(a->objs_ptr), *counts = U2P(a->count_props_ptr), *props = U2P(a->props_ptr);
     const uint64_t *values = U2P(a->prop_values_ptr);
     uint64_t k = 0;
@@ -572,7 +583,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         for (uint32_t j = 0; j < counts[i]; j++, k++) {
             int ret = set_prop(&s, objs[i], props[k], values[k]);
             if (ret)
-                return ret;
+                REFUSE(ret, "object %u property %u = %llu", objs[i], props[k], (unsigned long long)values[k]);
         }
     }
 
@@ -580,29 +591,36 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     const struct drm_mode_modeinfo *old_mode = state_mode(&g_state);
     int on = s.active && mode;
     if (mode && (!mode->hdisplay || !mode->vdisplay || mode->hdisplay > 16384 || mode->vdisplay > 16384))
-        return -EINVAL;
+        REFUSE(-EINVAL, "mode %ux%u", mode->hdisplay, mode->vdisplay);
     if (s.active && !mode)
-        return -EINVAL;
+        REFUSE(-EINVAL, "active CRTC without a mode");
     int modeset = s.active != g_state.active || (!mode != !old_mode) ||
                   (mode && old_mode && memcmp(mode, old_mode, sizeof *mode));
     if (modeset && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
-        return -EINVAL;
+        REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
     if (s.fb && !fb_find(s.fb) && s.fb != g_state.fb)
-        return -ENOENT;
+        REFUSE(-ENOENT, "unknown framebuffer %u", s.fb);
     if (s.fb) {
-        /* Only a full-screen primary plane: that's what the app shows. */
-        if (!on || s.plane_crtc != ID_CRTC || s.crtc_x || s.crtc_y || s.crtc_w != mode->hdisplay ||
-            s.crtc_h != mode->vdisplay)
-            return -EINVAL;
+        /* The primary plane must cover the whole CRTC, as with most real
+         * drivers (can_position = false); a bigger plane is clipped. KWin's
+         * first commit after a mode change can still carry the previous
+         * frame's size. The app shows the buffer, fitted to its window. */
+        if (!on || s.plane_crtc != ID_CRTC)
+            REFUSE(-EINVAL, "framebuffer on a CRTC that is off");
+        if (s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
+            (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay)
+            REFUSE(-EINVAL, "plane %ux%u at %d,%d doesn't cover the %ux%u mode", s.crtc_w, s.crtc_h, s.crtc_x,
+                   s.crtc_y, mode->hdisplay, mode->vdisplay);
     } else if (s.plane_crtc) {
-        return -EINVAL;
+        REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
     }
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
         if (!on)
-            return -EINVAL;
+            REFUSE(-EINVAL, "page-flip event with the CRTC off");
         if (link_flip_pending_locked())
             return -EBUSY;
     }
+#undef REFUSE
     if (a->flags & DRM_MODE_ATOMIC_TEST_ONLY)
         return 0;
 

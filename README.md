@@ -97,6 +97,9 @@ is Android. KWin and the app talk over one Unix socket,
 - **Page flips:** when SurfaceFlinger latches a frame, the app sends
   `FRAME_DONE`, which the shim turns into KWin's page-flip event. KWin's
   frame pacing therefore follows the real display.
+- **Back from the background:** Android destroys the surface while the app
+  is hidden. The app keeps its copy of the last frame and shows it again on
+  the new surface, since KWin only draws when something changes.
 - **Input:** touches are sent as direct touch or trackpad gestures (your
   choice in settings). Mouse and hardware keys are forwarded, and the
   on-screen keyboard comes with an extra row (Esc, Tab, sticky Ctrl/Alt,

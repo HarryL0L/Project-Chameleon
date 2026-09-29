@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include <atomic>
+#include <cstdint>
 #include <cstdlib>
 #include <mutex>
 #include <string>
@@ -83,6 +84,12 @@ bool g_vote_dirty = false;
 bool g_copy_mode = false;    // negotiated per connection via HELLO
 PoolBuf g_pool[kPoolSize];
 int64_t g_pool_displayed = -1;
+// The pool buffer on screen when the surface went away (app in the
+// background), shown again on the next surface: KWin only draws when
+// something changes, so it may send nothing new for a long time.
+int64_t g_pool_last = -1;
+uint64_t g_pool_last_serial = 0;
+uint64_t g_pool_last_gen = 0;
 uint64_t g_pool_serial = 0;
 
 // API 30; resolved at runtime because minSdk is 29.
@@ -484,6 +491,35 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     ASurfaceTransaction_delete(txn);
 }
 
+// Puts the last KWin frame back on a new surface (see g_pool_last).
+void reshow_last_locked()
+{
+    if (!g_sc || !g_copy_mode || g_client < 0 || g_pool_displayed >= 0 || g_pool_last < 0 ||
+        g_pool_last_gen != g_client_gen || g_width <= 0 || g_height <= 0)
+        return;
+    PoolBuf &p = g_pool[g_pool_last];
+    int64_t idx = g_pool_last;
+    g_pool_last = -1;
+    if (!p.ahb || p.held || p.serial != g_pool_last_serial)
+        return;
+    ASurfaceTransaction *txn = ASurfaceTransaction_create();
+    ASurfaceTransaction_setBuffer(txn, g_sc, p.ahb, p.release_fence);  // takes ownership
+    p.release_fence = -1;
+    Placement pl = place(p.width, p.height, g_width, g_height);
+    ASurfaceTransaction_setGeometry(txn, g_sc, pl.src, pl.dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
+    ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
+    ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    p.held = true;
+    g_pool_displayed = idx;
+    // No producer frame behind it: a generation that never matches, so no
+    // FRAME_DONE goes out.
+    auto *ctx = new FrameCtx{UINT64_MAX, g_sc, (uint32_t)idx, -1, 0, false, {1}, true, 0};
+    ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
+    ASurfaceTransaction_apply(txn);
+    ASurfaceTransaction_delete(txn);
+    LOGI("showing the last frame again until KWin draws a new one");
+}
+
 void present(uint32_t id, uint64_t frame, int fence)
 {
     std::lock_guard<std::mutex> lock(g_lock);
@@ -753,6 +789,7 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceChanged(JNIEnv 
     g_refresh_mhz = refresh_mhz;
     LOGI("surface %dx%d @ %d mHz", width, height, refresh_mhz);
     send_config_locked();
+    reshow_last_locked();
 }
 
 JNIEXPORT void JNICALL
@@ -770,6 +807,9 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
     // Detached from the display: SurfaceFlinger drops every pool buffer.
     for (PoolBuf &p : g_pool)
         p.held = false;
+    g_pool_last = g_pool_displayed;
+    g_pool_last_serial = g_pool_displayed >= 0 ? g_pool[g_pool_displayed].serial : 0;
+    g_pool_last_gen = g_client_gen;
     g_pool_displayed = -1;
     if (g_displayed >= 0)
         send_locked(CHAM_RELEASE, (uint32_t)g_displayed, 0, 0);
