@@ -270,6 +270,13 @@ public class PresenterActivity extends Activity
             bottom = mImeBottom;
             if (mExtraKeys.getVisibility() == View.VISIBLE)
                 bottom += mExtraKeys.getHeight();
+            // A full-size keyboard in landscape can leave a strip a couple of
+            // hundred pixels tall, shorter than Plasma's panel. Below 40% of
+            // the window the keyboard covers the desktop instead.
+            View root = (View) mSurface.getParent();
+            int height = root != null ? root.getHeight() : 0;
+            if (height > 0 && height - bottom < height * 2 / 5)
+                bottom = 0;
         }
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mSurface.getLayoutParams();
         if (lp == null || lp.bottomMargin == bottom)
