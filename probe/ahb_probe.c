@@ -173,6 +173,9 @@ static struct {
 /* Context flavours: the probe's own, and what KWin 6.7 asks for. */
 enum ctx_kind { CTX_PLAIN3, CTX_V2, CTX_V2_ROBUST, CTX_V2_PRIORITY, CTX_KWIN };
 static enum ctx_kind g_ctx_kind = CTX_PLAIN3;
+/* Like KWin: a global share context first, then the one used for rendering,
+ * created sharing with it. */
+static int g_ctx_shared;
 
 /* ---- reporting ------------------------------------------------------------ */
 
@@ -217,10 +220,17 @@ static const char *libdir(void)
     return sizeof(void *) == 8 ? "/system/lib64" : "/system/lib";
 }
 
+/* CHAMELEON_PROBE_LIBDIR=<kwin-shim dir> runs everything through the shim's
+ * libEGL.so.1 / libGLESv2.so.2 (as KWin does; also LD_PRELOAD libchameleon.so
+ * and put the dir in LD_LIBRARY_PATH). */
 static void *open_lib(const char *name)
 {
     char path[256], msg[512];
-    snprintf(path, sizeof path, "%s/%s", libdir(), name);
+    const char *shim = getenv("CHAMELEON_PROBE_LIBDIR");
+    if (shim && *shim && strcmp(name, "libnativewindow.so") != 0)
+        snprintf(path, sizeof path, "%s/%s", shim, strcmp(name, "libEGL.so") == 0 ? "libEGL.so.1" : "libGLESv2.so.2");
+    else
+        snprintf(path, sizeof path, "%s/%s", libdir(), name);
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     snprintf(msg, sizeof msg, "%s%s%s", path, h ? "" : ": ", h ? "" : dlerror());
     result(h != NULL, 1, "dlopen", msg);
@@ -339,9 +349,17 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
         ctx_attribs[na++] = EGL_CONTEXT_PRIORITY_HIGH_IMG;
     }
     ctx_attribs[na] = EGL_NONE;
-    EGLContext ctx = EGL_NO_CONTEXT;
+    EGLContext ctx = EGL_NO_CONTEXT, share = EGL_NO_CONTEXT;
+    if (g_ctx_shared && has_ext(exts, "EGL_KHR_no_config_context")) {
+        share = egl.CreateContext(dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctx_attribs);
+        result(share != EGL_NO_CONTEXT, 1, "global share context", "");
+        if (!share || egl.MakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, share) != EGL_TRUE)
+            return NULL;
+        gl.GetString(GL_VERSION); /* KWin queries its strings in each context */
+        gl.GetString(GL_EXTENSIONS);
+    }
     if (has_ext(exts, "EGL_KHR_no_config_context"))
-        ctx = egl.CreateContext(dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctx_attribs);
+        ctx = egl.CreateContext(dpy, EGL_NO_CONFIG_KHR, share, ctx_attribs);
     int used_config = 0;
     if (!ctx) {
         const EGLint cfg_attribs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES3_BIT_KHR,
@@ -647,6 +665,7 @@ static void test_uploads(void)
         enum upload_mode mode;
         enum ctx_kind ctx;
         const char *what;
+        int shared;
     } variants[] = {
         {UPLOAD_MALLOC, CTX_PLAIN3, "upload, GLES3 context, malloc'd (tagged) data"},
         {UPLOAD_MMAP, CTX_PLAIN3, "upload, GLES3 context, mmap'd data"},
@@ -656,12 +675,16 @@ static void test_uploads(void)
         {UPLOAD_MALLOC, CTX_KWIN, "upload, KWin's context (v2 + robust + high priority)"},
         {UPLOAD_MID_FRAME, CTX_PLAIN3, "30 uploads while an AHB framebuffer is bound"},
         {UPLOAD_MID_FRAME, CTX_KWIN, "same, KWin's context"},
+        {UPLOAD_MALLOC, CTX_V2, "upload, v2 context sharing a global context (KWin via the shim)", 1},
+        {UPLOAD_MID_FRAME, CTX_V2, "30 mid-frame uploads, same shared contexts", 1},
+        {UPLOAD_MID_FRAME, CTX_KWIN, "same, KWin's full attributes", 1},
     };
     for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
         fflush(stdout);
         pid_t pid = fork();
         if (pid == 0) {
             g_ctx_kind = variants[i].ctx;
+            g_ctx_shared = variants[i].shared;
             _exit(upload_child(variants[i].mode));
         }
         int status = 0;
