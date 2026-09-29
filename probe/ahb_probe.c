@@ -21,12 +21,15 @@
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 /* ---- minimal EGL / GLES / AHB declarations --------------------------------- */
@@ -144,6 +147,9 @@ static struct {
     void (*ReadPixels)(GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *);
     void (*Flush)(void);
     void (*Finish)(void);
+    void (*PixelStorei)(GLenum, GLint);
+    void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+    void (*TexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
     void (*EGLImageTargetTexture2DOES)(GLenum, void *);
 } gl;
 
@@ -248,6 +254,9 @@ static int load_libs(void)
     SYM(gl, ReadPixels, lgles, "libGLESv2", "glReadPixels");
     SYM(gl, Flush, lgles, "libGLESv2", "glFlush");
     SYM(gl, Finish, lgles, "libGLESv2", "glFinish");
+    SYM(gl, PixelStorei, lgles, "libGLESv2", "glPixelStorei");
+    SYM(gl, TexImage2D, lgles, "libGLESv2", "glTexImage2D");
+    SYM(gl, TexSubImage2D, lgles, "libGLESv2", "glTexSubImage2D");
 
     SYM(ahb, allocate, lnw, "libnativewindow", "AHardwareBuffer_allocate");
     SYM(ahb, release, lnw, "libnativewindow", "AHardwareBuffer_release");
@@ -543,6 +552,76 @@ static void test_cpu_readback(EGLDisplay dpy, uint32_t w, uint32_t h)
     ahb.release(buf);
 }
 
+/* ---- CPU -> texture uploads (what KWin does for every window) ----
+ * Each variant runs in a child process, so a driver crash is reported
+ * instead of killing the probe. KWin crashed in Mali's glTexImage2D
+ * (SIGBUS, NULL+0x29) on its first upload; the data pointer was a tagged
+ * heap pointer (0xb4...). These isolate whether tagging is the trigger. */
+
+enum upload_mode { UPLOAD_MALLOC, UPLOAD_MMAP, UPLOAD_UNTAGGED };
+
+#define GL_UNPACK_ROW_LENGTH 0x0CF2
+#define GL_TEXTURE_2D_ 0x0DE1
+
+static int upload_child(enum upload_mode mode)
+{
+    int devnull = open("/dev/null", O_WRONLY);
+    dup2(devnull, 1);
+    if (!load_libs())
+        return 10;
+    EGLContext ctx;
+    if (!init_egl(&ctx))
+        return 11;
+    const int w = 273, h = 273;
+    size_t size = (size_t)w * h * 4;
+    uint8_t *data;
+    if (mode == UPLOAD_MMAP) {
+        data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    } else {
+        data = malloc(size);
+        if (mode == UPLOAD_UNTAGGED)
+            data = (uint8_t *)((uintptr_t)data & ((1ull << 56) - 1));
+    }
+    memset(data, 0x80, size);
+    GLuint tex;
+    gl.GenTextures(1, &tex);
+    gl.BindTexture(GL_TEXTURE_2D_, tex);
+    gl.PixelStorei(GL_UNPACK_ROW_LENGTH, w); /* as KWin does */
+    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    gl.TexSubImage2D(GL_TEXTURE_2D_, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    gl.Finish();
+    return gl.GetError() == GL_NO_ERROR ? 0 : 12;
+}
+
+static void test_uploads(void)
+{
+    static const struct {
+        enum upload_mode mode;
+        const char *what;
+    } variants[] = {
+        {UPLOAD_MALLOC, "glTexImage2D from malloc'd (tagged 0xb4..) memory"},
+        {UPLOAD_MMAP, "glTexImage2D from mmap'd (untagged) memory"},
+        {UPLOAD_UNTAGGED, "glTexImage2D from malloc'd memory, tag stripped"},
+    };
+    for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == 0)
+            _exit(upload_child(variants[i].mode));
+        int status = 0;
+        waitpid(pid, &status, 0);
+        char msg[96];
+        if (WIFSIGNALED(status))
+            snprintf(msg, sizeof msg, "driver crashed: signal %d (%s)", WTERMSIG(status), strsignal(WTERMSIG(status)));
+        else
+            snprintf(msg, sizeof msg, "%s", WEXITSTATUS(status) == 0    ? "ok"
+                                            : WEXITSTATUS(status) == 10 ? "could not load the GL libraries"
+                                            : WEXITSTATUS(status) == 11 ? "could not create a GL context"
+                                                                        : "GL error");
+        result(WIFEXITED(status) && WEXITSTATUS(status) == 0, 0, variants[i].what, msg);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const uint32_t w = 256, h = 256;
@@ -556,6 +635,8 @@ int main(int argc, char **argv)
         void *h = dlopen(mali, RTLD_NOW | RTLD_LOCAL);
         result(h != NULL, 0, "direct dlopen of vendor driver", h ? mali : dlerror());
     }
+
+    test_uploads();
 
     if (!load_libs())
         goto done;

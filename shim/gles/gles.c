@@ -11,12 +11,20 @@
  *    RGBA instead of GL_BGRA_EXT, after Mali-G77 crashed (SIGBUS, NULL+0x29)
  *    inside glTexImage2D on the BGRA path. Override with
  *    CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
- *  - glTexImage2D: only to log uploads when CHAMELEON_GL_TRACE=1.
+ *  - glTex(Sub)Image2D/3D: Mali-G77 crashed (SIGBUS, NULL+0x29) in
+ *    glTexImage2D on KWin's very first, perfectly ordinary RGBA upload whose
+ *    data was a *tagged* heap pointer (0xb4...: Android sets the top byte,
+ *    which the CPU ignores but a kernel driver importing the memory may
+ *    not). Tagged source data is first copied to an untagged (mmap'd)
+ *    bounce buffer. CHAMELEON_GL_BOUNCE=0 disables that;
+ *    CHAMELEON_GL_TRACE=1 logs every upload.
  */
 #define _GNU_SOURCE
 #include <GLES3/gl32.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdint.h>
+#include <sys/mman.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -28,7 +36,14 @@ static const GLubyte *(GL_APIENTRY *p_glGetString)(GLenum);
 static const GLubyte *(GL_APIENTRY *p_glGetStringi)(GLenum, GLuint);
 static void (GL_APIENTRY *p_glGetIntegerv)(GLenum, GLint *);
 static void (GL_APIENTRY *p_glTexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void (GL_APIENTRY *p_glTexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum,
+                                             const void *);
+static void (GL_APIENTRY *p_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum, GLenum,
+                                          const void *);
+static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum,
+                                             GLenum, const void *);
 static int g_trace;
+static int g_bounce = 1;
 
 __attribute__((constructor)) static void load(void)
 {
@@ -45,8 +60,13 @@ __attribute__((constructor)) static void load(void)
     *(void **)&p_glGetStringi = dlsym(lib, "glGetStringi");
     *(void **)&p_glGetIntegerv = dlsym(lib, "glGetIntegerv");
     *(void **)&p_glTexImage2D = dlsym(lib, "glTexImage2D");
+    *(void **)&p_glTexSubImage2D = dlsym(lib, "glTexSubImage2D");
+    *(void **)&p_glTexImage3D = dlsym(lib, "glTexImage3D");
+    *(void **)&p_glTexSubImage3D = dlsym(lib, "glTexSubImage3D");
     const char *trace = getenv("CHAMELEON_GL_TRACE");
     g_trace = trace && *trace == '1';
+    const char *bounce = getenv("CHAMELEON_GL_BOUNCE");
+    g_bounce = !(bounce && *bounce == '0');
 }
 
 /* ---- hidden extensions ---- */
@@ -155,18 +175,165 @@ GL_APICALL void GL_APIENTRY glGetIntegerv(GLenum pname, GLint *data)
     p_glGetIntegerv(pname, data);
 }
 
+/* ---- texture uploads ---- */
+
+static size_t pixel_size(GLenum format, GLenum type)
+{
+    switch (type) {
+    case GL_UNSIGNED_SHORT_5_6_5:
+    case GL_UNSIGNED_SHORT_4_4_4_4:
+    case GL_UNSIGNED_SHORT_5_5_5_1:
+        return 2;
+    case GL_UNSIGNED_INT_2_10_10_10_REV:
+    case GL_UNSIGNED_INT_10F_11F_11F_REV:
+    case GL_UNSIGNED_INT_5_9_9_9_REV:
+    case GL_UNSIGNED_INT_24_8:
+        return 4;
+    case GL_FLOAT_32_UNSIGNED_INT_24_8_REV:
+        return 8;
+    }
+    size_t component;
+    switch (type) {
+    case GL_UNSIGNED_BYTE:
+    case GL_BYTE:
+        component = 1;
+        break;
+    case GL_UNSIGNED_SHORT:
+    case GL_SHORT:
+    case GL_HALF_FLOAT:
+    case 0x8D61: /* GL_HALF_FLOAT_OES */
+        component = 2;
+        break;
+    case GL_UNSIGNED_INT:
+    case GL_INT:
+    case GL_FLOAT:
+        component = 4;
+        break;
+    default:
+        return 0;
+    }
+    switch (format) {
+    case GL_RGBA:
+    case GL_RGBA_INTEGER:
+    case 0x80E1: /* GL_BGRA_EXT */
+        return 4 * component;
+    case GL_RGB:
+    case GL_RGB_INTEGER:
+        return 3 * component;
+    case GL_RG:
+    case GL_RG_INTEGER:
+    case GL_LUMINANCE_ALPHA:
+        return 2 * component;
+    case GL_RED:
+    case GL_RED_INTEGER:
+    case GL_ALPHA:
+    case GL_LUMINANCE:
+    case GL_DEPTH_COMPONENT:
+        return component;
+    }
+    return 0;
+}
+
+/* Returns data itself, or an untagged copy of everything GL will read from
+ * it under the current unpack state. The copy lives until the next upload
+ * on this thread (GL has consumed it by then: uploads copy synchronously). */
+static const void *untagged(const void *data, GLsizei width, GLsizei height, GLsizei depth, GLenum format,
+                            GLenum type)
+{
+    if (!g_bounce || !data || ((uintptr_t)data >> 56) == 0)
+        return data; /* nothing to do, or already untagged */
+    GLint pbo = 0;
+    p_glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pbo);
+    if (pbo)
+        return data; /* an offset into a buffer object, not a pointer */
+    size_t bpp = pixel_size(format, type);
+    if (!bpp || width <= 0 || height <= 0 || depth <= 0)
+        return data;
+    GLint row_length = 0, skip_pixels = 0, skip_rows = 0, alignment = 4, image_height = 0, skip_images = 0;
+    p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+    p_glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    p_glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+    p_glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    if (depth > 1) {
+        p_glGetIntegerv(GL_UNPACK_IMAGE_HEIGHT, &image_height);
+        p_glGetIntegerv(GL_UNPACK_SKIP_IMAGES, &skip_images);
+    }
+    size_t row_pixels = (size_t)(row_length > 0 ? row_length : width);
+    size_t stride = row_pixels * bpp;
+    if (alignment > 1)
+        stride = (stride + (size_t)alignment - 1) / (size_t)alignment * (size_t)alignment;
+    size_t image = (size_t)(image_height > 0 ? image_height : height) * stride;
+    size_t span = (size_t)(skip_images + depth - 1) * image + (size_t)(skip_rows + height - 1) * stride +
+                  (size_t)(skip_pixels + width) * bpp;
+
+    static __thread void *buf;
+    static __thread size_t buf_size;
+    if (span > buf_size) {
+        if (buf)
+            munmap(buf, buf_size);
+        size_t size = (span + 0xfffff) & ~(size_t)0xfffff;
+        buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (buf == MAP_FAILED) {
+            buf = NULL;
+            buf_size = 0;
+            return data;
+        }
+        buf_size = size;
+    }
+    memcpy(buf, data, span);
+    return buf;
+}
+
+static void trace_upload(const char *fn, GLenum internal, GLsizei w, GLsizei h, GLenum format, GLenum type,
+                         const void *data, const void *used)
+{
+    GLint row_length = 0;
+    p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+    cham_log("%s internal 0x%x %dx%d format 0x%x type 0x%x row_length %d data %p%s", fn, internal, w, h, format,
+             type, row_length, data, used != data ? " (bounced)" : "");
+}
+
 __attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width,
                                          GLsizei height, GLint border, GLenum format, GLenum type,
                                          const void *pixels)
 {
-    if (g_trace) {
-        GLint row_length = 0;
-        p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
-        cham_log("glTexImage2D target 0x%x level %d internal 0x%x %dx%d format 0x%x type 0x%x row_length %d data %p",
-                 target, level, internalformat, width, height, format, type, row_length, pixels);
-    }
-    p_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
+    const void *data = untagged(pixels, width, height, 1, format, type);
+    if (g_trace)
+        trace_upload("glTexImage2D", (GLenum)internalformat, width, height, format, type, pixels, data);
+    p_glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
+}
+
+__attribute__((visibility("default")))
+GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
+                                            GLsizei height, GLenum format, GLenum type, const void *pixels)
+{
+    const void *data = untagged(pixels, width, height, 1, format, type);
+    if (g_trace)
+        trace_upload("glTexSubImage2D", 0, width, height, format, type, pixels, data);
+    p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, data);
+}
+
+__attribute__((visibility("default")))
+GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width,
+                                         GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
+                                         const void *pixels)
+{
+    const void *data = untagged(pixels, width, height, depth, format, type);
+    if (g_trace)
+        trace_upload("glTexImage3D", (GLenum)internalformat, width, height, format, type, pixels, data);
+    p_glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, data);
+}
+
+__attribute__((visibility("default")))
+GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
+                                            GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
+                                            const void *pixels)
+{
+    const void *data = untagged(pixels, width, height, depth, format, type);
+    if (g_trace)
+        trace_upload("glTexSubImage3D", 0, width, height, format, type, pixels, data);
+    p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, data);
 }
 
 __attribute__((visibility("default")))

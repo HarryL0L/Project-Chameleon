@@ -640,12 +640,6 @@ GL_APICALL void GL_APIENTRY glTexParameteriv(GLenum target, GLenum pname, const 
     p_glTexParameteriv(target, pname, params);
 }
 
-static void (GL_APIENTRY *p_glTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels);
-GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, const void *pixels)
-{
-    p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pixels);
-}
-
 static void (GL_APIENTRY *p_glUniform1f)(GLint location, GLfloat v0);
 GL_APICALL void GL_APIENTRY glUniform1f(GLint location, GLfloat v0)
 {
@@ -842,18 +836,6 @@ static void (GL_APIENTRY *p_glDrawRangeElements)(GLenum mode, GLuint start, GLui
 GL_APICALL void GL_APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices)
 {
     p_glDrawRangeElements(mode, start, end, count, type, indices);
-}
-
-static void (GL_APIENTRY *p_glTexImage3D)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels);
-GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type, const void *pixels)
-{
-    p_glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, pixels);
-}
-
-static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels);
-GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type, const void *pixels)
-{
-    p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, pixels);
 }
 
 static void (GL_APIENTRY *p_glCopyTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
@@ -2231,7 +2213,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glTexParameterfv", (void **)&p_glTexParameterfv},
     {"glTexParameteri", (void **)&p_glTexParameteri},
     {"glTexParameteriv", (void **)&p_glTexParameteriv},
-    {"glTexSubImage2D", (void **)&p_glTexSubImage2D},
     {"glUniform1f", (void **)&p_glUniform1f},
     {"glUniform1fv", (void **)&p_glUniform1fv},
     {"glUniform1i", (void **)&p_glUniform1i},
@@ -2265,8 +2246,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glViewport", (void **)&p_glViewport},
     {"glReadBuffer", (void **)&p_glReadBuffer},
     {"glDrawRangeElements", (void **)&p_glDrawRangeElements},
-    {"glTexImage3D", (void **)&p_glTexImage3D},
-    {"glTexSubImage3D", (void **)&p_glTexSubImage3D},
     {"glCopyTexSubImage3D", (void **)&p_glCopyTexSubImage3D},
     {"glCompressedTexImage3D", (void **)&p_glCompressedTexImage3D},
     {"glCompressedTexSubImage3D", (void **)&p_glCompressedTexSubImage3D},

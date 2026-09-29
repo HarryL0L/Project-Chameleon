@@ -14,3 +14,17 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 "$CC" $CFLAGS -shared -o "$OUT/libGLESv2.so.2" shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c \
     -L"$OUT" -lchameleon -ldl -Wl,-soname,libGLESv2.so.2
 cp shim/chameleon-kwin "$OUT/"
+
+# Each replacement must export exactly what the Termux library it shadows
+# does (lists taken from Termux's glvnd 1.7 / Mesa 26.2 packages): a missing
+# symbol breaks KWin or epoxy at load time or, worse, silently skips a fix.
+NM="$(dirname "$CC")/llvm-nm"
+for lib in libGLESv2.so.2 libEGL.so.1 libgbm.so; do
+    "$NM" -D --defined-only "$OUT/$lib" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"
+    if ! diff -u "shim/exports/$lib.txt" "$OUT/.exports"; then
+        echo "build-android.sh: $lib exports differ from shim/exports/$lib.txt" >&2
+        exit 1
+    fi
+done
+rm -f "$OUT/.exports"
+echo "shim built in $OUT (exports verified)"
