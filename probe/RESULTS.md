@@ -18,3 +18,16 @@
   keyed by fd[1]'s inode. AHB stride is in pixels (×4 for bytes).
 - GPU render into AHB, fence fd export, zero-copy AHB over Unix socket, CPU
   readback: all pass.
+
+## Presenter + demo (realme RMX3031, 120 Hz panel, Android 13)
+
+Termux process renders on Mali into 3 AHBs → SOCK_SEQPACKET → presenter app
+→ `ASurfaceTransaction_setBuffer` (acquire fence) on a SurfaceView child,
+one frame in flight, FRAME_DONE on `setOnCommit`:
+
+| | fps shown | dropped | submit→latch | submit→FRAME_DONE |
+|---|---|---|---|---|
+| FRAME_DONE on OnComplete | ~60 | 0 | ~6 ms | ~15 ms (2 vsyncs) |
+| FRAME_DONE on OnCommit   | **119.9–120.0** | **0** | ~6.6 ms | **~7.2 ms** |
+
+1080×1800 floating window. Zero copies end to end.
