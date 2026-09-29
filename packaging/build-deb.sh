@@ -68,6 +68,8 @@ POSTRM
 chmod 755 "$ROOT/DEBIAN/postrm"
 
 mkdir -p "$OUTDIR"
-DEB="$OUTDIR/chameleon_${VERSION}_aarch64.deb"
+# No "~" in the file name (the package version keeps it): some Android file
+# managers and unzip apps can't open or extract such files.
+DEB="$OUTDIR/chameleon_$(printf '%s' "$VERSION" | tr '~' '-')_aarch64.deb"
 dpkg-deb --root-owner-group -Zxz --build "$ROOT" "$DEB" >/dev/null
 echo "$DEB"
