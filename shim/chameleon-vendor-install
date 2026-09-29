@@ -1,0 +1,30 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Registers the Chameleon EGL vendor with glvnd for every Termux program:
+# EGL/GLES on Android's GPU driver for the displays it handles: Wayland
+# windows under a Chameleon KWin, and off-screen rendering
+# (EGL_PLATFORM_SURFACELESS_MESA / _ANDROID_KHR). X11 windows and other
+# compositors still go to Mesa. `chameleon` works either way.
+#
+#   chameleon-vendor-install            register this copy with glvnd
+#   chameleon-vendor-install --remove   unregister
+#
+# glvnd tries vendors in file-name order: 10_chameleon.json before Mesa's
+# 50_mesa.json. Force a vendor for one program with
+#   __EGL_VENDOR_LIBRARY_FILENAMES=$PREFIX/share/glvnd/egl_vendor.d/50_mesa.json app
+set -e
+SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+LIB="$SHIM_DIR/libEGL_chameleon.so" # in place: $PREFIX/lib/chameleon with the package
+JSON="$PREFIX/share/glvnd/egl_vendor.d/10_chameleon.json"
+
+if [ "$1" = "--remove" ]; then
+    rm -f "$JSON"
+    echo "Chameleon EGL vendor removed"
+    exit 0
+fi
+if [ ! -f "$LIB" ]; then
+    echo "chameleon-vendor-install: $LIB is missing" >&2
+    exit 1
+fi
+mkdir -p "$(dirname "$JSON")"
+printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' "$LIB" > "$JSON"
+echo "Chameleon EGL vendor installed: $JSON"

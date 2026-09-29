@@ -1,0 +1,5 @@
+# Build outputs (the android/ ones are in android/.gitignore)
+/out/
+/probe/ahb_probe
+/termux/demo/chameleon_demo
+*.deb
