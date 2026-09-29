@@ -207,6 +207,9 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
 struct {
     unsigned presents, shown, copied, skipped;
     int64_t since;
+    bool sample;          // read back the next copied frame's centre pixel
+    uint8_t pixel[4];     // ...last result
+    bool have_pixel;
 } g_stats;
 
 int64_t mono_ns()
@@ -223,10 +226,14 @@ void stats_log_locked()
         g_stats.since = now;
     if (now - g_stats.since < 5000000000)
         return;
-    LOGI("last 5 s: %u presents, %u shown (%u via copy), %u skipped (no surface/buffer or copy failed); surface %dx%d",
-         g_stats.presents, g_stats.shown, g_stats.copied, g_stats.skipped, g_width, g_height);
+    char pixel[48] = "";
+    if (g_stats.have_pixel)
+        snprintf(pixel, sizeof pixel, "; centre pixel %u,%u,%u", g_stats.pixel[0], g_stats.pixel[1], g_stats.pixel[2]);
+    LOGI("last 5 s: %u presents, %u shown (%u via copy), %u skipped (no surface/buffer or copy failed); surface %dx%d%s",
+         g_stats.presents, g_stats.shown, g_stats.copied, g_stats.skipped, g_width, g_height, pixel);
     g_stats = {};
     g_stats.since = now;
+    g_stats.sample = true;
 }
 
 // ---- copy mode (runs on the server thread, which owns the GL context) ----
@@ -394,6 +401,13 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p.fbo);
     glBlitFramebuffer(0, 0, buf->width, buf->height, 0, 0, p.width, p.height, GL_COLOR_BUFFER_BIT,
                       buf->width == p.width && buf->height == p.height ? GL_NEAREST : GL_LINEAR);
+    if (g_stats.sample) {
+        // Once per stats period: is the copied frame actually non-black?
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, p.fbo);
+        glReadPixels(p.width / 2, p.height / 2, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, g_stats.pixel);
+        g_stats.have_pixel = true;
+        g_stats.sample = false;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     int blit_fence = gpu_fence();
 
