@@ -341,9 +341,18 @@ int main(void)
 
     if (getenv("EXPECT_DESKTOP_GL_QT")) {
         /* fake_qtgui.so is preloaded: a Qt built for desktop OpenGL */
-        printf("desktop-OpenGL Qt\n");
-        CHECK(eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, display, NULL) == EGL_NO_DISPLAY,
-              "its Wayland display is left to the other vendors (Mesa)");
+        const char *mode = getenv("CHAMELEON_EGL_QT");
+        int mesa = mode && strcmp(mode, "mesa") == 0;
+        printf("desktop-OpenGL Qt%s\n", mesa ? ", CHAMELEON_EGL_QT=mesa" : "");
+        EGLDisplay qdpy = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, display, NULL);
+        if (mesa) {
+            CHECK(qdpy == EGL_NO_DISPLAY, "its Wayland display is left to the other vendors (Mesa)");
+        } else {
+            eglInitialize(qdpy, NULL, NULL);
+            const char *vendor = eglQueryString(qdpy, EGL_VENDOR);
+            CHECK(qdpy != EGL_NO_DISPLAY && vendor && strstr(vendor, "NVIDIA") && strcmp(vendor, "NVIDIA") != 0,
+                  "GPU display, EGL_VENDOR steers Qt to OpenGL ES: '%s'", vendor ? vendor : "(null)");
+        }
         srv.stop = 1;
         pthread_join(thread, NULL);
         printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);

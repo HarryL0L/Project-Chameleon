@@ -332,26 +332,38 @@ static void (*k_registry_listener[])(void) = {
     (void (*)(void))registry_global_remove,
 };
 
-/* Android has OpenGL ES only. A Qt built for desktop OpenGL (Termux's
- * default) asks for EGL_OPENGL_BIT configs and an EGL_OPENGL_API context
- * whatever the display, so its windows are left to Mesa. Which kind of GL Qt
- * uses is fixed when Qt is built: QOpenGLContext::openGLModuleType() is a
- * constant (0 = LibGL, 1 = LibGLES). CHAMELEON_EGL_WAYLAND=all overrides. */
-static int app_needs_desktop_gl(void)
+/* Android has OpenGL ES only, and Termux's Qt is built for desktop OpenGL
+ * (QOpenGLContext::openGLModuleType(), a build-time constant: 0 = LibGL).
+ * Such a Qt asks EGL for EGL_OPENGL_BIT configs - except when the EGL vendor
+ * string contains "NVIDIA", whose EGL has no usable desktop GL either: then
+ * it picks OpenGL ES configs and contexts (qeglconvenience.cpp,
+ * QEglConfigChooser; q_glFormatFromConfig). So for a desktop-GL Qt on our
+ * Wayland display, EGL_VENDOR says so (cham_wl_vendor_string).
+ * CHAMELEON_EGL_QT=mesa leaves such apps to Mesa instead. */
+static int qt_is_desktop_gl(void)
 {
-    const char *force = getenv("CHAMELEON_EGL_WAYLAND");
-    if (force && strcmp(force, "all") == 0)
-        return 0;
     int (*qt_module_type)(void);
     *(void **)&qt_module_type = dlsym(RTLD_DEFAULT, "_ZN14QOpenGLContext16openGLModuleTypeEv");
-    if (qt_module_type && qt_module_type() == 0) {
-        static int logged;
-        if (!logged++)
-            cham_log("wayland: this Qt is built for desktop OpenGL, which Android's GPU driver lacks; its "
-                     "windows stay on Mesa (a Qt built with -DINPUT_opengl=es2 renders on the GPU)");
-        return 1;
+    return qt_module_type && qt_module_type() == 0;
+}
+
+static int app_needs_desktop_gl(void)
+{
+    const char *qt = getenv("CHAMELEON_EGL_QT");
+    return qt && strcmp(qt, "mesa") == 0 && qt_is_desktop_gl();
+}
+
+const char *cham_wl_vendor_string(void)
+{
+    static int qt = -1;
+    if (!g_wayland_used)
+        return NULL;
+    if (qt < 0) {
+        qt = qt_is_desktop_gl();
+        if (qt)
+            cham_log("wayland: desktop-OpenGL Qt: steering it to OpenGL ES (EGL vendor string with \"NVIDIA\")");
     }
-    return 0;
+    return qt ? "Chameleon (Android OpenGL ES; no desktop GL, like NVIDIA EGL for Qt)" : NULL;
 }
 
 /* The EGLDisplay for a wl_display: Android's, once we know we can serve it. */

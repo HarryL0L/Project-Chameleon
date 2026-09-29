@@ -372,6 +372,8 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
     REAL(const char *, eglQueryString, (EGLDisplay, EGLint))
     if (dpy == EGL_NO_DISPLAY && name == EGL_EXTENSIONS)
         return cham_core_present() ? k_client_extensions_kms : k_client_extensions;
+    if (name == EGL_VENDOR && cham_wl_vendor_string())
+        return cham_wl_vendor_string();
     const char *s = p_eglQueryString ? p_eglQueryString(dpy, name) : NULL;
     if (name != EGL_EXTENSIONS || !s)
         return s;

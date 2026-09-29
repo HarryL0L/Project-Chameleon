@@ -61,8 +61,9 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 - The mode is fixed when KWin starts; later app window size changes are
   scaled by the app.
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
-  a Qt built for desktop OpenGL (Termux's default) is detected and left on
-  Mesa, since Android has no desktop GL (`CHAMELEON_EGL_WAYLAND=all` overrides);
+  a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
+  through the EGL vendor string, as Qt does for NVIDIA's EGL
+  (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
   their buffers are registered with KWin's shim (`core/clients.c`) so KWin
   can import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.

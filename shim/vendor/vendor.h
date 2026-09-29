@@ -14,6 +14,7 @@ void cham_setEGLError(EGLint error);         /* reported by eglGetError */
 
 /* wayland.c: EGL_PLATFORM_WAYLAND_KHR */
 int cham_wl_platform_available(void);
+const char *cham_wl_vendor_string(void); /* EGL_VENDOR override, or NULL */
 EGLDisplay cham_wl_get_display(void *wl_display);
 EGLSurface cham_wl_create_window_surface(EGLDisplay dpy, EGLConfig config, void *native, int *handled);
 int cham_wl_is_surface(EGLSurface surface);
