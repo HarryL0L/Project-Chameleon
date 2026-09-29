@@ -5,8 +5,8 @@
 <h1 align="center">Project Chameleon</h1>
 
 <p align="center">
-  <b>A real KDE Plasma / KWin Wayland desktop on Android, drawn by the phone's own GPU.</b><br>
-  Unmodified <code>kwin_wayland</code> from Termux · vendor GLES driver · zero-copy <code>AHardwareBuffer</code>s · no root
+  <b>Linux Wayland desktops from Termux, shown in an Android app and drawn by the phone's own GPU.</b><br>
+  Unmodified compositors (KWin and Plasma today) · vendor GLES driver · zero-copy <code>AHardwareBuffer</code>s · no root
 </p>
 
 <p align="center">
@@ -15,8 +15,10 @@
 
 ---
 
-Chameleon lets the stock Termux build of **KWin** (and a whole Plasma session
-on top of it) run as if it were on a PC with a real graphics card:
+Chameleon gives Linux graphics software in Termux what it expects from a PC
+with a real graphics card, backed by Android: a display, GPU buffers and a GPU
+driver. The first target is the stock Termux build of **KWin**, with a whole
+Plasma session on top of it:
 
 - KWin runs with its normal **DRM backend**, not nested inside another
   compositor, and without a single patch.
@@ -29,6 +31,8 @@ on top of it) run as if it were on a PC with a real graphics card:
 
 It works by giving KWin the few things it expects from a Linux PC, a KMS
 display device, GBM buffers and an EGL driver, all backed by Android APIs.
+The same pieces are meant to carry other Wayland compositors and apps later;
+the EGL driver already renders Wayland apps on the GPU.
 
 ## How it works
 
@@ -37,7 +41,7 @@ display device, GBM buffers and an EGL driver, all backed by Android APIs.
 
 ```mermaid
 flowchart TB
-    subgraph T["Termux: Linux userland, same Android user as the app"]
+    subgraph T["Termux"]
         direction TB
         CMD(["chameleon startplasma-wayland"])
         APPS["Wayland apps<br/>Konsole, Dolphin, Firefox …"]
@@ -331,9 +335,18 @@ with KWin installed.
 
    ```sh
    apt install /sdcard/Download/chameleon-*/chameleon_*_aarch64.deb
+   ```
 
-   chameleon kwin_wayland konsole           # KWin with a terminal
-   chameleon startplasma-wayland            # or a full Plasma session
+   Then start either KWin with a terminal:
+
+   ```sh
+   chameleon kwin_wayland konsole
+   ```
+
+   or a full Plasma session:
+
+   ```sh
+   chameleon startplasma-wayland
    ```
 
    Without the package, the artifact's `chameleon/` folder works too. Copy it
@@ -401,5 +414,6 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 
 - Not affiliated with KDE, Termux or Google. The "W" disc in the logo is a
   stylised nod to Wayland, not the official Wayland logo.
-- `shim/include/` vendors MIT-licensed headers from libdrm, Mesa (`gbm.h`)
-  and libglvnd.
+- Licence: [GPL-2.0-or-later](LICENSE), like KWin, whose process
+  `libchameleon.so` runs in. `shim/include/` vendors MIT-licensed headers
+  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences.

@@ -15,7 +15,7 @@
     <string name="tap_to_click">Tap to click</string>
     <string name="back_button">Back button</string>
     <string name="back_escape">Sends Esc</string>
-    <string name="back_leave">Leaves the app (KWin keeps running)</string>
+    <string name="back_leave">Leaves the app</string>
     <string name="mouse_hint">A connected mouse or touchpad always controls the pointer directly.</string>
     <string name="screen">Screen</string>
     <string name="orientation_auto">Rotate with the phone</string>

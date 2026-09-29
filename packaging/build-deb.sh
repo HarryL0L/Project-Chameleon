@@ -10,7 +10,7 @@
 #                           it would replace Mesa's for every program
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
 #   bin/chameleon-probe, bin/chameleon-demo
-#   share/doc/chameleon/README.md
+#   share/doc/chameleon/README.md, copyright (GPL-2.0-or-later)
 # Install on the phone: apt install ./chameleon_<version>_aarch64.deb
 set -e
 SHIM=${1:?built shim directory}
@@ -35,6 +35,7 @@ ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vend
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"
 install -m 755 "$DEMO" "$ROOT$PREFIX/bin/chameleon-demo"
 install -m 644 README.md "$ROOT$PREFIX/share/doc/chameleon/README.md"
+install -m 644 LICENSE "$ROOT$PREFIX/share/doc/chameleon/copyright"
 
 SIZE=$(du -sk "$ROOT$PREFIX" | cut -f1)
 cat > "$ROOT/DEBIAN/control" <<CONTROL
