@@ -21,7 +21,6 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -48,8 +47,6 @@ static wl_fixed_t fixed(double d)
 }
 
 /* ---- protocol definitions (what wayland-scanner would generate) ---- */
-
-#define k_null ((const struct wl_interface **)k_wl_null)
 
 /* org_kde_kwin_fake_input v6, plasma-wayland-protocols fake-input.xml */
 enum {
@@ -157,7 +154,7 @@ static int load_wayland(void)
     if (!lib)
         lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
-        cham_log("input disabled: cannot load libwayland-client: %s", dlerror());
+        cham_log("input and screen resizing disabled: cannot load libwayland-client: %s", dlerror());
         return loaded = 0;
     }
 #define W(field, name) (*(void **)&wl.field = dlsym(lib, name))
@@ -181,7 +178,7 @@ static int load_wayland(void)
 #undef W
     if (!wl.connect_to_fd || !wl.marshal_flags || !wl.add_listener || !wl.registry_iface || !wl.output_iface ||
         !wl.prepare_read || !wl.get_version || !wl.get_user_data || !wl.proxy_destroy) {
-        cham_log("input disabled: libwayland-client is too old (need wl_proxy_marshal_flags, 1.20+)");
+        cham_log("input and screen resizing disabled: libwayland-client is too old (need 1.20+)");
         return loaded = 0;
     }
     k_get_xdg_output_types[1] = wl.output_iface;
@@ -190,11 +187,6 @@ static int load_wayland(void)
 
 /* ---- registry / xdg_output listeners ---- */
 
-static struct wl_proxy *bind_global(uint32_t name, const struct wl_interface *iface, uint32_t version)
-{
-    return wl.marshal_flags(g_registry, 0 /* bind */, iface, version, 0, name, iface->name, version, NULL);
-}
-
 static void registry_global(void *data, struct wl_proxy *registry, uint32_t name, const char *iface,
                             uint32_t version)
 {
@@ -202,11 +194,11 @@ static void registry_global(void *data, struct wl_proxy *registry, uint32_t name
     (void)registry;
     if (strcmp(iface, "org_kde_kwin_fake_input") == 0 && !g_fake_input) {
         g_fake_input_version = version < 6 ? version : 6;
-        g_fake_input = bind_global(name, &k_fake_input_iface, g_fake_input_version);
+        g_fake_input = wl_bind(g_registry, name, &k_fake_input_iface, g_fake_input_version);
     } else if (strcmp(iface, "wl_output") == 0 && !g_output) {
-        g_output = bind_global(name, wl.output_iface, 1); /* no listener: its events are dropped */
+        g_output = wl_bind(g_registry, name, wl.output_iface, 1); /* no listener: its events are dropped */
     } else if (strcmp(iface, "zxdg_output_manager_v1") == 0 && !g_xdg_manager) {
-        g_xdg_manager = bind_global(name, &k_xdg_output_manager_iface, 1);
+        g_xdg_manager = wl_bind(g_registry, name, &k_xdg_output_manager_iface, 1);
     } else {
         output_global(g_registry, name, iface, version);
     }
@@ -327,7 +319,9 @@ static void screen_geometry(double *x, double *y, double *w, double *h)
         return;
     }
     uint32_t mw = 0, mh = 0;
-    link_mode_size(&mw, &mh);
+    kms_mode_size(&mw, &mh);
+    if (!mw || !mh)
+        link_app_size(&mw, &mh);
     *x = *y = 0;
     *w = mw ? mw : 1;
     *h = mh ? mh : 1;

@@ -5,7 +5,8 @@
  * opens and the app shrinks the desktop above it), the presenter sends a new
  * CONFIG. KWin can't see that as a hotplug (no udev here), so the shim asks
  * KWin itself, the way System Settings does: over its own Wayland connection
- * (input.c) it binds kde_output_management_v2 and kde_output_device_v2, and
+ * (input.c) it binds kde_output_management_v2 and kde_output_device_registry_v2
+ * (which hands out the kde_output_device_v2 objects), and
  *
  *   1. picks an existing mode of the output with the window's size, or else
  *   2. adds a custom mode of that size (set_custom_modes, replacing the one
@@ -32,8 +33,6 @@
 
 #include "internal.h"
 #include "wlclient.h"
-
-#define k_null ((const struct wl_interface **)k_wl_null)
 
 #include "output_proto.h"
 
@@ -366,13 +365,11 @@ void output_global(struct wl_proxy *registry, uint32_t name, const char *iface, 
 {
     if (strcmp(iface, "kde_output_management_v2") == 0 && !g_manager) {
         g_manager_version = version < OUTPUT_PROTO_VERSION ? version : OUTPUT_PROTO_VERSION;
-        g_manager = wl.marshal_flags(registry, 0 /* bind */, &k_om_iface, g_manager_version, 0, name,
-                                     k_om_iface.name, g_manager_version, NULL);
+        g_manager = wl_bind(registry, name, &k_om_iface, g_manager_version);
     } else if (strcmp(iface, "kde_output_device_registry_v2") == 0 && !g_device_registry) {
         if (version < OUTPUT_PROTO_VERSION) /* the registry exists from version 21 on */
             return;
-        g_device_registry = wl.marshal_flags(registry, 0 /* bind */, &k_od_registry_iface, OUTPUT_PROTO_VERSION, 0,
-                                             name, k_od_registry_iface.name, OUTPUT_PROTO_VERSION, NULL);
+        g_device_registry = wl_bind(registry, name, &k_od_registry_iface, OUTPUT_PROTO_VERSION);
         if (g_device_registry)
             wl.add_listener(g_device_registry, k_registry_listener, NULL);
     }

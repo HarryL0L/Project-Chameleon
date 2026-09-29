@@ -40,7 +40,6 @@ struct entry {
 
 static pthread_mutex_t g_entries_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct entry *g_entries;
-static unsigned g_count;
 
 CHAM_EXPORT AHardwareBuffer *cham_client_ahb_from_fd(int fd)
 {
@@ -69,7 +68,6 @@ static void forget(int client, uint32_t id, int all)
             *p = e->next;
             ahb_release(e->ahb);
             free(e);
-            g_count--;
         } else {
             p = &e->next;
         }
@@ -110,7 +108,6 @@ static int handle(int client)
         pthread_mutex_lock(&g_entries_lock);
         e->next = g_entries;
         g_entries = e;
-        g_count++;
         pthread_mutex_unlock(&g_entries_lock);
         reply(client, m.id, 1);
         return 1;
@@ -144,7 +141,7 @@ static int listen_at(const char *path)
 static void *clients_main(void *arg)
 {
     (void)arg;
-    char wayland[108] = "";
+    char wayland[sizeof(((struct sockaddr_un *)0)->sun_path)] = "";
     while (!wayland[0]) {
         input_socket_path(wayland, sizeof wayland);
         if (!wayland[0])

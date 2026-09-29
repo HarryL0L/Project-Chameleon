@@ -5,7 +5,10 @@
  * Opening the fake device path ($CHAMELEON_DRM_PATH, what KWIN_DRM_DEVICES
  * points at) returns the read end of a pipe: KWin polls and read()s DRM
  * events from it, and every DRM ioctl on it is answered by kms.c. stat() and
- * fstat() make it look like a DRM character device. Nothing else is touched.
+ * fstat() make it look like a DRM character device, and libdrm's
+ * drmGetDevice*() describe it. bind() is watched to learn KWin's Wayland
+ * socket (input.c), and the constructor hands KWin's children their
+ * original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides sigaction.)
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -17,7 +20,6 @@
 #include <sys/stat.h>
 #include <stddef.h>
 #include <sys/socket.h>
-#include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -25,11 +27,11 @@
 
 #include "internal.h"
 
-/* Everything below overrides libc/libdrm symbols, so it must be exported. */
-#pragma GCC visibility push(default)
-
 /* Minor < 64 is a primary node; real Android cards are 226:0. */
-const dev_t fake_rdev = (dev_t)((226u << 8) | 60u);
+static const dev_t fake_rdev = (dev_t)((226u << 8) | 60u);
+
+/* The overrides of libc/libdrm symbols below must be exported. */
+#pragma GCC visibility push(default)
 
 static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct fake_fd *g_fake_fds;
@@ -57,7 +59,7 @@ DECLARE_REAL(int, drmGetDevice, int, drmDevicePtr *)
 DECLARE_REAL(char *, drmGetDeviceNameFromFd2, int)
 DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 
-const char *fake_path(void)
+static const char *fake_path(void)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");
     return p && *p ? p : "/data/data/com.termux/files/usr/tmp/chameleon-card0";
@@ -68,7 +70,7 @@ static int is_fake_path(const char *path)
     return path && strcmp(path, fake_path()) == 0;
 }
 
-int real_fstat(int fd, struct stat *st)
+__attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
 {
     resolve_fstat();
     return REAL(fstat)(fd, st);

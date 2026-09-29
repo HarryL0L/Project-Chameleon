@@ -49,6 +49,7 @@ static struct {
     int (*unlock)(AHardwareBuffer *, int32_t *);
     const native_handle *(*get_native_handle)(const AHardwareBuffer *);
     int (*recv_handle)(int, AHardwareBuffer **);
+    int (*send_handle)(const AHardwareBuffer *, int);
 } ahb;
 
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -129,8 +130,16 @@ static int host_recv(int sock, AHardwareBuffer **out)
     *out = b;
     return 0;
 }
+/* Stands in for the AHardwareBuffer packet that follows BUFFER_ADD. */
+static int host_send(const AHardwareBuffer *b, int sock)
+{
+    (void)b;
+    char packet[16] = "fake-ahb";
+    return send(sock, packet, sizeof packet, MSG_NOSIGNAL) == (ssize_t)sizeof packet ? 0 : -1;
+}
 static int ahb_load(void)
 {
+    ahb.send_handle = host_send;
     ahb.allocate = host_allocate;
     ahb.release = host_release;
     ahb.describe = host_describe;
@@ -154,6 +163,7 @@ static int ahb_load(void)
         *(void **)&ahb.unlock = dlsym(lib, "AHardwareBuffer_unlock");
         *(void **)&ahb.get_native_handle = dlsym(lib, "AHardwareBuffer_getNativeHandle");
         *(void **)&ahb.recv_handle = dlsym(lib, "AHardwareBuffer_recvHandleFromUnixSocket");
+        *(void **)&ahb.send_handle = dlsym(lib, "AHardwareBuffer_sendHandleToUnixSocket");
     }
     loaded = lib && ahb.allocate && ahb.release && ahb.describe && ahb.get_native_handle;
     if (!loaded)
@@ -207,6 +217,11 @@ static int find_dmabuf_fd(const native_handle *nh)
 }
 
 /* ---- buffers from other processes (clients.c) ---- */
+
+int ahb_send(const AHardwareBuffer *b, int sock)
+{
+    return ahb_load() && ahb.send_handle ? ahb.send_handle(b, sock) : -1;
+}
 
 AHardwareBuffer *ahb_recv(int sock)
 {

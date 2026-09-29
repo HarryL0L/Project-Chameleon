@@ -108,7 +108,6 @@ struct kms_state {
 struct fb {
     uint32_t id;
     struct cham_bo *bo; /* holds a ref */
-    uint32_t width, height, format;
     struct fb *next;
 };
 
@@ -207,7 +206,7 @@ static struct blob *blob_find(uint32_t id)
     return NULL;
 }
 
-static uint64_t prop_value(uint32_t obj, uint32_t prop)
+static uint64_t prop_value(uint32_t prop)
 {
     const struct kms_state *s = &g_state;
     switch (prop) {
@@ -229,7 +228,6 @@ static uint64_t prop_value(uint32_t obj, uint32_t prop)
     case P_CRTC_H: return s->crtc_h;
     case P_IN_FENCE_FD: return (uint64_t)(int64_t)-1;
     }
-    (void)obj;
     return 0;
 }
 
@@ -282,7 +280,7 @@ static int get_connector(struct drm_mode_get_connector *c)
     static const uint32_t encs[] = {ID_ENCODER};
     uint64_t values[3];
     for (int i = 0; i < 3; i++)
-        values[i] = prop_value(ID_CONNECTOR, k_conn_props[i]);
+        values[i] = prop_value(k_conn_props[i]);
     COPY_OUT(c->modes_ptr, c->count_modes, &g_mode, 1u);
     COPY_OUT(c->encoders_ptr, c->count_encoders, encs, 1u);
     uint32_t n = 3;
@@ -362,7 +360,7 @@ static int obj_get_properties(struct drm_mode_obj_get_properties *o)
         uint64_t *values = U2P(o->prop_values_ptr);
         for (uint32_t i = 0; i < n; i++) {
             ids[i] = props[i];
-            values[i] = prop_value(o->obj_id, props[i]);
+            values[i] = prop_value(props[i]);
         }
     }
     o->count_props = n;
@@ -450,9 +448,6 @@ static int add_fb2(struct drm_mode_fb_cmd2 *c)
     struct fb *f = calloc(1, sizeof *f);
     f->id = g_next_object_id++;
     f->bo = bo;
-    f->width = c->width;
-    f->height = c->height;
-    f->format = c->pixel_format;
     bo_ref_locked(bo);
     f->next = g_fbs;
     g_fbs = f;
@@ -556,6 +551,22 @@ static const struct drm_mode_modeinfo *state_mode(const struct kms_state *s)
     return b ? b->data : NULL;
 }
 
+/* Refresh rate of a mode in mHz (KWin's custom modes follow the display). */
+static uint32_t mode_mhz(const struct drm_mode_modeinfo *m)
+{
+    uint64_t pixels = m ? (uint64_t)m->htotal * m->vtotal : 0;
+    return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : g_mode_mhz;
+}
+
+void kms_mode_size(uint32_t *width, uint32_t *height)
+{
+    pthread_mutex_lock(&g_lock);
+    const struct drm_mode_modeinfo *m = state_mode(&g_state);
+    *width = m ? m->hdisplay : 0;
+    *height = m ? m->vdisplay : 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (a->flags & ~(uint32_t)DRM_MODE_ATOMIC_FLAGS)
@@ -598,8 +609,6 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
                   (mode && old_mode && memcmp(mode, old_mode, sizeof *mode));
     if (modeset && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
         REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
-    if (s.fb && !fb_find(s.fb) && s.fb != g_state.fb)
-        REFUSE(-ENOENT, "unknown framebuffer %u", s.fb);
     /* A plane bigger than the CRTC is clipped, as with real drivers: KWin's
      * first commit after a mode change can still carry the previous frame's
      * size. A smaller one is only KWin putting its cursor alone on an empty
@@ -647,7 +656,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     if (bo && on && s.dpms == 0 && !partial)
         presented = link_present_locked(bo, in_fence, frame);
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
-        link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, g_mode_mhz);
+        link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, mode_mhz(mode));
     return 0;
 }
 

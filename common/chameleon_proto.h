@@ -1,5 +1,5 @@
 /*
- * Wire protocol between a Termux-side producer (demo, later the KWin shim)
+ * Wire protocol between a Termux-side producer (the KWin shim, or the demo)
  * and the presenter app.
  *
  * Transport: AF_UNIX SOCK_SEQPACKET. The presenter app is installed with

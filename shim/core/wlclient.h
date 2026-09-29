@@ -7,6 +7,7 @@
 #ifndef CHAM_WLCLIENT_H
 #define CHAM_WLCLIENT_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 struct wl_message {
@@ -50,6 +51,14 @@ extern struct cham_wl wl;
 
 /* An all-NULL types array for messages without object arguments. */
 extern const struct wl_interface *const k_wl_null[8];
+#define k_null ((const struct wl_interface **)k_wl_null)
+
+/* wl_registry.bind */
+static inline struct wl_proxy *wl_bind(struct wl_proxy *registry, uint32_t name, const struct wl_interface *iface,
+                                       uint32_t version)
+{
+    return wl.marshal_flags(registry, 0 /* bind */, iface, version, 0, name, iface->name, version, NULL);
+}
 
 typedef int32_t wl_fixed_t;
 

@@ -11,7 +11,6 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
-#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -19,7 +18,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#include <dlfcn.h>
 #include <drm.h>
 
 #include "../../common/cham_io.h"
@@ -30,7 +28,7 @@
 static int g_sock = -1;
 static uint64_t g_gen;              /* bumped per presenter connection */
 static struct cham_bo *g_slots[MAX_SLOTS];
-static uint32_t g_cfg_w, g_cfg_h, g_cfg_mhz;
+static uint32_t g_cfg_w, g_cfg_h;
 static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
 static uint32_t g_first_w, g_first_h, g_first_mhz; /* ...and what it said */
 static pthread_cond_t g_cond;
@@ -66,8 +64,6 @@ static void stats_maybe_log_locked(void)
     memset(&g_stats, 0, sizeof g_stats);
     g_stats.since = now;
 }
-
-static int (*send_ahb)(const AHardwareBuffer *, int);
 
 static const char *socket_path(void)
 {
@@ -180,7 +176,7 @@ int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
             cham_log("presenter buffer table full");
             return 0;
         }
-        if (send_msg_locked(CHAM_BUFFER_ADD, (uint32_t)slot, 0, 0, -1) < 0 || send_ahb(bo->ahb, g_sock) != 0) {
+        if (send_msg_locked(CHAM_BUFFER_ADD, (uint32_t)slot, 0, 0, -1) < 0 || ahb_send(bo->ahb, g_sock) != 0) {
             cham_log("cannot send buffer to the presenter");
             return 0;
         }
@@ -222,12 +218,11 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
     case CHAM_CONFIG:
         g_cfg_w = CHAM_CONFIG_WIDTH(m);
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
-        g_cfg_mhz = (uint32_t)m->b;
         if (g_cfg_w && g_cfg_h && !g_cfg_seen) {
             g_cfg_seen = 1;
             g_first_w = g_cfg_w;
             g_first_h = g_cfg_h;
-            g_first_mhz = g_cfg_mhz;
+            g_first_mhz = (uint32_t)m->b;
         }
         pthread_cond_broadcast(&g_cond);
         if (g_cfg_w && g_cfg_h)
@@ -316,16 +311,6 @@ static void *reader_main(void *arg)
     return NULL;
 }
 
-#ifdef CHAM_HOST_TEST
-/* Stands in for the AHardwareBuffer packet that follows BUFFER_ADD. */
-static int host_send_ahb(const AHardwareBuffer *b, int sock)
-{
-    (void)b;
-    char packet[16] = "fake-ahb";
-    return send(sock, packet, sizeof packet, MSG_NOSIGNAL) == (ssize_t)sizeof packet ? 0 : -1;
-}
-#endif
-
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 
 static void start_threads(void)
@@ -334,18 +319,6 @@ static void start_threads(void)
     pthread_condattr_init(&attr);
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     pthread_cond_init(&g_cond, &attr);
-
-#ifdef CHAM_HOST_TEST
-    send_ahb = host_send_ahb;
-#else
-    void *lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so" : "/system/lib/libnativewindow.so",
-                       RTLD_NOW | RTLD_LOCAL);
-    *(void **)&send_ahb = lib ? dlsym(lib, "AHardwareBuffer_sendHandleToUnixSocket") : NULL;
-#endif
-    if (!send_ahb) {
-        cham_log("AHardwareBuffer_sendHandleToUnixSocket unavailable; nothing can be shown");
-        return;
-    }
 
     pthread_t t;
     pthread_create(&t, NULL, reader_main, NULL);
@@ -359,11 +332,11 @@ void link_start(void)
     pthread_once(&g_once, start_threads);
 }
 
-void link_mode_size(uint32_t *width, uint32_t *height)
+void link_app_size(uint32_t *width, uint32_t *height)
 {
     pthread_mutex_lock(&g_lock);
-    *width = g_first_w;
-    *height = g_first_h;
+    *width = g_cfg_w;
+    *height = g_cfg_h;
     pthread_mutex_unlock(&g_lock);
 }
 

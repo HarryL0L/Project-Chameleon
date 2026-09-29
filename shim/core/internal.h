@@ -23,10 +23,8 @@ void bo_wait_release_fences_locked(void);
 AHardwareBuffer *ahb_recv(int sock);
 void ahb_release(AHardwareBuffer *b);
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
-
-/* ---- clients.c: buffers of apps rendering through the EGL vendor ---- */
-/* KWin's Wayland socket path, once known (env or bind()); "" if not yet. */
-void input_socket_path(char *out, size_t size);
+/* AHardwareBuffer_sendHandleToUnixSocket (the presenter link). */
+int ahb_send(const AHardwareBuffer *b, int sock);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);
@@ -40,9 +38,8 @@ void link_forget_bo_locked(struct cham_bo *bo);
 int link_flip_pending_locked(void);
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
                             uint32_t refresh_mhz);
-
-/* KMS mode size (the first surface size the presenter reported). */
-void link_mode_size(uint32_t *width, uint32_t *height);
+/* The app's surface size (last CONFIG), 0x0 while it has none. */
+void link_app_size(uint32_t *width, uint32_t *height);
 
 /* ---- input.c: app input -> KWin's fake input ---- */
 struct cham_msg;
@@ -50,6 +47,8 @@ struct cham_msg;
 void input_post(const struct cham_msg *m);
 /* KWin's Wayland socket, seen when it bind()s it. */
 void input_note_socket(const char *path);
+/* KWin's Wayland socket path, once known (env or bind()); "" if not yet. */
+void input_socket_path(char *out, size_t size);
 
 /* ---- output.c: KWin's screen follows the app's window (input thread) ---- */
 struct wl_proxy;
@@ -72,11 +71,11 @@ struct fake_fd {
     struct fake_fd *next;
 };
 void kms_init_once(void);
+/* Size of the mode KWin has set, 0x0 before the first modeset. */
+void kms_mode_size(uint32_t *width, uint32_t *height);
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or -errno */
 
 /* ---- interpose.c ---- */
 int real_fstat(int fd, struct stat *st);
-const char *fake_path(void);
-extern const dev_t fake_rdev;
 
 #endif
