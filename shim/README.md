@@ -8,13 +8,14 @@ app's screen, rendering with Android's GPU driver.
 | `libchameleon.so` (LD_PRELOAD) | the kernel | fake KMS device at `$PREFIX/tmp/chameleon-card0`: one DSI connector sized to the app, one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event |
 | `libgbm.so` (LD_LIBRARY_PATH) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL.so.1` (LD_LIBRARY_PATH) | glvnd's libEGL | forwards to `/system/lib64/libEGL.so` (→ vendor driver), adds the GBM platform and dmabuf import (as `AHardwareBuffer`) |
-| `libGLESv2.so.2` (symlink, made by the launcher) | glvnd's libGLESv2 | Android's `libGLESv2.so` |
+| `libGLESv2.so.2` (LD_LIBRARY_PATH) | glvnd's libGLESv2 | forwards all 358 GLES 3.2 entry points to Android's `libGLESv2.so`; `glShaderSource` first rewrites bare `GL_*` names in `#if` to `defined(GL_*)` (Mesa tolerates them, the spec and Mali don't) |
 
 ## Run
 
 1. Install `chameleon.apk` from the CI artifact and open it.
 2. Copy the artifact's `kwin-shim/` directory into Termux (not `/sdcard`,
-   which is `noexec`), then:
+   which is `noexec`). Replace an older copy completely (`rm -rf kwin-shim`
+   first), then:
 
 ```sh
 chmod +x kwin-shim/chameleon-kwin

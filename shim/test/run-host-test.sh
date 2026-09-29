@@ -15,3 +15,5 @@ cc $CFLAGS -Ishim/include -o "$OUT/kms_test" shim/test/kms_test.c "$OUT/libgbm.s
     -Wl,-rpath,"$OUT"
 CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" CHAMELEON_WAIT=5 \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
+cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles/glsl_fix.c
+"$OUT/glsl_fix_test"

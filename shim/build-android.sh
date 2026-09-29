@@ -11,4 +11,6 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" shim/core/*.c -ldl -Wl,-soname,libchameleon.so
 "$CC" $CFLAGS -shared -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon -Wl,-soname,libgbm.so
 "$CC" $CFLAGS -shared -o "$OUT/libEGL.so.1" shim/egl/egl.c -L"$OUT" -lchameleon -ldl -Wl,-soname,libEGL.so.1
+"$CC" $CFLAGS -shared -o "$OUT/libGLESv2.so.2" shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c \
+    -L"$OUT" -lchameleon -ldl -Wl,-soname,libGLESv2.so.2
 cp shim/chameleon-kwin "$OUT/"
