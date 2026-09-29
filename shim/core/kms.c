@@ -600,17 +600,18 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
     if (s.fb && !fb_find(s.fb) && s.fb != g_state.fb)
         REFUSE(-ENOENT, "unknown framebuffer %u", s.fb);
+    /* A plane bigger than the CRTC is clipped, as with real drivers: KWin's
+     * first commit after a mode change can still carry the previous frame's
+     * size. A smaller one is only KWin putting its cursor alone on an empty
+     * screen (nothing else ever reaches this plane: client buffers can't be
+     * scanned out); it is accepted but not shown, since the app shows whole
+     * buffers - the previous frame stays until a full one comes. */
+    int partial = 0;
     if (s.fb) {
-        /* The primary plane must cover the whole CRTC, as with most real
-         * drivers (can_position = false); a bigger plane is clipped. KWin's
-         * first commit after a mode change can still carry the previous
-         * frame's size. The app shows the buffer, fitted to its window. */
         if (!on || s.plane_crtc != ID_CRTC)
             REFUSE(-EINVAL, "framebuffer on a CRTC that is off");
-        if (s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
-            (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay)
-            REFUSE(-EINVAL, "plane %ux%u at %d,%d doesn't cover the %ux%u mode", s.crtc_w, s.crtc_h, s.crtc_x,
-                   s.crtc_y, mode->hdisplay, mode->vdisplay);
+        partial = s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
+                  (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay;
     } else if (s.plane_crtc) {
         REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
     }
@@ -643,7 +644,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
     uint64_t frame = ++g_frame;
     int presented = 0;
-    if (bo && on && s.dpms == 0)
+    if (bo && on && s.dpms == 0 && !partial)
         presented = link_present_locked(bo, in_fence, frame);
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
         link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, g_mode_mhz);

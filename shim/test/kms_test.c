@@ -292,7 +292,8 @@ int main(void)
 
     req = drmModeAtomicAlloc();
     drmModeAtomicAddProperty(req, plane_id, p_dst[0], 100);
-    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) != 0, "non-fullscreen plane refused");
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) == 0,
+          "smaller plane (KWin's cursor alone on an empty screen) accepted");
     drmModeAtomicFree(req);
 
     /* KWin's custom modes (the screen following a rotated window). */
@@ -303,8 +304,8 @@ int main(void)
     drmModeCreatePropertyBlob(fd, &rotated, sizeof rotated, &rotated_blob);
     req = drmModeAtomicAlloc();
     drmModeAtomicAddProperty(req, crtc_id, p_mode, rotated_blob);
-    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) != 0,
-          "other mode with the old plane size refused");
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0,
+          "other mode with the old plane size accepted (clipped / not shown)");
     drmModeAtomicAddProperty(req, plane_id, p_dst[2], 1800);
     drmModeAtomicAddProperty(req, plane_id, p_dst[3], 1080);
     CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0,
