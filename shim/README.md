@@ -53,14 +53,16 @@ with the probe: `CHAMELEON_PROBE_GLVND=1 CHAMELEON_EGL_DEFAULT=1 ./ahb_probe`.
 
 Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 `CHAMELEON_MODE=1080x2400@120` (mode if the app isn't open), `CHAMELEON_DPI`
-(default 400; decides KWin's default scale).
+(default 400; decides KWin's default scale), `CHAMELEON_RESIZE=0` (KWin's
+screen keeps its first size instead of following the app's window).
 
 ## Status / limits
 
 - Input: touch (direct or trackpad), mouse and keyboard from the app, injected
   through KWin's fake-input protocol (`core/input.c`).
-- The mode is fixed when KWin starts; later app window size changes are
-  scaled by the app.
+- KWin's screen follows the app's window (rotation, keyboard): the shim
+  switches KWin's mode over `kde_output_management_v2`, adding a custom mode
+  when needed (`core/output.c`).
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL

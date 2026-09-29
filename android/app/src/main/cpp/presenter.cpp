@@ -31,6 +31,7 @@
 #include <time.h>
 
 #include <atomic>
+#include <cstdlib>
 #include <mutex>
 #include <string>
 
@@ -236,6 +237,44 @@ void stats_log_locked()
     g_stats.sample = true;
 }
 
+// ---- placement ----
+
+// Where a bw x bh frame goes on the sw x sh surface. The KWin shim switches
+// KWin to the surface's size, but its modes are 8-pixel aligned in width, so
+// a frame up to 7 pixels bigger is cropped at the right/bottom and shown 1:1
+// (sharp). Any other size (a mode picked by hand, or the moment before KWin
+// follows a rotation) is scaled to fit, keeping its aspect ratio.
+struct Placement {
+    ARect src, dst;
+    bool exact;   // 1:1, no filtering
+    bool covers;  // dst is the whole surface
+};
+
+Placement place(int bw, int bh, int sw, int sh)
+{
+    Placement p{{0, 0, bw, bh}, {0, 0, sw, sh}, false, true};
+    if (bw >= sw && bh >= sh && bw - sw < 8 && bh - sh < 8) {
+        p.src = ARect{0, 0, sw, sh};
+        p.exact = true;
+        return p;
+    }
+    if (bw <= 0 || bh <= 0 || sw <= 0 || sh <= 0)
+        return p;
+    // Same aspect ratio (within a pixel): fill, as before.
+    int64_t fit_w = (int64_t)bw * sh / bh;
+    if (std::llabs(fit_w - sw) <= 1)
+        return p;
+    int dw = sw, dh = sh;
+    if (fit_w < sw)
+        dw = (int)fit_w;
+    else
+        dh = (int)((int64_t)bh * sw / bw);
+    int x = (sw - dw) / 2, y = (sh - dh) / 2;
+    p.dst = ARect{x, y, x + dw, y + dh};
+    p.covers = false;
+    return p;
+}
+
 // ---- copy mode (runs on the server thread, which owns the GL context) ----
 
 EGLDisplay g_dpy = EGL_NO_DISPLAY;
@@ -397,10 +436,17 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     p.release_fence = -1;
     gpu_wait(fence);            // the producer finished rendering
 
+    // Row 0 is the top in both buffers, so GL's y runs downwards here and
+    // the ARects apply as they are.
+    Placement pl = place(buf->width, buf->height, p.width, p.height);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, buf->fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p.fbo);
-    glBlitFramebuffer(0, 0, buf->width, buf->height, 0, 0, p.width, p.height, GL_COLOR_BUFFER_BIT,
-                      buf->width == p.width && buf->height == p.height ? GL_NEAREST : GL_LINEAR);
+    if (!pl.covers) {
+        glClearColor(0, 0, 0, 1);
+        glClear(GL_COLOR_BUFFER_BIT);
+    }
+    glBlitFramebuffer(pl.src.left, pl.src.top, pl.src.right, pl.src.bottom, pl.dst.left, pl.dst.top,
+                      pl.dst.right, pl.dst.bottom, GL_COLOR_BUFFER_BIT, pl.exact ? GL_NEAREST : GL_LINEAR);
     if (g_stats.sample) {
         // Once per stats period: is the copied frame actually non-black?
         glBindFramebuffer(GL_READ_FRAMEBUFFER, p.fbo);
@@ -462,9 +508,8 @@ void present(uint32_t id, uint64_t frame, int fence)
     ASurfaceTransaction *txn = ASurfaceTransaction_create();
     // Takes ownership of the fence; SurfaceFlinger waits on it, not us.
     ASurfaceTransaction_setBuffer(txn, g_sc, buf->ahb, fence);
-    ARect src{0, 0, buf->width, buf->height};
-    ARect dst{0, 0, g_width, g_height};
-    ASurfaceTransaction_setGeometry(txn, g_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
+    Placement pl = place(buf->width, buf->height, g_width, g_height);
+    ASurfaceTransaction_setGeometry(txn, g_sc, pl.src, pl.dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
     ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
     if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {

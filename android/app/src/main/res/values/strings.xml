@@ -17,5 +17,11 @@
     <string name="back_escape">Sends Esc</string>
     <string name="back_leave">Leaves the app (KWin keeps running)</string>
     <string name="mouse_hint">A connected mouse or touchpad always controls the pointer directly.</string>
+    <string name="screen">Screen</string>
+    <string name="orientation_auto">Rotate with the phone</string>
+    <string name="orientation_portrait">Portrait</string>
+    <string name="orientation_landscape">Landscape</string>
+    <string name="keyboard_resize">Shrink the desktop above the keyboard</string>
+    <string name="screen_hint">The desktop takes the size of this window: rotating the phone (or opening the keyboard, if enabled) resizes it, like plugging in a different monitor.</string>
     <string name="done">Done</string>
 </resources>

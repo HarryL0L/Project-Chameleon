@@ -295,6 +295,23 @@ int main(void)
     CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) != 0, "non-fullscreen plane refused");
     drmModeAtomicFree(req);
 
+    /* KWin's custom modes (the screen following a rotated window). */
+    drmModeModeInfo rotated = mode;
+    rotated.hdisplay = 1800;
+    rotated.vdisplay = 1080;
+    uint32_t rotated_blob = 0;
+    drmModeCreatePropertyBlob(fd, &rotated, sizeof rotated, &rotated_blob);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, crtc_id, p_mode, rotated_blob);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) != 0,
+          "other mode with the old plane size refused");
+    drmModeAtomicAddProperty(req, plane_id, p_dst[2], 1800);
+    drmModeAtomicAddProperty(req, plane_id, p_dst[3], 1080);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0,
+          "any other mode size accepted (1800x1080)");
+    drmModeAtomicFree(req);
+    drmModeDestroyPropertyBlob(fd, rotated_blob);
+
     printf("page flips (presenter at 120 Hz)\n");
     int ok = 1, busy_checked = 0;
     uint64_t t0 = now_ns();

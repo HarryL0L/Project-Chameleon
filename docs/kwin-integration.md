@@ -43,6 +43,30 @@ Implemented in `shim/core/input.c`:
 - `shim/test/input_test.c` runs the whole path against a real
   libwayland-server with a stub fake-input global.
 
+## Screen size: the output follows the app's window
+
+- No udev in the Termux package, so `DrmBackend::handleUdevEvent` never runs
+  and a changed connector is never re-read. The other paths to
+  `DrmGpu::updateOutputs()` (`repairPresentation()` after a failed commit)
+  would need a failing frame to trigger them.
+- Output management does work: `kde_output_management_v2` (v21 in 6.7.5) is
+  blacklisted for other clients but, like fake input, allowed for KWin's own
+  pid. `set_custom_modes` (v18+) makes `DrmOutput::refreshModes` add a
+  `DrmConnector::generateMode()` CVT mode, then `mode` switches to it through
+  `Workspace::applyOutputConfiguration` → atomic modeset.
+- libxcvt rounds `hdisplay` down to a multiple of 8, so `output.c` asks for
+  the width rounded up and the app crops the rest (`place()` in
+  `presenter.cpp`); `output_visible()` maps input onto the visible part.
+- The fake KMS device accepts any mode size (the plane must match the mode);
+  the connector keeps advertising only the app's size at startup.
+- KWin stores the custom mode and picks it again at the next start; the shim
+  then compares it with the app's size and switches if needed.
+- `kde_output_device_registry_v2` must be bound at v21+ (older binds are a
+  protocol error), so the device and its modes are v21 objects: the event
+  tables in `shim/core/output_proto.h` go up to v21.
+- `shim/test/output_test.c` plays KWin's side (device, modes, management,
+  CVT-like widths) against the real shim.
+
 ## Mali-G77: no GPU timer queries
 
 KWin measures render time with `GL_EXT_disjoint_timer_query`

@@ -7,8 +7,10 @@
  * commit that puts a framebuffer on the plane becomes a PRESENT to the app;
  * the app's FRAME_DONE becomes the page-flip event.
  *
- * The mode is fixed when the device is first opened (the app's surface size
- * and refresh rate); if the app's window changes later, the app scales.
+ * The connector's one mode is the app's surface size and refresh rate when
+ * the device is first opened. KWin may set any other mode (output.c adds
+ * custom modes to follow the app's window as it rotates or resizes); the app
+ * scales or crops whatever size arrives.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -577,7 +579,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     const struct drm_mode_modeinfo *mode = state_mode(&s);
     const struct drm_mode_modeinfo *old_mode = state_mode(&g_state);
     int on = s.active && mode;
-    if (mode && (mode->hdisplay != g_mode.hdisplay || mode->vdisplay != g_mode.vdisplay))
+    if (mode && (!mode->hdisplay || !mode->vdisplay || mode->hdisplay > 16384 || mode->vdisplay > 16384))
         return -EINVAL;
     if (s.active && !mode)
         return -EINVAL;
@@ -589,8 +591,8 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         return -ENOENT;
     if (s.fb) {
         /* Only a full-screen primary plane: that's what the app shows. */
-        if (!on || s.plane_crtc != ID_CRTC || s.crtc_x || s.crtc_y || s.crtc_w != g_mode.hdisplay ||
-            s.crtc_h != g_mode.vdisplay)
+        if (!on || s.plane_crtc != ID_CRTC || s.crtc_x || s.crtc_y || s.crtc_w != mode->hdisplay ||
+            s.crtc_h != mode->vdisplay)
             return -EINVAL;
     } else if (s.plane_crtc) {
         return -EINVAL;
@@ -616,6 +618,10 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = bo;
     g_state = s;
+
+    if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
+                            mode->vdisplay != old_mode->vdisplay))
+        cham_log("KWin set mode %ux%u", mode->hdisplay, mode->vdisplay);
 
     uint64_t frame = ++g_frame;
     int presented = 0;

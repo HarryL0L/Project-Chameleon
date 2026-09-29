@@ -7,7 +7,8 @@
  * and authenticate is accepted unconditionally). So a helper thread in this
  * process connects to KWin's Wayland socket as an ordinary client, binds
  * fake input plus xdg_output (for the screen's logical geometry), and turns
- * the app's CHAM_INPUT messages into fake-input requests.
+ * the app's CHAM_INPUT messages into fake-input requests. The same
+ * connection carries output.c's screen-size changes (CHAM_CONFIG).
  *
  * The socket path is taken from KWin's own bind() (interpose.c), or from
  * $CHAMELEON_WAYLAND_SOCKET when kwin_wayland_wrapper made the socket, and
@@ -30,44 +31,17 @@
 
 #include "../../common/chameleon_proto.h"
 #include "internal.h"
+#include "wlclient.h"
 
-/* ---- the slice of libwayland-client's ABI we use ---- */
+/* ---- libwayland-client, loaded at run time (wlclient.h) ---- */
 
-struct wl_message {
-    const char *name;
-    const char *signature;
-    const struct wl_interface **types;
-};
-struct wl_interface {
-    const char *name;
-    int version;
-    int method_count;
-    const struct wl_message *methods;
-    int event_count;
-    const struct wl_message *events;
-};
-struct wl_proxy;
-struct wl_display;
+struct cham_wl wl;
+const struct wl_interface *const k_wl_null[8];
 
-static struct {
-    struct wl_display *(*connect_to_fd)(int);
-    void (*disconnect)(struct wl_display *);
-    int (*roundtrip)(struct wl_display *);
-    int (*flush)(struct wl_display *);
-    int (*get_fd)(struct wl_display *);
-    int (*prepare_read)(struct wl_display *);
-    int (*read_events)(struct wl_display *);
-    void (*cancel_read)(struct wl_display *);
-    int (*dispatch_pending)(struct wl_display *);
-    int (*get_error)(struct wl_display *);
-    struct wl_proxy *(*marshal_flags)(struct wl_proxy *, uint32_t, const struct wl_interface *, uint32_t, uint32_t,
-                                      ...);
-    int (*add_listener)(struct wl_proxy *, void (**)(void), void *);
-    uint32_t (*get_version)(struct wl_proxy *);
-    const struct wl_interface *registry_iface, *output_iface;
-} wl;
+void wl_ignore_event(void)
+{
+}
 
-typedef int32_t wl_fixed_t;
 static wl_fixed_t fixed(double d)
 {
     return (wl_fixed_t)(d * 256.0);
@@ -75,7 +49,7 @@ static wl_fixed_t fixed(double d)
 
 /* ---- protocol definitions (what wayland-scanner would generate) ---- */
 
-static const struct wl_interface *k_null[8];
+#define k_null ((const struct wl_interface **)k_wl_null)
 
 /* org_kde_kwin_fake_input v6, plasma-wayland-protocols fake-input.xml */
 enum {
@@ -200,11 +174,13 @@ static int load_wayland(void)
     W(marshal_flags, "wl_proxy_marshal_flags");
     W(add_listener, "wl_proxy_add_listener");
     W(get_version, "wl_proxy_get_version");
+    W(get_user_data, "wl_proxy_get_user_data");
+    W(proxy_destroy, "wl_proxy_destroy");
     W(registry_iface, "wl_registry_interface");
     W(output_iface, "wl_output_interface");
 #undef W
     if (!wl.connect_to_fd || !wl.marshal_flags || !wl.add_listener || !wl.registry_iface || !wl.output_iface ||
-        !wl.prepare_read || !wl.get_version) {
+        !wl.prepare_read || !wl.get_version || !wl.get_user_data || !wl.proxy_destroy) {
         cham_log("input disabled: libwayland-client is too old (need wl_proxy_marshal_flags, 1.20+)");
         return loaded = 0;
     }
@@ -231,6 +207,8 @@ static void registry_global(void *data, struct wl_proxy *registry, uint32_t name
         g_output = bind_global(name, wl.output_iface, 1); /* no listener: its events are dropped */
     } else if (strcmp(iface, "zxdg_output_manager_v1") == 0 && !g_xdg_manager) {
         g_xdg_manager = bind_global(name, &k_xdg_output_manager_iface, 1);
+    } else {
+        output_global(g_registry, name, iface, version);
     }
 }
 
@@ -283,6 +261,7 @@ static void (*k_xdg_output_listener[])(void) = {
 
 static void disconnect_wayland(void)
 {
+    output_disconnected();
     if (g_display)
         wl.disconnect(g_display);
     g_display = NULL;
@@ -329,6 +308,7 @@ static int connect_wayland(void)
     }
     wl.roundtrip(g_display);
     cham_log("input: connected to KWin (fake input v%u)", g_fake_input_version);
+    output_connected(g_display);
     return 1;
 }
 
@@ -337,10 +317,13 @@ static int connect_wayland(void)
 static void screen_geometry(double *x, double *y, double *w, double *h)
 {
     if (g_logical.known) {
+        /* The app may crop a few pixels off a mode (output.c). */
+        double fx, fy;
+        output_visible(&fx, &fy);
         *x = g_logical.x;
         *y = g_logical.y;
-        *w = g_logical.w;
-        *h = g_logical.h;
+        *w = g_logical.w * fx;
+        *h = g_logical.h * fy;
         return;
     }
     uint32_t mw = 0, mh = 0;
@@ -419,6 +402,7 @@ static void *input_main(void *arg)
 {
     (void)arg;
     int warned = 0;
+    uint64_t next_connect = 0;
     for (;;) {
         struct pollfd p[2] = {{.fd = g_pipe[0], .events = POLLIN}, {.fd = -1, .events = POLLIN}};
         if (g_display) {
@@ -427,7 +411,11 @@ static void *input_main(void *arg)
             wl.flush(g_display);
             p[1].fd = wl.get_fd(g_display);
         }
-        int n = poll(p, 2, -1);
+        /* Output work may be waiting for a deadline, or for KWin's socket. */
+        int timeout = output_timeout_ms();
+        if (!g_display && output_pending() && (timeout < 0 || timeout > 1000))
+            timeout = 1000;
+        int n = poll(p, 2, timeout);
         if (g_display) {
             if (n > 0 && (p[1].revents & (POLLIN | POLLERR | POLLHUP)))
                 wl.read_events(g_display);
@@ -439,21 +427,33 @@ static void *input_main(void *arg)
                 disconnect_wayland();
             }
         }
-        if (n <= 0 || !(p[0].revents & POLLIN))
-            continue;
 
         struct cham_msg batch[64];
-        ssize_t got = read(g_pipe[0], batch, sizeof batch);
-        if (got <= 0)
-            continue;
-        if (!g_display && !connect_wayland()) {
-            if (!warned++)
-                cham_log("input: dropping input until KWin's Wayland socket is reachable");
-            continue;
+        ssize_t got = 0;
+        if (n > 0 && (p[0].revents & POLLIN))
+            got = read(g_pipe[0], batch, sizeof batch);
+        int have_input = 0;
+        for (size_t i = 0; got > 0 && i < (size_t)got / sizeof batch[0]; i++) {
+            if (batch[i].type == CHAM_CONFIG)
+                output_config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
+            else
+                have_input = 1;
         }
+
+        if (!g_display && (have_input || output_pending()) && now_ns() >= next_connect) {
+            if (!connect_wayland()) {
+                next_connect = now_ns() + 1000000000ull;
+                if (have_input && !warned++)
+                    cham_log("input: dropping input until KWin's Wayland socket is reachable");
+            }
+        }
+        if (!g_display)
+            continue;
         warned = 0;
-        for (size_t i = 0; i < (size_t)got / sizeof batch[0]; i++)
-            forward(&batch[i]);
+        for (size_t i = 0; have_input && i < (size_t)got / sizeof batch[0]; i++)
+            if (batch[i].type == CHAM_INPUT)
+                forward(&batch[i]);
+        output_tick();
         wl.flush(g_display);
     }
     return NULL;
@@ -472,6 +472,7 @@ static void start(void)
         pthread_detach(t);
 }
 
+/* CHAM_INPUT and CHAM_CONFIG messages, from the presenter link's thread. */
 void input_post(const struct cham_msg *m)
 {
     pthread_once(&g_once, start);

@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.graphics.Color;
 import android.graphics.Insets;
 import android.hardware.display.DisplayManager;
@@ -43,6 +44,10 @@ import android.widget.TextView;
  * Input goes back over the same socket: touches (direct or as a trackpad),
  * mouse, hardware keys and the Android keyboard. A small toolbar in the top
  * corner opens the keyboard and the settings.
+ *
+ * The surface's size goes to the producer too; the KWin shim makes KWin's
+ * screen follow it, so rotating the phone (and, if enabled, opening the
+ * keyboard, which shrinks the surface) resizes the desktop.
  */
 public class PresenterActivity extends Activity
         implements SurfaceHolder.Callback, DisplayManager.DisplayListener {
@@ -62,10 +67,14 @@ public class PresenterActivity extends Activity
     private static final String PREF_SPEED = "pointer_speed";
     private static final String PREF_TAP = "tap_to_click";
     private static final String PREF_BACK = "back_key";
+    private static final String PREF_ORIENTATION = "orientation";
+    private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
 
     private static boolean sStarted;
     private int mWidth, mHeight;
     private TextView mStatus;
+    private SurfaceView mSurface;
+    private int mImeBottom;
     private SharedPreferences mPrefs;
     private TouchInput mTouch;
     private final KeyInput mKeys = new KeyInput();
@@ -115,8 +124,10 @@ public class PresenterActivity extends Activity
         mPrefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         mTouch = new TouchInput(getResources().getDisplayMetrics().density);
         applyInputPrefs();
+        applyOrientation();
 
         SurfaceView view = new SurfaceView(this);
+        mSurface = view;
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
@@ -126,7 +137,8 @@ public class PresenterActivity extends Activity
         mStatus.setPadding(32, 96, 32, 32);
         mImeView = new ImeView(this, mKeys);
         FrameLayout root = new FrameLayout(this);
-        root.addView(view);
+        root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mStatus, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
         root.addView(mImeView, new FrameLayout.LayoutParams(1, 1));
@@ -134,6 +146,8 @@ public class PresenterActivity extends Activity
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
         root.addView(buildExtraKeys(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        // Not from inside the layout pass: the surface's size follows the row's.
+        mExtraKeys.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateSurfaceArea));
         setContentView(root);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -242,6 +256,41 @@ public class PresenterActivity extends Activity
     private void setKeyboardShown(boolean shown) {
         mKeyboardShown = shown;
         mExtraKeys.setVisibility(shown ? View.VISIBLE : View.GONE);
+        updateSurfaceArea();
+    }
+
+    /**
+     * With "shrink the desktop above the keyboard", the surface ends above the
+     * keyboard and the extra keys; its new size reaches KWin as a new screen
+     * size. Otherwise the keyboard covers the bottom of the desktop.
+     */
+    private void updateSurfaceArea() {
+        int bottom = 0;
+        if (mKeyboardShown && mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true)) {
+            bottom = mImeBottom;
+            if (mExtraKeys.getVisibility() == View.VISIBLE)
+                bottom += mExtraKeys.getHeight();
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mSurface.getLayoutParams();
+        if (lp == null || lp.bottomMargin == bottom)
+            return;
+        lp.bottomMargin = bottom;
+        mSurface.setLayoutParams(lp);
+    }
+
+    private void applyOrientation() {
+        switch (mPrefs.getString(PREF_ORIENTATION, "auto")) {
+            case "portrait":
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT);
+                break;
+            case "landscape":
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE);
+                break;
+            default:
+                // Follows the sensor unless the user locked rotation.
+                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_USER);
+                break;
+        }
     }
 
     /** Keeps the toolbar clear of the cutout and the extra keys above the IME. */
@@ -253,10 +302,15 @@ public class PresenterActivity extends Activity
         boolean imeVisible = insets.isVisible(WindowInsets.Type.ime());
         int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mExtraKeys.getLayoutParams();
-        lp.bottomMargin = imeBottom;
-        mExtraKeys.setLayoutParams(lp);
+        if (lp.bottomMargin != imeBottom) {
+            lp.bottomMargin = imeBottom;
+            mExtraKeys.setLayoutParams(lp);
+        }
+        mImeBottom = imeBottom;
         if (imeVisible != mKeyboardShown)
             setKeyboardShown(imeVisible); // e.g. closed with the keyboard's own button
+        else
+            updateSurfaceArea();
     }
 
     @Override
@@ -370,6 +424,31 @@ public class PresenterActivity extends Activity
 
         box.addView(settingsLabel(getString(R.string.mouse_hint), false));
 
+        box.addView(settingsLabel(getString(R.string.screen), true));
+        RadioGroup orientation = new RadioGroup(this);
+        String[] orientationValues = {"auto", "portrait", "landscape"};
+        int[] orientationLabels = {R.string.orientation_auto, R.string.orientation_portrait,
+                R.string.orientation_landscape};
+        int[] orientationIds = new int[orientationValues.length];
+        String currentOrientation = mPrefs.getString(PREF_ORIENTATION, "auto");
+        for (int i = 0; i < orientationValues.length; i++) {
+            RadioButton b = new RadioButton(this);
+            b.setText(orientationLabels[i]);
+            orientationIds[i] = View.generateViewId();
+            b.setId(orientationIds[i]);
+            orientation.addView(b);
+            if (orientationValues[i].equals(currentOrientation))
+                orientation.check(orientationIds[i]);
+        }
+        if (orientation.getCheckedRadioButtonId() == View.NO_ID)
+            orientation.check(orientationIds[0]);
+        box.addView(orientation);
+        CheckBox keyboardResize = new CheckBox(this);
+        keyboardResize.setText(R.string.keyboard_resize);
+        keyboardResize.setChecked(mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true));
+        box.addView(keyboardResize);
+        box.addView(settingsLabel(getString(R.string.screen_hint), false));
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(box);
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -381,11 +460,22 @@ public class PresenterActivity extends Activity
                             .putFloat(PREF_SPEED, (speed.getProgress() + 25) / 100f)
                             .putBoolean(PREF_TAP, tap.isChecked())
                             .putString(PREF_BACK, back.getCheckedRadioButtonId() == backLeave.getId() ? "leave" : "escape")
+                            .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))
+                            .putBoolean(PREF_KEYBOARD_RESIZE, keyboardResize.isChecked())
                             .apply();
                     applyInputPrefs();
+                    applyOrientation();
+                    updateSurfaceArea();
                 })
                 .setOnDismissListener(d -> hideSystemBars())
                 .show();
+    }
+
+    private static String orientationValue(RadioGroup group, int[] ids, String[] values) {
+        for (int i = 0; i < ids.length; i++)
+            if (group.getCheckedRadioButtonId() == ids[i])
+                return values[i];
+        return values[0];
     }
 
     private Display display() {

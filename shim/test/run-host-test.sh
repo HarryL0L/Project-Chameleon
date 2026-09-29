@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds libchameleon.so + libgbm.so for the desktop (memfd instead of
 # AHardwareBuffer) and runs kms_test.c against the fake device with the
-# system's real libdrm, and the input path against a real Wayland server.
+# system's real libdrm, and the input and output paths against a real Wayland
+# server.
 # Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev.
 set -e
 cd "$(dirname "$0")/../.."
@@ -22,6 +23,11 @@ cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config
 mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
 CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/input_test"
+# KWin's screen follows the app's window (output management).
+cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/output_test" shim/test/output_test.c \
+    $(pkg-config --cflags --libs wayland-server)
+CHAMELEON_DRM_PATH="$OUT/card6" CHAMELEON_SOCKET="$OUT/presenter-output" XDG_RUNTIME_DIR="$OUT/runtime" \
+    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/output_test"
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
 # with a stand-in for Android's EGL/GLES driver.
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c

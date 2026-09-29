@@ -90,7 +90,10 @@ is Android. KWin and the app talk over one Unix socket,
 - A full-screen `SurfaceView` whose `ASurfaceControl` receives KWin's buffers
   with `ASurfaceTransaction_setBuffer`, together with KWin's acquire fence.
 - It reports the surface size and the panel's fastest refresh rate to KWin
-  (`CONFIG`). KWin sees them as the mode of a DSI connector.
+  (`CONFIG`). KWin sees them as the mode of a DSI connector, and the screen
+  follows the window when it rotates or resizes (see *Screen size* below).
+  Settings choose the orientation (rotate with the phone, portrait or
+  landscape) and whether the keyboard shrinks the desktop or covers it.
 - **Page flips:** when SurfaceFlinger latches a frame, the app sends
   `FRAME_DONE`, which the shim turns into KWin's page-flip event. KWin's
   frame pacing therefore follows the real display.
@@ -184,6 +187,46 @@ Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](s
   typed on the Android keyboard, arrives as typed.
 
 Code: [`shim/core/input.c`](shim/core/input.c), [`android/…/TouchInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/TouchInput.java), [`KeyInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/KeyInput.java)
+</details>
+
+<details>
+<summary><b>🔄 Screen size</b>: rotation and the keyboard resize the desktop</summary>
+
+- Rotating the phone, or opening the keyboard with *Shrink the desktop above
+  the keyboard* on, changes the app's surface size, and the app sends a new
+  `CONFIG`.
+- Termux's KWin has no udev, so it can't learn about the change as a
+  hotplug. Instead the shim asks KWin the way System Settings does: over the
+  same Wayland connection as input, it uses `kde_output_management_v2`. It
+  picks an existing mode of that size, or adds a custom mode
+  (`set_custom_modes`, replacing the one it added before) and then picks it.
+- KWin then does an ordinary modeset on the fake device, which accepts any
+  mode size, and lays out panels and windows for the new screen.
+- KWin's custom modes have widths in multiples of 8, so the width is rounded
+  up and the app crops the few extra pixels, keeping the image sharp. Input
+  is mapped to the visible part.
+- Only a change of the window counts, so a resolution picked by hand in
+  System Settings stays until the window changes again. Until KWin has
+  switched (or if it can't), the app scales the frame to fit and keeps its
+  aspect ratio. `CHAMELEON_RESIZE=0` keeps KWin's screen at its first size.
+
+```mermaid
+sequenceDiagram
+    participant A as Chameleon app
+    participant S as libchameleon.so (in KWin)
+    participant K as KWin
+    A->>S: CONFIG 2340x1080 (rotated)
+    Note over S: waits 250 ms for the size to settle
+    S->>K: set_custom_modes(2344x1080), apply
+    K-->>S: new mode listed, applied
+    S->>K: mode(2344x1080), apply
+    K->>S: atomic modeset (fake KMS device)
+    K-->>S: applied
+    S->>A: PRESENT 2344x1080 frames
+    Note over A: crops 4 px, shows 1:1
+```
+
+Code: [`shim/core/output.c`](shim/core/output.c), [`presenter.cpp`](android/app/src/main/cpp/presenter.cpp) (`place()`)
 </details>
 
 ### One frame, end to end
@@ -312,11 +355,11 @@ zero-copy producer for the app.
 |---|---|
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
-| [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, crash reporter |
+| [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, screen size, crash reporter |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
-| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input with real libwayland, vendor with real glvnd |
+| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
 | [`termux/demo/`](termux/demo/) | `chameleon_demo`: minimal zero-copy producer |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
@@ -348,7 +391,7 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 - [x] Touch, trackpad, mouse and keyboard input
 - [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
 - [x] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
-- [ ] Screen resize and rotation (keyboard-aware resizing, mini window)
+- [x] Screen resize and rotation (keyboard-aware resizing)
 - [ ] Xwayland acceleration
 
 ## Notes

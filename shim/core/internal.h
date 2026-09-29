@@ -46,9 +46,23 @@ void link_mode_size(uint32_t *width, uint32_t *height);
 
 /* ---- input.c: app input -> KWin's fake input ---- */
 struct cham_msg;
+/* CHAM_INPUT, and CHAM_CONFIG for output.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
 /* KWin's Wayland socket, seen when it bind()s it. */
 void input_note_socket(const char *path);
+
+/* ---- output.c: KWin's screen follows the app's window (input thread) ---- */
+struct wl_proxy;
+struct wl_display;
+void output_config(uint32_t width, uint32_t height, uint32_t refresh_mhz);
+void output_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version);
+void output_connected(struct wl_display *display);
+void output_disconnected(void);
+int output_pending(void);    /* work that needs a connection to KWin */
+int output_timeout_ms(void); /* until output_tick() has work, or -1 */
+void output_tick(void);
+/* Fraction of KWin's screen the app shows (it crops up to 7 pixels). */
+void output_visible(double *fx, double *fy);
 
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {

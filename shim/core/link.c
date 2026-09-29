@@ -230,6 +230,8 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             g_first_mhz = g_cfg_mhz;
         }
         pthread_cond_broadcast(&g_cond);
+        if (g_cfg_w && g_cfg_h)
+            input_post(m); /* output.c: KWin's screen follows the window */
         break;
     case CHAM_RELEASE:
         if (m->id < MAX_SLOTS && g_slots[m->id]) {
