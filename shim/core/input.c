@@ -9,7 +9,8 @@
  * fake input plus xdg_output (for the screen's logical geometry), and turns
  * the app's CHAM_INPUT messages into fake-input requests.
  *
- * The socket path is taken from KWin's own bind() (interpose.c), and
+ * The socket path is taken from KWin's own bind() (interpose.c), or from
+ * $CHAMELEON_WAYLAND_SOCKET when kwin_wayland_wrapper made the socket, and
  * libwayland-client is loaded with dlopen(), so nothing here depends on how
  * KWin was started. The link reader thread only writes messages into a pipe;
  * all Wayland calls happen on the input thread.
@@ -277,10 +278,17 @@ static void disconnect_wayland(void)
 
 static int connect_wayland(void)
 {
+    /* kwin_wayland_wrapper (Plasma) creates the socket and passes KWin only
+     * its fd, so KWin never binds it; bin/kwin_wayland then names it here. */
     char path[sizeof g_wayland_path];
-    pthread_mutex_lock(&g_path_lock);
-    memcpy(path, g_wayland_path, sizeof path);
-    pthread_mutex_unlock(&g_path_lock);
+    const char *env = getenv("CHAMELEON_WAYLAND_SOCKET");
+    if (env && *env) {
+        snprintf(path, sizeof path, "%s", env);
+    } else {
+        pthread_mutex_lock(&g_path_lock);
+        memcpy(path, g_wayland_path, sizeof path);
+        pthread_mutex_unlock(&g_path_lock);
+    }
     if (!path[0] || !load_wayland())
         return 0;
 

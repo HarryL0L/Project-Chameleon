@@ -17,13 +17,27 @@ app's screen, rendering with Android's GPU driver.
    first), then:
 
 ```sh
-chmod +x kwin-shim/chameleon-kwin kwin-shim/chameleon-vendor-install
-kwin-shim/chameleon-kwin            # or: kwin-shim/chameleon-kwin konsole
+chmod +x kwin-shim/chameleon* kwin-shim/bin/*
+kwin-shim/chameleon --install        # once: `chameleon` in $PREFIX/bin
+
+chameleon kwin_wayland               # just KWin
+chameleon kwin_wayland konsole       # KWin plus a first app
+chameleon startplasma-wayland        # a Plasma session
 ```
 
+`chameleon` puts `kwin-shim/bin` first in `PATH`, clears `DISPLAY` /
+`WAYLAND_DISPLAY` and runs the command (in a new D-Bus session if there is
+none). Every `kwin_wayland` started inside - directly, by
+`kwin_wayland_wrapper` or by `startplasma-wayland` - is then
+`bin/kwin_wayland`, which attaches the shim to that one process and runs the
+real, unmodified KWin. No `--drm` is needed anywhere: with neither
+`WAYLAND_DISPLAY` nor `DISPLAY` set KWin picks the DRM backend by itself (the
+script adds `--drm` anyway unless another backend is asked for), so
+plasma-workspace needs no change either.
+
 KWin loads the EGL vendor through Termux's own glvnd (`libEGL.so.1`,
-`libGLESv2.so.2`): the launcher points `__EGL_VENDOR_LIBRARY_FILENAMES` at it
-for KWin only.
+`libGLESv2.so.2`): the script points `__EGL_VENDOR_LIBRARY_FILENAMES` at it
+for KWin only. `chameleon-kwin ...` still works (= `chameleon kwin_wayland ...`).
 
 ### The EGL vendor for other programs
 

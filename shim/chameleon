@@ -1,0 +1,42 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# Runs a KWin or Plasma session on the Chameleon app's screen, rendering with
+# Android's GPU. Open the Chameleon app first (or within CHAMELEON_WAIT s).
+#
+#   chameleon kwin_wayland              # just KWin
+#   chameleon kwin_wayland konsole      # KWin plus a first app
+#   chameleon startplasma-wayland       # a Plasma session
+#   chameleon --install                 # put `chameleon` in $PREFIX/bin
+#
+# Every kwin_wayland started inside - directly, by kwin_wayland_wrapper or by
+# startplasma-wayland - goes through bin/kwin_wayland, which attaches the shim
+# to KWin alone; the rest of the session runs as usual.
+set -e
+SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+
+case "$1" in
+"" | -h | --help)
+    sed -n '2,12s/^# \{0,1\}//p' "$0"
+    exit 0
+    ;;
+--install)
+    ln -sf "$SHIM_DIR/chameleon" "$PREFIX/bin/chameleon"
+    echo "installed: $PREFIX/bin/chameleon -> $SHIM_DIR/chameleon"
+    exit 0
+    ;;
+esac
+
+chmod +x "$SHIM_DIR/bin/kwin_wayland" 2>/dev/null || true
+
+# A session bus for KWin and Plasma, started before anything else.
+if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
+    exec dbus-run-session -- "$0" "$@"
+fi
+
+export CHAMELEON_SHIM_DIR="$SHIM_DIR"
+export PATH="$SHIM_DIR/bin:$PATH"
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+# This session gets its displays from KWin, not from an outer X/Wayland server.
+unset WAYLAND_DISPLAY DISPLAY
+export XDG_SESSION_TYPE=wayland
+exec "$@"

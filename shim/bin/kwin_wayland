@@ -1,0 +1,107 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# kwin_wayland as started inside `chameleon ...`: this directory is first in
+# PATH, so KWin started directly, by kwin_wayland_wrapper or by
+# startplasma-wayland comes here. It runs the real (unmodified) kwin_wayland
+# on the Chameleon app's screen with Android's GPU: the shim is attached to
+# this one process and nothing else in the session.
+set -e
+
+SELF_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd -P)
+SHIM_DIR=${CHAMELEON_SHIM_DIR:-$(cd "$SELF_DIR/.." && pwd -P)}
+
+# The real kwin_wayland: the next one in PATH after this directory.
+REAL=
+IFS_SAVED=$IFS
+IFS=:
+for dir in $PATH; do
+    [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$SELF_DIR" ] && continue
+    if [ -x "$dir/kwin_wayland" ]; then
+        REAL="$dir/kwin_wayland"
+        break
+    fi
+done
+IFS=$IFS_SAVED
+if [ -z "$REAL" ]; then
+    echo "chameleon: kwin_wayland is not installed (pkg install kwin)" >&2
+    exit 1
+fi
+
+for lib in libchameleon.so libgbm.so libEGL_chameleon.so; do
+    if [ ! -f "$SHIM_DIR/$lib" ]; then
+        echo "chameleon: $SHIM_DIR/$lib is missing" >&2
+        exit 1
+    fi
+done
+for old in libGLESv2.so.2 libEGL.so.1; do
+    if [ -e "$SHIM_DIR/$old" ] || [ -L "$SHIM_DIR/$old" ]; then
+        echo "chameleon: $SHIM_DIR/$old is left over from an older version and would hide" >&2
+        echo "  glvnd; delete the directory and copy the new one in its place." >&2
+        exit 1
+    fi
+done
+
+# One KWin per Chameleon app (this script's own process is also called
+# kwin_wayland, hence the pid filter).
+if command -v pgrep >/dev/null 2>&1 && pgrep -x kwin_wayland | grep -qvx "$$"; then
+    echo "chameleon: another kwin_wayland is already running (pgrep -af kwin_wayland);" >&2
+    echo "  only one can use the Chameleon app. Stop it first: pkill -x kwin_wayland" >&2
+    exit 1
+fi
+
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+
+# KWin picks its backend from these when it isn't told (see main_wayland.cpp):
+# WAYLAND_DISPLAY -> nested Wayland, DISPLAY -> nested X11 (Termux:X11 users
+# often have DISPLAY set). We want the (fake) DRM device. KWin exports its own
+# for the programs it starts.
+unset WAYLAND_DISPLAY DISPLAY
+need_drm=1
+socket=
+prev=
+for arg in "$@"; do
+    case "$prev" in
+    --socket | -s) socket=$arg ;;
+    esac
+    case "$arg" in
+    --drm | --x11-display* | --wayland-display* | --virtual) need_drm= ;;
+    --socket=*) socket=${arg#--socket=} ;;
+    esac
+    prev=$arg
+done
+# kwin_wayland_wrapper creates the Wayland socket itself and passes only its
+# fd, so the shim can't see it being bound; tell it where it is (for input).
+if [ -n "$socket" ]; then
+    case "$socket" in
+    /*) export CHAMELEON_WAYLAND_SOCKET="$socket" ;;
+    *) export CHAMELEON_WAYLAND_SOCKET="$XDG_RUNTIME_DIR/$socket" ;;
+    esac
+fi
+
+export CHAMELEON_DRM_PATH=${CHAMELEON_DRM_PATH:-$PREFIX/tmp/chameleon-card0}
+export KWIN_DRM_DEVICES=$CHAMELEON_DRM_PATH  # a name only; the shim answers for it
+export KWIN_COMPOSE=O2ES                     # Android EGL is GLES-only
+export KWIN_DISABLE_VULKAN=1
+export KWIN_DRM_USE_MODIFIERS=0              # gralloc picks buffer layouts
+export KWIN_NO_TIMER_QUERY=${KWIN_NO_TIMER_QUERY-1}  # Mali-G77 crashes (SIGBUS) on texture writes after GL_TIMESTAMP queries
+
+# EGL/GLES: glvnd (Termux's libEGL.so.1 / libGLESv2.so.2) with the Chameleon
+# vendor library as KWin's only vendor. If it is installed system-wide
+# (egl_vendor.d), this still pins KWin to this copy. The vendor puts the
+# original setting back once glvnd has loaded it, for KWin's children.
+VENDOR_JSON="$XDG_RUNTIME_DIR/chameleon-egl-vendor.json"
+printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' \
+    "$SHIM_DIR/libEGL_chameleon.so" > "$VENDOR_JSON"
+export CHAMELEON_ORIG___EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-}
+export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
+
+# libchameleon.so gives KWin's children these back.
+export CHAMELEON_ORIG_LD_PRELOAD=${LD_PRELOAD:-}
+export CHAMELEON_ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"  # the fake libgbm.so
+export LD_PRELOAD="$SHIM_DIR/libchameleon.so${LD_PRELOAD:+:$LD_PRELOAD}"
+
+if [ -n "$need_drm" ]; then
+    exec "$REAL" --drm "$@"
+fi
+exec "$REAL" "$@"
