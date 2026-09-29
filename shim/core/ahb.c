@@ -48,6 +48,7 @@ static struct {
     int (*lock)(AHardwareBuffer *, uint64_t, int32_t, const void *, void **);
     int (*unlock)(AHardwareBuffer *, int32_t *);
     const native_handle *(*get_native_handle)(const AHardwareBuffer *);
+    int (*recv_handle)(int, AHardwareBuffer **);
 } ahb;
 
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -101,12 +102,40 @@ static void host_release(AHardwareBuffer *b)
 }
 static void host_describe(const AHardwareBuffer *b, ahb_desc *d) { *d = b->desc; }
 static const native_handle *host_handle(const AHardwareBuffer *b) { return b->nh; }
+/* Stand-in for AHardwareBuffer_recvHandleFromUnixSocket: one packet holding
+ * the description and the buffer's (memfd) fd, as the tests' fake
+ * AHardwareBuffer_sendHandleToUnixSocket writes it. */
+#include <sys/socket.h>
+static int host_recv(int sock, AHardwareBuffer **out)
+{
+    ahb_desc d;
+    struct iovec iov = {.iov_base = &d, .iov_len = sizeof d};
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    if (recvmsg(sock, &mh, MSG_CMSG_CLOEXEC) != (ssize_t)sizeof d)
+        return -1;
+    struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+    if (!c || c->cmsg_type != SCM_RIGHTS)
+        return -1;
+    AHardwareBuffer *b = calloc(1, sizeof *b);
+    b->desc = d;
+    b->nh = calloc(1, sizeof(native_handle) + sizeof(int));
+    b->nh->numFds = 1;
+    memcpy(&b->nh->data[0], CMSG_DATA(c), sizeof(int));
+    *out = b;
+    return 0;
+}
 static int ahb_load(void)
 {
     ahb.allocate = host_allocate;
     ahb.release = host_release;
     ahb.describe = host_describe;
     ahb.get_native_handle = host_handle;
+    ahb.recv_handle = host_recv;
     return 1;
 }
 #else
@@ -124,6 +153,7 @@ static int ahb_load(void)
         *(void **)&ahb.lock = dlsym(lib, "AHardwareBuffer_lock");
         *(void **)&ahb.unlock = dlsym(lib, "AHardwareBuffer_unlock");
         *(void **)&ahb.get_native_handle = dlsym(lib, "AHardwareBuffer_getNativeHandle");
+        *(void **)&ahb.recv_handle = dlsym(lib, "AHardwareBuffer_recvHandleFromUnixSocket");
     }
     loaded = lib && ahb.allocate && ahb.release && ahb.describe && ahb.get_native_handle;
     if (!loaded)
@@ -174,6 +204,34 @@ static int find_dmabuf_fd(const native_handle *nh)
         }
     }
     return nh->numFds > 0 ? nh->data[0] : -1;
+}
+
+/* ---- buffers from other processes (clients.c) ---- */
+
+AHardwareBuffer *ahb_recv(int sock)
+{
+    AHardwareBuffer *b = NULL;
+    if (!ahb_load() || !ahb.recv_handle || ahb.recv_handle(sock, &b) != 0)
+        return NULL;
+    return b;
+}
+
+void ahb_release(AHardwareBuffer *b)
+{
+    if (b)
+        ahb.release(b);
+}
+
+int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
+{
+    const native_handle *nh = ahb.get_native_handle(b);
+    int fd = nh ? find_dmabuf_fd(nh) : -1;
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0)
+        return -1;
+    *dev = st.st_dev;
+    *ino = st.st_ino;
+    return 0;
 }
 
 struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)

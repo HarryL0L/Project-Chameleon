@@ -74,20 +74,15 @@ static void *real(const char *name)
     }
 
 FWD(EGLBoolean, eglBindAPI, (EGLenum api), (api), EGL_FALSE)
-FWD(EGLBoolean, eglBindTexImage, (EGLDisplay d, EGLSurface s, EGLint b), (d, s, b), EGL_FALSE)
 FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint n, EGLint *num), (d, a, c, n, num), EGL_FALSE)
 FWD(EGLint, eglClientWaitSync, (EGLDisplay d, EGLSync s, EGLint f, EGLTime t), (d, s, f, t), EGL_FALSE)
-FWD(EGLBoolean, eglCopyBuffers, (EGLDisplay d, EGLSurface s, EGLNativePixmapType p), (d, s, p), EGL_FALSE)
 FWD(EGLSurface, eglCreatePbufferFromClientBuffer, (EGLDisplay d, EGLenum t, EGLClientBuffer b, EGLConfig c, const EGLint *a), (d, t, b, c, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePbufferSurface, (EGLDisplay d, EGLConfig c, const EGLint *a), (d, c, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePixmapSurface, (EGLDisplay d, EGLConfig c, EGLNativePixmapType p, const EGLint *a), (d, c, p, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePlatformPixmapSurface, (EGLDisplay d, EGLConfig c, void *p, const EGLAttrib *a), (d, c, p, a), EGL_NO_SURFACE)
-FWD(EGLSurface, eglCreatePlatformWindowSurface, (EGLDisplay d, EGLConfig c, void *w, const EGLAttrib *a), (d, c, w, a), EGL_NO_SURFACE)
 FWD(EGLSync, eglCreateSync, (EGLDisplay d, EGLenum t, const EGLAttrib *a), (d, t, a), EGL_NO_SYNC)
-FWD(EGLSurface, eglCreateWindowSurface, (EGLDisplay d, EGLConfig c, EGLNativeWindowType w, const EGLint *a), (d, c, w, a), EGL_NO_SURFACE)
 FWD(EGLBoolean, eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c), EGL_FALSE)
 FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
-FWD(EGLBoolean, eglDestroySurface, (EGLDisplay d, EGLSurface s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
@@ -96,15 +91,9 @@ FWD(EGLDisplay, eglGetCurrentDisplay, (void), (), EGL_NO_DISPLAY)
 FWD(EGLSurface, eglGetCurrentSurface, (EGLint r), (r), EGL_NO_SURFACE)
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor), EGL_FALSE)
-FWD(EGLBoolean, eglMakeCurrent, (EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c), (d, dr, rd, c), EGL_FALSE)
 FWD(EGLenum, eglQueryAPI, (void), (), EGL_NONE)
 FWD(EGLBoolean, eglQueryContext, (EGLDisplay d, EGLContext c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
-FWD(EGLBoolean, eglQuerySurface, (EGLDisplay d, EGLSurface s, EGLint a, EGLint *v), (d, s, a, v), EGL_FALSE)
-FWD(EGLBoolean, eglReleaseTexImage, (EGLDisplay d, EGLSurface s, EGLint b), (d, s, b), EGL_FALSE)
 FWD(EGLBoolean, eglReleaseThread, (void), (), EGL_FALSE)
-FWD(EGLBoolean, eglSurfaceAttrib, (EGLDisplay d, EGLSurface s, EGLint a, EGLint v), (d, s, a, v), EGL_FALSE)
-FWD(EGLBoolean, eglSwapBuffers, (EGLDisplay d, EGLSurface s), (d, s), EGL_FALSE)
-FWD(EGLBoolean, eglSwapInterval, (EGLDisplay d, EGLint i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglWaitClient, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitGL, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitNative, (EGLint e), (e), EGL_FALSE)
@@ -152,6 +141,159 @@ static EGLBoolean fail(EGLint error)
 {
     t_error = error;
     return EGL_FALSE;
+}
+
+void cham_setEGLError(EGLint error)
+{
+    t_error = error;
+}
+
+void *cham_egl_real(const char *name)
+{
+    return real(name);
+}
+
+/* ---- surfaces ----
+ * Window surfaces on a Wayland display are ours (vendor/wayland.c): the
+ * Android surface behind one is what the driver gets wherever a surface is
+ * passed. Everything else goes straight through. */
+
+#define SURF(s) cham_wl_android_surface(s)
+
+EGLAPI EGLSurface EGLAPIENTRY eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, EGLNativeWindowType win,
+                                                     const EGLint *attribs)
+{
+    CHAM_NOTE_CALL("eglCreateWindowSurface");
+    int handled;
+    EGLSurface s = cham_wl_create_window_surface(dpy, config, (void *)win, &handled);
+    if (handled)
+        return s;
+    REAL(EGLSurface, eglCreateWindowSurface, (EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *))
+    return p_eglCreateWindowSurface ? p_eglCreateWindowSurface(dpy, config, win, attribs) : EGL_NO_SURFACE;
+}
+
+EGLAPI EGLSurface EGLAPIENTRY eglCreatePlatformWindowSurface(EGLDisplay dpy, EGLConfig config, void *win,
+                                                             const EGLAttrib *attribs)
+{
+    CHAM_NOTE_CALL("eglCreatePlatformWindowSurface");
+    int handled;
+    EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
+    if (handled)
+        return s;
+    REAL(EGLSurface, eglCreatePlatformWindowSurface, (EGLDisplay, EGLConfig, void *, const EGLAttrib *))
+    return p_eglCreatePlatformWindowSurface ? p_eglCreatePlatformWindowSurface(dpy, config, win, attribs)
+                                            : EGL_NO_SURFACE;
+}
+
+static EGLSurface EGLAPIENTRY shim_eglCreatePlatformWindowSurfaceEXT(EGLDisplay dpy, EGLConfig config, void *win,
+                                                                      const EGLint *attribs)
+{
+    CHAM_NOTE_CALL("eglCreatePlatformWindowSurfaceEXT");
+    int handled;
+    EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
+    if (handled)
+        return s;
+    REAL(EGLSurface, eglCreatePlatformWindowSurfaceEXT, (EGLDisplay, EGLConfig, void *, const EGLint *))
+    return p_eglCreatePlatformWindowSurfaceEXT ? p_eglCreatePlatformWindowSurfaceEXT(dpy, config, win, attribs)
+                                               : EGL_NO_SURFACE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglDestroySurface(EGLDisplay dpy, EGLSurface surface)
+{
+    CHAM_NOTE_CALL("eglDestroySurface");
+    if (cham_wl_is_surface(surface))
+        return cham_wl_destroy_surface(dpy, surface);
+    REAL(EGLBoolean, eglDestroySurface, (EGLDisplay, EGLSurface))
+    return p_eglDestroySurface ? p_eglDestroySurface(dpy, surface) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx)
+{
+    CHAM_NOTE_CALL("eglMakeCurrent");
+    REAL(EGLBoolean, eglMakeCurrent, (EGLDisplay, EGLSurface, EGLSurface, EGLContext))
+    if (!p_eglMakeCurrent)
+        return EGL_FALSE;
+    cham_wl_before_make_current(draw); /* a resized wl_egl_window gets its new buffers here */
+    if (read != draw)
+        cham_wl_before_make_current(read);
+    EGLBoolean ok = p_eglMakeCurrent(dpy, SURF(draw), SURF(read), ctx);
+    if (ok)
+        cham_wl_after_make_current(dpy, draw);
+    return ok;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attribute, EGLint *value)
+{
+    CHAM_NOTE_CALL("eglQuerySurface");
+    REAL(EGLBoolean, eglQuerySurface, (EGLDisplay, EGLSurface, EGLint, EGLint *))
+    return p_eglQuerySurface ? p_eglQuerySurface(dpy, SURF(surface), attribute, value) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglSurfaceAttrib(EGLDisplay dpy, EGLSurface surface, EGLint attribute, EGLint value)
+{
+    CHAM_NOTE_CALL("eglSurfaceAttrib");
+    REAL(EGLBoolean, eglSurfaceAttrib, (EGLDisplay, EGLSurface, EGLint, EGLint))
+    return p_eglSurfaceAttrib ? p_eglSurfaceAttrib(dpy, SURF(surface), attribute, value) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglBindTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer)
+{
+    REAL(EGLBoolean, eglBindTexImage, (EGLDisplay, EGLSurface, EGLint))
+    return p_eglBindTexImage ? p_eglBindTexImage(dpy, SURF(surface), buffer) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglReleaseTexImage(EGLDisplay dpy, EGLSurface surface, EGLint buffer)
+{
+    REAL(EGLBoolean, eglReleaseTexImage, (EGLDisplay, EGLSurface, EGLint))
+    return p_eglReleaseTexImage ? p_eglReleaseTexImage(dpy, SURF(surface), buffer) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglCopyBuffers(EGLDisplay dpy, EGLSurface surface, EGLNativePixmapType target)
+{
+    REAL(EGLBoolean, eglCopyBuffers, (EGLDisplay, EGLSurface, EGLNativePixmapType))
+    return p_eglCopyBuffers ? p_eglCopyBuffers(dpy, SURF(surface), target) : EGL_FALSE;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglSetDamageRegionKHR(EGLDisplay dpy, EGLSurface surface, EGLint *rects, EGLint n)
+{
+    REAL(EGLBoolean, eglSetDamageRegionKHR, (EGLDisplay, EGLSurface, EGLint *, EGLint))
+    return p_eglSetDamageRegionKHR ? p_eglSetDamageRegionKHR(dpy, SURF(surface), rects, n) : EGL_FALSE;
+}
+
+/* The driver's swap, with or without damage, in one signature for wayland.c. */
+static EGLBoolean driver_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects, EGLint n)
+{
+    if (rects && n > 0) {
+        REAL(EGLBoolean, eglSwapBuffersWithDamageKHR, (EGLDisplay, EGLSurface, const EGLint *, EGLint))
+        if (!p_eglSwapBuffersWithDamageKHR)
+            *(void **)&p_eglSwapBuffersWithDamageKHR = real("eglSwapBuffersWithDamageEXT");
+        if (p_eglSwapBuffersWithDamageKHR)
+            return p_eglSwapBuffersWithDamageKHR(dpy, surface, rects, n);
+    }
+    REAL(EGLBoolean, eglSwapBuffers, (EGLDisplay, EGLSurface))
+    return p_eglSwapBuffers ? p_eglSwapBuffers(dpy, surface) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglSwapBuffers(EGLDisplay dpy, EGLSurface surface)
+{
+    CHAM_NOTE_CALL("eglSwapBuffers");
+    return cham_wl_swap(dpy, surface, NULL, 0, driver_swap);
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglSwapBuffersWithDamage(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
+                                                             EGLint n)
+{
+    CHAM_NOTE_CALL("eglSwapBuffersWithDamage");
+    return cham_wl_swap(dpy, surface, rects, n, driver_swap);
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglSwapInterval(EGLDisplay dpy, EGLint interval)
+{
+    CHAM_NOTE_CALL("eglSwapInterval");
+    if (cham_wl_swap_interval(interval))
+        return EGL_TRUE; /* ours: paced by frame callbacks */
+    REAL(EGLBoolean, eglSwapInterval, (EGLDisplay, EGLint))
+    return p_eglSwapInterval ? p_eglSwapInterval(dpy, interval) : EGL_FALSE;
 }
 
 EGLAPI EGLint EGLAPIENTRY eglGetError(void)
@@ -287,9 +429,11 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
     for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
         if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
             fd = a[1];
+    /* KWin's own gbm buffers, or apps' buffers registered in clients.c;
+     * any other dmabuf has no AHardwareBuffer we could hand the driver. */
     struct cham_bo *bo = cham_bo_from_fd(fd);
-    if (!bo) {
-        /* A dmabuf we didn't allocate has no AHardwareBuffer behind it. */
+    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : cham_client_ahb_from_fd(fd);
+    if (!ahb) {
         t_error = EGL_BAD_MATCH;
         return EGL_NO_IMAGE_KHR;
     }
@@ -304,7 +448,7 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
         return EGL_NO_IMAGE_KHR;
     }
     const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(cham_bo_ahb(bo)),
+    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb),
                         image_attribs);
 }
 
@@ -410,6 +554,10 @@ static const struct {
     {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
     {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
     {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
+    {"eglCreatePlatformWindowSurfaceEXT", (void *)shim_eglCreatePlatformWindowSurfaceEXT},
+    {"eglSetDamageRegionKHR", (void *)shim_eglSetDamageRegionKHR},
+    {"eglSwapBuffersWithDamageKHR", (void *)shim_eglSwapBuffersWithDamage},
+    {"eglSwapBuffersWithDamageEXT", (void *)shim_eglSwapBuffersWithDamage},
     /* pass-through, recorded for the crash report */
     OWN(eglBindAPI), OWN(eglBindTexImage), OWN(eglChooseConfig), OWN(eglClientWaitSync), OWN(eglCopyBuffers),
     OWN(eglCreatePbufferFromClientBuffer), OWN(eglCreatePbufferSurface), OWN(eglCreatePixmapSurface),

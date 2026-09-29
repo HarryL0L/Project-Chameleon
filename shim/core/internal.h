@@ -19,6 +19,14 @@ void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
 /* Waits (briefly) for every pending presenter release fence. */
 void bo_wait_release_fences_locked(void);
+/* An AHardwareBuffer sent by another process (clients.c). */
+AHardwareBuffer *ahb_recv(int sock);
+void ahb_release(AHardwareBuffer *b);
+int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
+
+/* ---- clients.c: buffers of apps rendering through the EGL vendor ---- */
+/* KWin's Wayland socket path, once known (env or bind()); "" if not yet. */
+void input_socket_path(char *out, size_t size);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);

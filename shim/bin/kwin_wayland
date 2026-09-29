@@ -91,14 +91,17 @@ export KWIN_NO_TIMER_QUERY=${KWIN_NO_TIMER_QUERY-1}  # Mali-G77 crashes (SIGBUS)
 # the Chameleon vendor first and the installed vendors (Mesa) after it. KWin
 # gets Chameleon: it claims the GBM platform and the default display before
 # Mesa is asked. KWin passes its startup environment on to the programs it
-# starts; for their Wayland/X11 windows the Chameleon vendor steps aside and
-# glvnd falls through to Mesa, as with a system-wide install.
+# starts: their Wayland windows get Chameleon too (GPU, zero-copy), anything
+# it doesn't handle falls through to Mesa, as with a system-wide install.
 VENDOR_JSON="$XDG_RUNTIME_DIR/chameleon-egl-vendor.json"
 printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' \
     "$SHIM_DIR/libEGL_chameleon.so" > "$VENDOR_JSON"
 VENDORS="$VENDOR_JSON"
 if [ -n "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" ]; then
-    VENDORS="$VENDORS:$__EGL_VENDOR_LIBRARY_FILENAMES"
+    case ":$__EGL_VENDOR_LIBRARY_FILENAMES:" in
+    *":$VENDOR_JSON:"*) VENDORS=$__EGL_VENDOR_LIBRARY_FILENAMES ;; # set up by `chameleon` already
+    *) VENDORS="$VENDORS:$__EGL_VENDOR_LIBRARY_FILENAMES" ;;
+    esac
 else
     for json in "$PREFIX"/share/glvnd/egl_vendor.d/*.json; do
         [ -f "$json" ] || continue

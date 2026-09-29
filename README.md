@@ -150,9 +150,15 @@ Code: [`shim/gbm/`](shim/gbm/)
   `#if defined(GL_ext)` (Mesa tolerates the bare form; strict drivers don't).
   It can also hide extensions and drop context attributes that a driver
   mishandles.
-- **Scope:** outside KWin it only takes off-screen displays (surfaceless /
-  Android platform). Wayland and X11 windows still go to Mesa until the
-  vendor learns the Wayland platform.
+- **Wayland apps on the GPU:** under a Chameleon KWin it also takes
+  `EGL_PLATFORM_WAYLAND_KHR`. Each `wl_egl_window` renders into an
+  `AImageReader`, a real Android window surface, so the driver's buffer
+  handling works as usual. Every frame then reaches KWin as an
+  `AHardwareBuffer`: it is registered with KWin's shim, wrapped in a
+  `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
+  is copied, and frame callbacks pace the app.
+- **Scope:** X11 windows, and Wayland windows under any other compositor,
+  still go to Mesa.
 
 Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/)
 </details>
@@ -276,7 +282,7 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 - [x] Unmodified KWin on a fake KMS device, rendering on the vendor GPU driver
 - [x] Touch, trackpad, mouse and keyboard input
 - [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
-- [ ] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
+- [x] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
 - [ ] Screen resize and rotation (keyboard-aware resizing, mini window)
 - [ ] Xwayland acceleration
 

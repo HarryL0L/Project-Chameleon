@@ -76,6 +76,9 @@ CHAM_EXPORT const uint32_t *cham_formats(int *count);
 
 /* AHB -> EGLClientBuffer is done by the EGL shim with the real driver. */
 CHAM_EXPORT AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo);
+/* An app's buffer registered through clients.c whose dmabuf `fd` refers to
+ * (any dup of it); NULL if none. Borrowed reference. */
+CHAM_EXPORT AHardwareBuffer *cham_client_ahb_from_fd(int fd);
 
 CHAM_EXPORT void cham_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

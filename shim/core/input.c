@@ -156,6 +156,20 @@ void input_note_socket(const char *path)
     pthread_mutex_unlock(&g_path_lock);
 }
 
+void input_socket_path(char *out, size_t size)
+{
+    /* kwin_wayland_wrapper (Plasma) creates the socket and passes KWin only
+     * its fd, so KWin never binds it; bin/kwin_wayland then names it. */
+    const char *env = getenv("CHAMELEON_WAYLAND_SOCKET");
+    if (env && *env) {
+        snprintf(out, size, "%s", env);
+        return;
+    }
+    pthread_mutex_lock(&g_path_lock);
+    snprintf(out, size, "%s", g_wayland_path);
+    pthread_mutex_unlock(&g_path_lock);
+}
+
 static int load_wayland(void)
 {
     static int loaded = -1;
@@ -278,17 +292,8 @@ static void disconnect_wayland(void)
 
 static int connect_wayland(void)
 {
-    /* kwin_wayland_wrapper (Plasma) creates the socket and passes KWin only
-     * its fd, so KWin never binds it; bin/kwin_wayland then names it here. */
     char path[sizeof g_wayland_path];
-    const char *env = getenv("CHAMELEON_WAYLAND_SOCKET");
-    if (env && *env) {
-        snprintf(path, sizeof path, "%s", env);
-    } else {
-        pthread_mutex_lock(&g_path_lock);
-        memcpy(path, g_wayland_path, sizeof path);
-        pthread_mutex_unlock(&g_path_lock);
-    }
+    input_socket_path(path, sizeof path);
     if (!path[0] || !load_wayland())
         return 0;
 

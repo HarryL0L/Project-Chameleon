@@ -39,4 +39,23 @@ mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 # This session gets its displays from KWin, not from an outer X/Wayland server.
 unset WAYLAND_DISPLAY DISPLAY
 export XDG_SESSION_TYPE=wayland
+
+# EGL for the whole session (plasmashell and apps started by Plasma are not
+# KWin's children): the Chameleon vendor first - it renders Wayland windows
+# on the GPU when their compositor is a Chameleon KWin - then the installed
+# vendors (Mesa) for everything else.
+VENDOR_JSON="$XDG_RUNTIME_DIR/chameleon-egl-vendor.json"
+printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' \
+    "$SHIM_DIR/libEGL_chameleon.so" > "$VENDOR_JSON"
+VENDORS="$VENDOR_JSON"
+if [ -n "${__EGL_VENDOR_LIBRARY_FILENAMES:-}" ]; then
+    VENDORS="$VENDORS:$__EGL_VENDOR_LIBRARY_FILENAMES"
+else
+    for json in "$PREFIX"/share/glvnd/egl_vendor.d/*.json; do
+        [ -f "$json" ] || continue
+        case "${json##*/}" in *chameleon*) continue ;; esac
+        VENDORS="$VENDORS:$json"
+    done
+fi
+export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDORS"
 exec "$@"

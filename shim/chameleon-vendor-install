@@ -1,8 +1,9 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # Registers the Chameleon EGL vendor with glvnd for every Termux program:
-# EGL/GLES on Android's GPU driver for the displays it handles. For now that
-# is off-screen rendering (EGL_PLATFORM_SURFACELESS_MESA / _ANDROID_KHR);
-# Wayland and X11 windows still go to Mesa. chameleon-kwin works either way.
+# EGL/GLES on Android's GPU driver for the displays it handles: Wayland
+# windows under a Chameleon KWin, and off-screen rendering
+# (EGL_PLATFORM_SURFACELESS_MESA / _ANDROID_KHR). X11 windows and other
+# compositors still go to Mesa. `chameleon` works either way.
 #
 #   chameleon-vendor-install            install into $PREFIX
 #   chameleon-vendor-install --remove   uninstall

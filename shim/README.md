@@ -42,10 +42,12 @@ for KWin only. `chameleon-kwin ...` still works (= `chameleon kwin_wayland ...`)
 ### The EGL vendor for other programs
 
 `kwin-shim/chameleon-vendor-install` registers `libEGL_chameleon.so` with
-glvnd for every Termux program (`--remove` undoes it). Today it takes
-off-screen displays (`EGL_PLATFORM_SURFACELESS_MESA`, `EGL_PLATFORM_ANDROID_KHR`,
-and the default display with `CHAMELEON_EGL_DEFAULT=1`); Wayland and X11
-windows still go to Mesa until the vendor gets a Wayland platform. Check it
+glvnd for every Termux program (`--remove` undoes it); `chameleon` already
+does the same for its session. It takes Wayland windows whose compositor is
+a Chameleon KWin (rendered on the GPU, handed over as `AHardwareBuffer`s),
+off-screen displays (`EGL_PLATFORM_SURFACELESS_MESA`, `EGL_PLATFORM_ANDROID_KHR`)
+and the default display with `CHAMELEON_EGL_DEFAULT=1`; X11 windows and other
+compositors still go to Mesa. Check it
 with the probe: `CHAMELEON_PROBE_GLVND=1 CHAMELEON_EGL_DEFAULT=1 ./ahb_probe`.
 
 Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
@@ -58,8 +60,10 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
   through KWin's fake-input protocol (`core/input.c`).
 - The mode is fixed when KWin starts; later app window size changes are
   scaled by the app.
-- Apps inside KWin render in software (`wl_shm`); client dmabufs are refused
-  because there is no `AHardwareBuffer` behind them.
+- Apps using EGL render on the GPU through the vendor (`vendor/wayland.c`);
+  their buffers are registered with KWin's shim (`core/clients.c`) so KWin
+  can import them. The app waits for the GPU before handing a frame over (no
+  explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.
@@ -75,5 +79,8 @@ libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
 - the input path against a real libwayland-server fake-input global;
 - the EGL vendor through the system's real glvnd, with a stand-in for
   Android's driver, both as any program and as KWin.
+- a Wayland app rendering through the vendor into a real libwayland-server
+  compositor: buffers registered with the KWin side, dmabuf parameters,
+  releases, frame pacing and resizing.
 
 CI runs it on every push.

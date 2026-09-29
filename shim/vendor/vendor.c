@@ -17,13 +17,17 @@
  *    CHAMELEON_EGL_DEFAULT=1 also takes the default display elsewhere.
  *  - EGL_PLATFORM_SURFACELESS_MESA and EGL_PLATFORM_ANDROID_KHR: always
  *    (off-screen rendering on the GPU).
- * Wayland and X11 windows are not handled yet.
+ *  - EGL_PLATFORM_WAYLAND_KHR: when the app's compositor is a KWin running
+ *    with the Chameleon shim (wayland.c): windows render on the GPU and
+ *    reach KWin as AHardwareBuffers, without copies.
+ * X11 windows are not handled.
  *
  * Only __egl_Main is exported (see vendor.map).
  */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -148,6 +152,9 @@ static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGL
     case EGL_PLATFORM_SURFACELESS_MESA:
     case EGL_PLATFORM_ANDROID_KHR:
         return cham_egl_android_display();
+    case EGL_PLATFORM_WAYLAND_KHR:
+        /* only under a KWin running with the Chameleon shim */
+        return cham_wl_get_display(native);
     }
     return EGL_NO_DISPLAY;
 }
@@ -161,9 +168,11 @@ static const char *get_vendor_string(int name)
 {
     if (name != __EGL_VENDOR_STRING_PLATFORM_EXTENSIONS)
         return NULL;
-    return cham_core_present()
-               ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_MESA_platform_surfaceless EGL_KHR_platform_android"
-               : "EGL_MESA_platform_surfaceless EGL_KHR_platform_android";
+    static char list[256];
+    snprintf(list, sizeof list, "%s%sEGL_MESA_platform_surfaceless EGL_KHR_platform_android",
+             cham_core_present() ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm " : "",
+             cham_wl_platform_available() ? "EGL_KHR_platform_wayland EGL_EXT_platform_wayland " : "");
+    return list;
 }
 
 static void *get_proc_address(const char *name)

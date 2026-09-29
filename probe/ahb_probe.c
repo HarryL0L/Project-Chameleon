@@ -64,6 +64,8 @@ typedef unsigned char GLubyte;
 #define EGL_OPENGL_ES_API 0x30A0
 #define EGL_IMAGE_PRESERVED_KHR 0x30D2
 #define EGL_PBUFFER_BIT 0x0001
+#define EGL_WINDOW_BIT 0x0004
+#define EGL_OPENGL_ES2_BIT 0x0004
 #define EGL_OPENGL_ES3_BIT_KHR 0x0040
 #define EGL_NATIVE_BUFFER_ANDROID 0x3140
 #define EGL_SYNC_NATIVE_FENCE_ANDROID 0x3144
@@ -118,6 +120,9 @@ static struct {
     EGLContext (*CreateContext)(EGLDisplay, EGLConfig, EGLContext, const EGLint *);
     EGLBoolean (*DestroyContext)(EGLDisplay, EGLContext);
     EGLBoolean (*MakeCurrent)(EGLDisplay, EGLSurface, EGLSurface, EGLContext);
+    EGLSurface (*CreateWindowSurface)(EGLDisplay, EGLConfig, void *, const EGLint *);
+    EGLBoolean (*DestroySurface)(EGLDisplay, EGLSurface);
+    EGLBoolean (*SwapBuffers)(EGLDisplay, EGLSurface);
     EGLint (*GetError)(void);
     void *(*GetProcAddress)(const char *);
     /* extensions */
@@ -258,6 +263,9 @@ static int load_libs(void)
     SYM(egl, CreateContext, legl, "libEGL", "eglCreateContext");
     SYM(egl, DestroyContext, legl, "libEGL", "eglDestroyContext");
     SYM(egl, MakeCurrent, legl, "libEGL", "eglMakeCurrent");
+    SYM(egl, CreateWindowSurface, legl, "libEGL", "eglCreateWindowSurface");
+    SYM(egl, DestroySurface, legl, "libEGL", "eglDestroySurface");
+    SYM(egl, SwapBuffers, legl, "libEGL", "eglSwapBuffers");
     SYM(egl, GetError, legl, "libEGL", "eglGetError");
     SYM(egl, GetProcAddress, legl, "libEGL", "eglGetProcAddress");
 
@@ -566,6 +574,76 @@ static void test_socket_roundtrip(EGLDisplay dpy, AHardwareBuffer *buf, uint32_t
     ahb.release(got);
 }
 
+/* How the EGL vendor renders Wayland windows: an EGL window surface on an
+ * AImageReader (libmediandk), whose frames come out as AHardwareBuffers. */
+static void test_image_reader(EGLDisplay dpy, EGLContext ctx)
+{
+    void *media = dlopen(sizeof(void *) == 8 ? "/system/lib64/libmediandk.so" : "/system/lib/libmediandk.so",
+                         RTLD_NOW | RTLD_LOCAL);
+    result(media != NULL, 0, "libmediandk (AImageReader) loads", media ? "" : dlerror());
+    if (!media)
+        return;
+    int (*reader_new)(int32_t, int32_t, int32_t, uint64_t, int32_t, void **);
+    int (*get_window)(void *, void **);
+    int (*acquire)(void *, void **, int *);
+    int (*image_ahb)(const void *, AHardwareBuffer **);
+    void (*image_delete)(void *);
+    void (*reader_delete)(void *);
+    *(void **)&reader_new = dlsym(media, "AImageReader_newWithUsage");
+    *(void **)&get_window = dlsym(media, "AImageReader_getWindow");
+    *(void **)&acquire = dlsym(media, "AImageReader_acquireNextImageAsync");
+    *(void **)&image_ahb = dlsym(media, "AImage_getHardwareBuffer");
+    *(void **)&image_delete = dlsym(media, "AImage_delete");
+    *(void **)&reader_delete = dlsym(media, "AImageReader_delete");
+    if (!reader_new || !get_window || !acquire || !image_ahb || !image_delete || !reader_delete) {
+        result(0, 0, "AImageReader API", "symbols missing");
+        return;
+    }
+    void *reader = NULL, *window = NULL;
+    int r = reader_new(64, 32, 1 /* RGBA_8888 */, AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE, 3, &reader);
+    if (r == 0)
+        r = get_window(reader, &window);
+    result(r == 0 && window, 0, "AImageReader window", "");
+    if (r != 0 || !window)
+        return;
+    const EGLint cfg_attribs[] = {EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT, EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+                                  EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
+                                  EGL_NONE};
+    EGLConfig cfg;
+    EGLint n = 0;
+    EGLSurface surf = EGL_NO_SURFACE;
+    if (egl.ChooseConfig(dpy, cfg_attribs, &cfg, 1, &n) && n > 0)
+        surf = egl.CreateWindowSurface(dpy, cfg, window, NULL);
+    char msg[128];
+    snprintf(msg, sizeof msg, "eglGetError=0x%x", egl.GetError());
+    result(surf != EGL_NO_SURFACE, 0, "EGL window surface on it", surf ? "" : msg);
+    if (surf != EGL_NO_SURFACE && egl.MakeCurrent(dpy, surf, surf, ctx)) {
+        gl.ClearColor(0.0f, 1.0f, 0.0f, 1.0f);
+        gl.Clear(GL_COLOR_BUFFER_BIT);
+        int swapped = egl.SwapBuffers(dpy, surf);
+        void *image = NULL;
+        int fence = -1;
+        for (int i = 0; swapped && i < 100 && acquire(reader, &image, &fence) != 0; i++)
+            usleep(1000);
+        AHardwareBuffer *frame = NULL;
+        if (image)
+            image_ahb(image, &frame);
+        AHardwareBuffer_Desc d = {0};
+        if (frame)
+            ahb.describe(frame, &d);
+        snprintf(msg, sizeof msg, "%ux%u, stride %u, format %u", d.width, d.height, d.stride, d.format);
+        result(frame != NULL, 0, "frame comes out as an AHardwareBuffer (Wayland apps on the GPU)", frame ? msg : "");
+        if (fence >= 0)
+            close(fence);
+        if (image)
+            image_delete(image);
+        egl.MakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx);
+    }
+    if (surf != EGL_NO_SURFACE)
+        egl.DestroySurface(dpy, surf);
+    reader_delete(reader);
+}
+
 static void test_cpu_readback(EGLDisplay dpy, uint32_t w, uint32_t h)
 {
     AHardwareBuffer *buf = alloc_ahb(w, h,
@@ -753,6 +831,7 @@ int main(int argc, char **argv)
     }
 
     test_cpu_readback(dpy, w, h);
+    test_image_reader(dpy, ctx);
 
     egl.MakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     egl.DestroyContext(dpy, ctx);

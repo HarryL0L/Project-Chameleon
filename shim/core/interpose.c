@@ -272,7 +272,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
         path[n] = 0;
         const char *base = strrchr(path, '/');
         base = base ? base + 1 : path;
-        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strstr(base, ".lock"))
+        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock / .chameleon */
             input_note_socket(path);
     }
     return ret;
