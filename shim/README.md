@@ -60,7 +60,8 @@ screen keeps its first size instead of following the app's window).
 
 - Input: touch (direct or trackpad), mouse and keyboard from the app, injected
   through KWin's fake-input protocol (`core/input.c`).
-- KWin's screen follows the app's window (rotation, keyboard): the shim
+- KWin's screen follows the app's window (rotation, keyboard) and the
+  display's refresh rate (battery saver): the shim
   switches KWin's mode over `kde_output_management_v2`, adding a custom mode
   when needed (`core/output.c`).
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);

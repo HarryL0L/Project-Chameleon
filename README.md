@@ -212,8 +212,11 @@ Code: [`shim/core/input.c`](shim/core/input.c), [`android/…/TouchInput.java`](
 - KWin's custom modes have widths in multiples of 8, so the width is rounded
   up and the app crops the few extra pixels, keeping the image sharp. Input
   is mapped to the visible part.
-- Only a change of the window counts, so a resolution picked by hand in
-  System Settings stays until the window changes again. Until KWin has
+- The refresh rate is followed the same way: when battery saver drops the
+  display from 120 Hz to 60 Hz (or back), KWin switches to a mode at the
+  new rate.
+- Only a change of the window or the rate counts, so a resolution picked by
+  hand in System Settings stays until they change again. Until KWin has
   switched (or if it can't), the app scales the frame to fit and keeps its
   aspect ratio. `CHAMELEON_RESIZE=0` keeps KWin's screen at its first size.
 

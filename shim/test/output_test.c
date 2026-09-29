@@ -267,10 +267,15 @@ static void run_for(int ms)
     } while ((now.tv_sec - start.tv_sec) * 1000 + (now.tv_nsec - start.tv_nsec) / 1000000 < ms);
 }
 
+static void send_config(int c, uint32_t w, uint32_t h, uint32_t mhz)
+{
+    struct cham_msg m = {CHAM_CONFIG, 0, w | ((uint64_t)h << 32), mhz};
+    cham_send(c, &m, -1);
+}
+
 static void send_size(int c, uint32_t w, uint32_t h)
 {
-    struct cham_msg m = {CHAM_CONFIG, 0, w | ((uint64_t)h << 32), 120000};
-    cham_send(c, &m, -1);
+    send_config(c, w, h, 120000);
 }
 
 static int current_is(int w, int h)
@@ -335,6 +340,17 @@ int main(void)
     for (int i = 0; i < g.count; i++)
         custom_left += g.modes[i].custom && !g.modes[i].removed;
     CHECK(custom_left == 1, "the previous custom mode was replaced (%d left)", custom_left);
+
+    send_config(c, 800, 400, 60000); /* battery saver: 60 Hz */
+    run_for(800);
+    CHECK(current_is(800, 400) && g.current->mhz > 59000 && g.current->mhz < 61000 && g.custom_mhz == 60000,
+          "refresh rate change follows: %dx%d @ %d mHz (want 800x400 @ ~60000)", g.current ? g.current->w : 0,
+          g.current ? g.current->h : 0, g.current ? g.current->mhz : 0);
+    int configs = g.configs;
+    send_config(c, 800, 400, 60000); /* reported again, e.g. a display event */
+    send_config(c, 800, 400, 60030);
+    run_for(800);
+    CHECK(g.configs == configs, "same size and rate again: nothing to do");
     CHECK(g.applied == g.configs, "every configuration was applied (%d/%d)", g.applied, g.configs);
 
     close(c);

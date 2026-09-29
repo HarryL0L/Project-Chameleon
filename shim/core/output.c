@@ -16,9 +16,12 @@
  * CVT modes, whose width is a multiple of 8, so the width is rounded up and
  * the app crops the few extra pixels (and output_visible() tells input.c).
  *
- * Only a change of the window is acted on (and the first size once KWin is
- * up), so a mode picked by hand in System Settings stays until the window
- * changes again. CHAMELEON_RESIZE=0 turns this off (the app then scales).
+ * The display's refresh rate is followed the same way (battery saver
+ * switching 120 Hz to 60 Hz, say): a mode of the window's size at that rate.
+ *
+ * Only a change of the window or the rate is acted on (and the first size
+ * once KWin is up), so a mode picked by hand in System Settings stays until
+ * they change again. CHAMELEON_RESIZE=0 turns this off (the app then scales).
  *
  * Everything here runs on input.c's thread.
  */
@@ -248,11 +251,19 @@ static int fits(const struct mode *m)
            m->width - (int32_t)g_want.width < 8 && m->height - (int32_t)g_want.height < 8;
 }
 
+/* CVT modes land a little off the requested rate (119.93 Hz for 120). */
+#define REFRESH_SLACK_MHZ 1000
+
+static int refresh_ok(const struct mode *m)
+{
+    return !g_want.refresh_mhz || abs(m->refresh_mhz - (int32_t)g_want.refresh_mhz) <= REFRESH_SLACK_MHZ;
+}
+
 static const struct mode *best_fit(void)
 {
     const struct mode *best = NULL;
     for (const struct mode *m = g_dev.modes; m; m = m->next) {
-        if (!fits(m))
+        if (!fits(m) || !refresh_ok(m))
             continue;
         if (!best) {
             best = m;
@@ -270,9 +281,10 @@ static const struct mode *best_fit(void)
 
 static void decide(void)
 {
-    if (g_dev.current && fits(g_dev.current)) {
+    if (g_dev.current && fits(g_dev.current) && refresh_ok(g_dev.current)) {
         if (g_steps)
-            cham_log("output: KWin's screen is now %dx%d", g_dev.current->width, g_dev.current->height);
+            cham_log("output: KWin's screen is now %dx%d @ %.2f Hz", g_dev.current->width, g_dev.current->height,
+                     g_dev.current->refresh_mhz / 1000.0);
         g_handled = g_want.serial;
         return;
     }
@@ -337,11 +349,13 @@ void output_config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
     }
     if (g_disabled || !width || !height)
         return;
-    g_want.refresh_mhz = refresh_mhz;
-    if (width == g_want.width && height == g_want.height)
+    /* The display's rate changes too (battery saver, adaptive refresh). */
+    int rate_changed = abs((int32_t)refresh_mhz - (int32_t)g_want.refresh_mhz) > REFRESH_SLACK_MHZ;
+    if (width == g_want.width && height == g_want.height && !rate_changed)
         return;
     g_want.width = width;
     g_want.height = height;
+    g_want.refresh_mhz = refresh_mhz;
     g_want.serial++;
     g_steps = 0;
     /* Keyboards and rotations can report a few sizes in a row. */
