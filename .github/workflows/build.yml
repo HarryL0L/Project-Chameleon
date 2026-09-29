@@ -7,16 +7,16 @@ on:
 
 jobs:
   android:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: 17
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
         with:
           gradle-version: "8.14.3"
 
@@ -43,15 +43,15 @@ jobs:
           dpkg-deb --info out/chameleon_*_aarch64.deb
           dpkg-deb --contents out/chameleon_*_aarch64.deb
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: chameleon-${{ github.sha }}
           path: out/
 
   shim-host-test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install libdrm, libwayland, glvnd
         run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev
       - name: Fake KMS device against the real libdrm
