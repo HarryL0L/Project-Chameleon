@@ -6,11 +6,11 @@
 
 <p align="center">
   <b>Linux Wayland desktops from Termux, shown in an Android app and drawn by the phone's own GPU.</b><br>
-  Unmodified compositors (KWin and Plasma today) · vendor GLES driver · zero-copy <code>AHardwareBuffer</code>s · no root
+  Unmodified compositors (KWin and Plasma today) · vendor GLES driver · <code>AHardwareBuffer</code>s, no CPU copies · no root
 </p>
 
 <p align="center">
-  <a href="../../actions/workflows/build.yml"><img src="../../actions/workflows/build.yml/badge.svg" alt="Build"></a>
+  <a href="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml"><img src="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml/badge.svg" alt="Build"></a>
 </p>
 
 ---
@@ -93,7 +93,7 @@ is Android. KWin and the app talk over one Unix socket,
 
 - A full-screen `SurfaceView` whose `ASurfaceControl` receives KWin's buffers
   with `ASurfaceTransaction_setBuffer`, together with KWin's acquire fence.
-- It reports the surface size and the panel's fastest refresh rate to KWin
+- It reports the surface size and the display's current refresh rate to KWin
   (`CONFIG`). KWin sees them as the mode of a DSI connector, and the screen
   follows the window when it rotates or resizes (see *Screen size* below).
   Settings choose the orientation (rotate with the phone, portrait or
@@ -126,7 +126,7 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
   modesetting, `TEST_ONLY` commits, `EBUSY` while a flip is pending, and
   page-flip events written to the pipe.
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's
-  `AHardwareBuffer` and KWin's out-fence. If the app is closed, a simulated
+  `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
   vblank keeps KWin running.
 - It also contains the input thread and a crash reporter that logs the last
   GL/EGL calls and a symbolised backtrace.
@@ -252,14 +252,14 @@ sequenceDiagram
 
     K->>S: render into a gbm buffer (an AHardwareBuffer)
     S->>G: GLES draw calls (EGLImage of the buffer)
-    K->>S: atomic commit (FB_ID, OUT_FENCE_PTR)
-    S-->>K: out-fence (native fence sync)
-    S->>A: PRESENT(buffer, acquire fence)
-    A->>F: ASurfaceTransaction_setBuffer(buffer, fence)
+    K->>S: atomic commit (FB_ID, IN_FENCE_FD = render fence)
+    S->>A: PRESENT(buffer, render fence)
+    A->>G: copy into the app's own buffer (GPU blit, waits on the fence)
+    A->>S: RELEASE(buffer, blit fence): KWin may reuse it
+    A->>F: ASurfaceTransaction_setBuffer(copy, blit fence)
     F-->>A: on commit: frame latched
     A->>S: FRAME_DONE(frame, latch time)
     S-->>K: DRM page-flip event → KWin schedules the next frame
-    A->>S: RELEASE(buffer, release fence)
 ```
 
 ### Launch flow
@@ -274,8 +274,9 @@ flowchart LR
     SP --> PS["plasmashell, apps …<br/>(untouched)"]
 ```
 
-No `--drm` flag or plasma-workspace change is needed: with neither
-`WAYLAND_DISPLAY` nor `DISPLAY` set, KWin picks its DRM backend by itself.
+Nothing in plasma-workspace changes, and you never pass `--drm` yourself:
+the `kwin_wayland` wrapper adds it (with neither `WAYLAND_DISPLAY` nor
+`DISPLAY` set, KWin would pick its DRM backend anyway).
 
 ## What a phone needs
 
@@ -332,9 +333,10 @@ rather than required of the phone.
 with KWin installed.
 
 1. Download the `chameleon-<commit>` artifact from the latest
-   [Actions run](../../actions/workflows/build.yml) and unzip it.
+   [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml) and unzip it.
 2. Install `chameleon.apk` and open **Chameleon**.
-3. In Termux, install the package, then start a session:
+3. In Termux, install the package, then start a session (run
+   `termux-setup-storage` once first, so Termux can read `/sdcard`):
 
    ```sh
    apt install /sdcard/Download/chameleon-*/chameleon_*_aarch64.deb
@@ -357,8 +359,8 @@ with KWin installed.
    `chmod +x chameleon/chameleon* chameleon/bin/*`, then
    `chameleon/chameleon --install` to put `chameleon` in `$PATH`.
 
-4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ switches between
-   **direct touch** and **trackpad** (tap to click, two-finger tap for right
+4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ opens the
+   settings: **direct touch** or **trackpad** (tap to click, two-finger tap for right
    click, two-finger drag to scroll, long-press or tap-and-drag to hold, e.g. to
    move a window).
 
