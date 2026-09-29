@@ -230,6 +230,7 @@ No `--drm` flag or plasma-workspace change is needed: with neither
 
    chameleon kwin_wayland konsole           # KWin with a terminal
    chameleon startplasma-wayland            # or a full Plasma session
+   chameleon kinfocenter                    # or one app: KWin hosts it and quits with it
    ```
 
 4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ switches between

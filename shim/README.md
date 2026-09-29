@@ -23,6 +23,7 @@ kwin-shim/chameleon --install        # once: `chameleon` in $PREFIX/bin
 chameleon kwin_wayland               # just KWin
 chameleon kwin_wayland konsole       # KWin plus a first app
 chameleon startplasma-wayland        # a Plasma session
+chameleon kinfocenter                # one app: KWin runs it and quits with it
 ```
 
 `chameleon` puts `kwin-shim/bin` first in `PATH`, clears `DISPLAY` /
