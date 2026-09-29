@@ -758,4 +758,13 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSetFrameRateVote(JNIEn
     LOGI("frame rate vote %.1f Hz", hz);
 }
 
+// Touch, pointer and key events for the producer (CHAM_INPUT); dropped when
+// no producer is connected.
+JNIEXPORT void JNICALL
+Java_io_github_harryl0l_chameleon_InputSender_nativeSendInput(JNIEnv *, jclass, jint kind, jlong a, jlong b)
+{
+    std::lock_guard<std::mutex> lock(g_lock);
+    send_locked(CHAM_INPUT, (uint32_t)kind, (uint64_t)a, (uint64_t)b);
+}
+
 }  // extern "C"

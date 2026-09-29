@@ -33,6 +33,15 @@ int link_flip_pending_locked(void);
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
                             uint32_t refresh_mhz);
 
+/* KMS mode size (the first surface size the presenter reported). */
+void link_mode_size(uint32_t *width, uint32_t *height);
+
+/* ---- input.c: app input -> KWin's fake input ---- */
+struct cham_msg;
+void input_post(const struct cham_msg *m);
+/* KWin's Wayland socket, seen when it bind()s it. */
+void input_note_socket(const char *path);
+
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {
     dev_t dev;

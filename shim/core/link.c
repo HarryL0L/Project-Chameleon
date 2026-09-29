@@ -248,6 +248,9 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         if (m->a == CHAM_BYE_REPLACED)
             g_replaced = 1;
         break;
+    case CHAM_INPUT:
+        input_post(m);
+        break;
     }
 }
 
@@ -352,6 +355,14 @@ static void start_threads(void)
 void link_start(void)
 {
     pthread_once(&g_once, start_threads);
+}
+
+void link_mode_size(uint32_t *width, uint32_t *height)
+{
+    pthread_mutex_lock(&g_lock);
+    *width = g_first_w;
+    *height = g_first_h;
+    pthread_mutex_unlock(&g_lock);
 }
 
 int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, int timeout_ms)

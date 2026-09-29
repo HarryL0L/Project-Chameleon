@@ -1,7 +1,8 @@
 #!/bin/sh
 # Builds libchameleon.so + libgbm.so for the desktop (memfd instead of
 # AHardwareBuffer) and runs kms_test.c against the fake device with the
-# system's real libdrm. Needs: cc, libdrm-dev.
+# system's real libdrm, and the input path against a real Wayland server.
+# Needs: cc, libdrm-dev, libwayland-dev.
 set -e
 cd "$(dirname "$0")/../.."
 OUT=${OUT:-$(mktemp -d)}
@@ -17,3 +18,7 @@ CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" CHAMELEON_WAIT
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
 cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles/glsl_fix.c
 "$OUT/glsl_fix_test"
+cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config --cflags --libs wayland-server)
+mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
+CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
+    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/input_test"

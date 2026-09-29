@@ -37,7 +37,35 @@ enum cham_msg_type {
                                once the fence signals */
     CHAM_FRAME_DONE = 102,  /* a = frame number, b = SurfaceFlinger latch time (ns) */
     CHAM_BYE = 103,         /* a = CHAM_BYE_*; sent right before the presenter closes */
+    CHAM_INPUT = 104,       /* id = CHAM_INPUT_*, a/b as described there */
 };
+
+/* Input events, presenter -> producer (the KWin shim feeds them to KWin's
+ * org_kde_kwin_fake_input). Positions are fractions of the surface so they
+ * map onto the producer's screen whatever its size or scale:
+ *   pos   = CHAM_INPUT_POS(x, y), x/y in [0, 1] as 16.16 fixed point
+ *   delta = CHAM_INPUT_DELTA(dx, dy), dx/dy as signed multiples of
+ *           surface width/height in 12.20 fixed point */
+enum cham_input_kind {
+    CHAM_INPUT_TOUCH_DOWN = 1,     /* a = touch id, b = pos */
+    CHAM_INPUT_TOUCH_MOTION = 2,   /* a = touch id, b = pos */
+    CHAM_INPUT_TOUCH_UP = 3,       /* a = touch id */
+    CHAM_INPUT_TOUCH_CANCEL = 4,
+    CHAM_INPUT_TOUCH_FRAME = 5,    /* ends a group of touch events */
+    CHAM_INPUT_POINTER_MOTION = 6, /* b = delta */
+    CHAM_INPUT_POINTER_ABS = 7,    /* b = pos */
+    CHAM_INPUT_BUTTON = 8,         /* a = evdev button (BTN_LEFT = 0x110), b = 1 pressed / 0 released */
+    CHAM_INPUT_AXIS = 9,           /* a = 0 vertical / 1 horizontal, b = (int64) value * 256 */
+    CHAM_INPUT_KEYSYM = 10,        /* a = X keysym (0x01000000 | code point for Unicode), b = 1 / 0 */
+    CHAM_INPUT_KEY = 11,           /* a = evdev key code, b = 1 / 0 */
+};
+
+#define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)
+#define CHAM_INPUT_DELTA(dx, dy) ((uint64_t)(uint32_t)(int32_t)(dx) | (uint64_t)(uint32_t)(int32_t)(dy) << 32)
+#define CHAM_INPUT_X(v) ((uint32_t)((v) & 0xffffffffu))
+#define CHAM_INPUT_Y(v) ((uint32_t)((v) >> 32))
+#define CHAM_INPUT_DX(v) ((int32_t)(uint32_t)((v) & 0xffffffffu))
+#define CHAM_INPUT_DY(v) ((int32_t)(uint32_t)((v) >> 32))
 
 /* BYE reasons. A replaced producer must not reconnect by itself, or two
  * producers would keep taking the screen from each other. */

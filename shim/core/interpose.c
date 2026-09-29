@@ -15,7 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <stddef.h>
+#include <sys/socket.h>
 #include <sys/sysmacros.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
@@ -52,6 +55,7 @@ DECLARE_REAL(int, ioctl, int, int, ...)
 DECLARE_REAL(int, drmGetDevice2, int, uint32_t, drmDevicePtr *)
 DECLARE_REAL(int, drmGetDevice, int, drmDevicePtr *)
 DECLARE_REAL(char *, drmGetDeviceNameFromFd2, int)
+DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 
 const char *fake_path(void)
 {
@@ -248,6 +252,30 @@ int ioctl(int fd, int request, ...)
     }
     resolve_ioctl();
     return REAL(ioctl)(fd, request, arg);
+}
+
+/* ---- KWin's Wayland socket ---- */
+
+/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N"; input.c connects
+ * to it to inject input through KWin's fake-input protocol. */
+int bind(int fd, const struct sockaddr *addr, socklen_t len)
+{
+    resolve_bind();
+    int ret = REAL(bind)(fd, addr, len);
+    if (ret == 0 && addr && addr->sa_family == AF_UNIX && len > offsetof(struct sockaddr_un, sun_path)) {
+        const struct sockaddr_un *un = (const struct sockaddr_un *)addr;
+        char path[sizeof un->sun_path + 1];
+        size_t n = len - offsetof(struct sockaddr_un, sun_path);
+        if (n > sizeof un->sun_path)
+            n = sizeof un->sun_path;
+        memcpy(path, un->sun_path, n);
+        path[n] = 0;
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strstr(base, ".lock"))
+            input_note_socket(path);
+    }
+    return ret;
 }
 
 /* ---- libdrm device identity ---- */

@@ -129,7 +129,7 @@ static uintptr_t strip(uintptr_t pc)
 #endif
 }
 
-static void out_frame(const char *kind, int n, uintptr_t pc)
+__attribute__((unused)) static void out_frame(const char *kind, int n, uintptr_t pc)
 {
     pc = strip(pc);
     out("chameleon:   ");
@@ -153,7 +153,7 @@ static void out_frame(const char *kind, int n, uintptr_t pc)
 }
 
 /* Is `ret` a return address, i.e. does the instruction before it call? */
-static int is_return_address(uintptr_t ret)
+__attribute__((unused)) static int is_return_address(uintptr_t ret)
 {
     ret = strip(ret);
     if (ret & 3)

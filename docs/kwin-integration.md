@@ -29,6 +29,20 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
   to KWin's own socket on a helper thread, binds fake input, and feeds it
   touch/keys that the presenter app sends over the chameleon socket.
 
+Implemented in `shim/core/input.c`:
+
+- The socket path comes from KWin's own `bind()` of `$XDG_RUNTIME_DIR/wayland-N`
+  (interposed), libwayland-client is `dlopen()`ed, and the protocol tables are
+  written out by hand (no wayland-scanner at build time).
+- The app sends `CHAM_INPUT` messages with positions as fractions of its
+  surface; the shim maps them onto the output's logical geometry from
+  `zxdg_output_v1` (falls back to the KMS mode size), so output scaling works.
+- Keys are X keysyms (`keyboard_keysym`, v6): KWin finds the keycode and Shift
+  level in its keymap, or maps a spare keycode for anything else, so text from
+  the Android keyboard works in any language.
+- `shim/test/input_test.c` runs the whole path against a real
+  libwayland-server with a stub fake-input global.
+
 ## Mali-G77: no GPU timer queries
 
 KWin measures render time with `GL_EXT_disjoint_timer_query`
