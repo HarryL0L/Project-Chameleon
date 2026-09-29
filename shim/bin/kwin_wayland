@@ -35,7 +35,9 @@ done
 for old in libGLESv2.so.2 libEGL.so.1; do
     if [ -e "$SHIM_DIR/$old" ] || [ -L "$SHIM_DIR/$old" ]; then
         echo "chameleon: $SHIM_DIR/$old is left over from an older version and would hide" >&2
-        echo "  glvnd; delete the directory and copy the new one in its place." >&2
+        echo "  Termux's glvnd. Remove it (and from wherever you copied the folder from," >&2
+        echo "  e.g. /sdcard: unpacking a new artifact over an old folder keeps old files):" >&2
+        echo "    rm -f $SHIM_DIR/libGLESv2.so.2 $SHIM_DIR/libEGL.so.1" >&2
         exit 1
     fi
 done
