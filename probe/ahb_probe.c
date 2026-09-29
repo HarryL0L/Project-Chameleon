@@ -335,8 +335,8 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     report_ext(exts, "EGL_ANDROID_native_fence_sync", 0, "sync_file fences for KWin's commits (else glFinish)");
     report_ext(exts, "EGL_KHR_wait_sync", 0, "with native_fence_sync: KWin's fences");
     report_ext(exts, "EGL_KHR_fence_sync", 0, "fences");
-    report_ext(exts, "EGL_EXT_image_dma_buf_import", 0, "native dmabuf import; shim fakes it if absent");
-    report_ext(exts, "EGL_EXT_image_dma_buf_import_modifiers", 0, "shim fakes it if absent");
+    report_ext(exts, "EGL_EXT_image_dma_buf_import", 0, "optional: never on Android; Chameleon imports AHardwareBuffers instead");
+    report_ext(exts, "EGL_EXT_image_dma_buf_import_modifiers", 0, "optional: never on Android; not needed");
 
     PROC(egl, GetNativeClientBufferANDROID, "eglGetNativeClientBufferANDROID");
     PROC(egl, CreateImageKHR, "eglCreateImageKHR");
@@ -411,7 +411,7 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     report_ext(glexts, "GL_EXT_unpack_subimage", 1, "required by KWin (texture uploads)");
     report_ext(glexts, "GL_EXT_read_format_bgra", 1, "required by KWin (read-backs)");
     report_ext(glexts, "GL_OES_EGL_image_external", 0, "external textures");
-    report_ext(glexts, "GL_EXT_EGL_image_storage", 0, "immutable EGLImage storage");
+    report_ext(glexts, "GL_EXT_EGL_image_storage", 0, "optional: not used");
     result(egl.GetNativeClientBufferANDROID && egl.CreateImageKHR && gl.EGLImageTargetTexture2DOES, 1,
            "EGLImage entry points resolved", "");
 
