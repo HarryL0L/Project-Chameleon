@@ -2,8 +2,9 @@
  * Wire protocol between a Termux-side producer (demo, later the KWin shim)
  * and the presenter app.
  *
- * Transport: an AF_UNIX SOCK_SEQPACKET socket created by the presenter app
- * and handed to the producer by the launcher (see termux/chameleon-launcher).
+ * Transport: AF_UNIX SOCK_SEQPACKET. The presenter app is installed with
+ * sharedUserId="com.termux" (signed with Termux's public GitHub test key), so
+ * it runs as the Termux user and simply listens on CHAM_SOCKET_PATH.
  * Every message is one struct cham_msg packet, optionally carrying one fd via
  * SCM_RIGHTS. BUFFER_ADD is immediately followed by one packet written by
  * AHardwareBuffer_sendHandleToUnixSocket().
@@ -47,7 +48,8 @@ struct cham_msg {
 #define CHAM_CONFIG_WIDTH(m) ((uint32_t)((m)->a & 0xffffffffu))
 #define CHAM_CONFIG_HEIGHT(m) ((uint32_t)((m)->a >> 32))
 
-/* Abstract-namespace socket the launcher listens on inside Termux. */
-#define CHAM_LAUNCHER_SOCKET "chameleon"
+/* Filesystem socket the presenter app listens on; override with
+ * $CHAMELEON_SOCKET on the producer side. */
+#define CHAM_SOCKET_PATH "/data/data/com.termux/files/usr/tmp/chameleon-0"
 
 #endif

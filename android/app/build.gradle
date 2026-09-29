@@ -1,0 +1,55 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "io.github.harryl0l.chameleon"
+    compileSdk 34
+    ndkVersion "26.3.11579264"
+
+    defaultConfig {
+        applicationId "io.github.harryl0l.chameleon"
+        // ASurfaceControl / ASurfaceTransaction need API 29.
+        minSdk 29
+        targetSdk 34
+        versionCode 1
+        versionName "0.1.0"
+        ndk {
+            abiFilters "arm64-v8a"
+        }
+    }
+
+    // Termux's *public* GitHub-release test key (from termux-app's
+    // testkey_untrusted.jks). Signing with it is what lets
+    // sharedUserId="com.termux" install next to a GitHub build of Termux.
+    signingConfigs {
+        termux {
+            storeFile rootProject.file("termux-testkey.jks")
+            storePassword "xrj45yWGLbsO7W0v"
+            keyAlias "alias"
+            keyPassword "xrj45yWGLbsO7W0v"
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.termux
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.termux
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    externalNativeBuild {
+        cmake {
+            path "src/main/cpp/CMakeLists.txt"
+            version "3.22.1"
+        }
+    }
+}

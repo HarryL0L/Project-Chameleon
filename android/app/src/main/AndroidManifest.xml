@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  sharedUserId="com.termux" makes this app run as the Termux user, so it can
+  listen on a socket in $PREFIX/tmp that Termux processes connect to. This only
+  installs next to a Termux build signed with the same key (GitHub releases).
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="com.termux"
+    android:sharedUserLabel="@string/shared_user_label">
+
+    <application
+        android:label="@string/app_name"
+        android:hasCode="true"
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen">
+        <activity
+            android:name=".PresenterActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
