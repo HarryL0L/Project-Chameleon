@@ -38,7 +38,9 @@ jobs:
 
       - name: Termux package (.deb)
         run: |
-          VERSION="0.1.0~git$(date -u +%Y%m%d).$(git rev-parse --short HEAD)"
+          # Commit time first, so newer builds always sort higher for apt (the
+          # hash alone compares at random: 4d83f62 < d7f4a01).
+          VERSION="0.1.0~git$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
           packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo "$VERSION" out/
           dpkg-deb --info out/chameleon_*_aarch64.deb
           dpkg-deb --contents out/chameleon_*_aarch64.deb
