@@ -42,6 +42,9 @@ final class ImeView extends View {
                 int max = Math.min(mComposing.length(), text.length());
                 while (common < max && mComposing.charAt(common) == text.charAt(common))
                     common++;
+                // Never split a surrogate pair (emoji that share a high half).
+                if (common > 0 && Character.isHighSurrogate(text.charAt(common - 1)))
+                    common--;
                 int erase = mComposing.codePointCount(common, mComposing.length());
                 for (int i = 0; i < erase; i++)
                     mKeys.tap(KeyInput.XK_BACKSPACE);

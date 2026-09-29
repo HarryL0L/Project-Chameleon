@@ -44,14 +44,6 @@ final class KeyInput {
         mListener = listener;
     }
 
-    boolean ctrlLatched() {
-        return mCtrl;
-    }
-
-    boolean altLatched() {
-        return mAlt;
-    }
-
     void toggleCtrl() {
         mCtrl = !mCtrl;
         notifyLatch();

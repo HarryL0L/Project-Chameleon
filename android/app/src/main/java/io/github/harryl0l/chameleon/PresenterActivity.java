@@ -39,7 +39,7 @@ import android.widget.TextView;
 /**
  * Full-screen SurfaceView. The native presenter attaches an ASurfaceControl to
  * it and shows AHardwareBuffers sent by a Termux process over
- * $PREFIX/tmp/chameleon-0 without copying them.
+ * $PREFIX/tmp/chameleon-0 (for KWin, after one GPU copy; see presenter.cpp).
  *
  * Input goes back over the same socket: touches (direct or as a trackpad),
  * mouse, hardware keys and the Android keyboard. A small toolbar in the top
@@ -55,7 +55,7 @@ public class PresenterActivity extends Activity
         System.loadLibrary("chameleon_presenter");
     }
 
-    private static native void nativeStart(String socketPath);
+    private static native void nativeStart();
     private static native void nativeSurfaceCreated(Object surface);
     private static native void nativeSurfaceChanged(int width, int height, int refreshMilliHz);
     private static native void nativeSurfaceDestroyed();
@@ -69,6 +69,7 @@ public class PresenterActivity extends Activity
     private static final String PREF_BACK = "back_key";
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
+    private static final float DEFAULT_SPEED = 1.5f;
 
     private static boolean sStarted;
     private int mWidth, mHeight;
@@ -113,8 +114,8 @@ public class PresenterActivity extends Activity
             getWindow().setDecorFitsSystemWindows(false);
             // Bars are hidden through WindowInsetsController instead, and
             // without FLAG_FULLSCREEN the keyboard's insets are reported. The
-            // window is not resized (decor does not fit system windows), so
-            // KWin's screen keeps its size while the keyboard is up.
+            // window itself is not resized (decor does not fit system
+            // windows); updateSurfaceArea() decides what the keyboard does.
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
             getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         }
@@ -161,8 +162,7 @@ public class PresenterActivity extends Activity
         });
 
         if (!sStarted) {
-            // Same path as CHAM_SOCKET_PATH; we run as the Termux user.
-            nativeStart("/data/data/com.termux/files/usr/tmp/chameleon-0");
+            nativeStart(); // listens on CHAM_SOCKET_PATH; we run as the Termux user
             sStarted = true;
         }
     }
@@ -268,8 +268,7 @@ public class PresenterActivity extends Activity
         int bottom = 0;
         if (mKeyboardShown && mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true)) {
             bottom = mImeBottom;
-            if (mExtraKeys.getVisibility() == View.VISIBLE)
-                bottom += mExtraKeys.getHeight();
+            bottom += mExtraKeys.getHeight(); // shown with the keyboard
             // A full-size keyboard in landscape can leave a strip a couple of
             // hundred pixels tall, shorter than Plasma's panel. Below 40% of
             // the window the keyboard covers the desktop instead.
@@ -332,7 +331,7 @@ public class PresenterActivity extends Activity
             case KeyEvent.KEYCODE_HOME:
                 return super.dispatchKeyEvent(event);
             case KeyEvent.KEYCODE_BACK:
-                if (!"leave".equals(mPrefs.getString(PREF_BACK, "escape"))) {
+                if (!backLeavesApp()) {
                     if (event.getRepeatCount() == 0)
                         InputSender.keysym(KeyInput.XK_ESCAPE, event.getAction() == KeyEvent.ACTION_DOWN);
                 } else if (event.getAction() == KeyEvent.ACTION_UP) {
@@ -346,9 +345,25 @@ public class PresenterActivity extends Activity
     // ---- settings ----
 
     private void applyInputPrefs() {
-        TouchInput.Mode mode = "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"))
-                ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT;
-        mTouch.configure(mode, mPrefs.getFloat(PREF_SPEED, 1.5f), mPrefs.getBoolean(PREF_TAP, true));
+        mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT,
+                mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED), mPrefs.getBoolean(PREF_TAP, true));
+    }
+
+    private boolean isTrackpad() {
+        return "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
+    }
+
+    private boolean backLeavesApp() {
+        return "leave".equals(mPrefs.getString(PREF_BACK, "escape"));
+    }
+
+    // Pointer speed 0.25x..3x on a SeekBar of 0..275.
+    private static int speedToProgress(float speed) {
+        return Math.round(speed * 100) - 25;
+    }
+
+    private static float progressToSpeed(int progress) {
+        return (progress + 25) / 100f;
     }
 
     private TextView settingsLabel(String text, boolean heading) {
@@ -376,7 +391,7 @@ public class PresenterActivity extends Activity
         trackpad.setId(View.generateViewId());
         modes.addView(direct);
         modes.addView(trackpad);
-        boolean isTrackpad = "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
+        boolean isTrackpad = isTrackpad();
         modes.check(isTrackpad ? trackpad.getId() : direct.getId());
         box.addView(modes);
         TextView modeHint = settingsLabel(getString(isTrackpad ? R.string.mode_trackpad_hint : R.string.mode_direct_hint), false);
@@ -384,14 +399,14 @@ public class PresenterActivity extends Activity
 
         TextView speedLabel = settingsLabel("", true);
         SeekBar speed = new SeekBar(this);
-        speed.setMax(275); // 0.25x .. 3x
-        float current = mPrefs.getFloat(PREF_SPEED, 1.5f);
-        speed.setProgress(Math.round(current * 100) - 25);
+        speed.setMax(speedToProgress(3f));
+        float current = mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED);
+        speed.setProgress(speedToProgress(current));
         speedLabel.setText(getString(R.string.pointer_speed, current));
         speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                speedLabel.setText(getString(R.string.pointer_speed, (progress + 25) / 100f));
+                speedLabel.setText(getString(R.string.pointer_speed, progressToSpeed(progress)));
             }
 
             @Override
@@ -426,7 +441,7 @@ public class PresenterActivity extends Activity
         backLeave.setId(View.generateViewId());
         back.addView(backEsc);
         back.addView(backLeave);
-        back.check("leave".equals(mPrefs.getString(PREF_BACK, "escape")) ? backLeave.getId() : backEsc.getId());
+        back.check(backLeavesApp() ? backLeave.getId() : backEsc.getId());
         box.addView(back);
 
         box.addView(settingsLabel(getString(R.string.mouse_hint), false));
@@ -464,7 +479,7 @@ public class PresenterActivity extends Activity
                 .setPositiveButton(R.string.done, (d, w) -> {
                     mPrefs.edit()
                             .putString(PREF_MODE, modes.getCheckedRadioButtonId() == trackpad.getId() ? "trackpad" : "direct")
-                            .putFloat(PREF_SPEED, (speed.getProgress() + 25) / 100f)
+                            .putFloat(PREF_SPEED, progressToSpeed(speed.getProgress()))
                             .putBoolean(PREF_TAP, tap.isChecked())
                             .putString(PREF_BACK, back.getCheckedRadioButtonId() == backLeave.getId() ? "leave" : "escape")
                             .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))

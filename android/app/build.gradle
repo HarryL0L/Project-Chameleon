@@ -36,7 +36,6 @@ android {
             signingConfig = signingConfigs.termux
         }
         release {
-            minifyEnabled = false
             signingConfig = signingConfigs.termux
         }
     }

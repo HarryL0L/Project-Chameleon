@@ -1,7 +1,8 @@
 // Chameleon presenter: receives AHardwareBuffers + acquire fences from one
 // Termux producer over a SOCK_SEQPACKET socket and shows them on an
-// ASurfaceControl child of the activity's SurfaceView. No pixel copies:
-// SurfaceFlinger (and usually an HWC overlay) reads the producer's buffer.
+// ASurfaceControl child of the activity's SurfaceView. In direct mode nothing
+// is copied: SurfaceFlinger (and usually an HWC overlay) reads the producer's
+// buffer.
 //
 // Copy mode (CHAM_HELLO_COPY, used by the KWin shim): the producer reuses a
 // buffer as soon as the next frame is latched, KMS-style, while
@@ -22,7 +23,6 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <dlfcn.h>
-#include <fcntl.h>
 #include <jni.h>
 #include <poll.h>
 #include <pthread.h>
@@ -92,14 +92,19 @@ uint64_t g_pool_last_serial = 0;
 uint64_t g_pool_last_gen = 0;
 uint64_t g_pool_serial = 0;
 
-// API 30; resolved at runtime because minSdk is 29.
+// libandroid.so functions newer than minSdk 29, or null.
+template <class Fn>
+Fn android_sym(const char *name)
+{
+    void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+    return lib ? (Fn)dlsym(lib, name) : nullptr;
+}
+
+// API 30.
 using SetFrameRateFn = void (*)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
 SetFrameRateFn set_frame_rate()
 {
-    static SetFrameRateFn fn = [] {
-        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
-        return lib ? (SetFrameRateFn)dlsym(lib, "ASurfaceTransaction_setFrameRate") : nullptr;
-    }();
+    static SetFrameRateFn fn = android_sym<SetFrameRateFn>("ASurfaceTransaction_setFrameRate");
     return fn;
 }
 
@@ -111,10 +116,7 @@ using OnCommitFn = void (*)(void *context, ASurfaceTransactionStats *stats);
 using SetOnCommitFn = void (*)(ASurfaceTransaction *, void *, OnCommitFn);
 SetOnCommitFn set_on_commit()
 {
-    static SetOnCommitFn fn = [] {
-        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
-        return lib ? (SetOnCommitFn)dlsym(lib, "ASurfaceTransaction_setOnCommit") : nullptr;
-    }();
+    static SetOnCommitFn fn = android_sym<SetOnCommitFn>("ASurfaceTransaction_setOnCommit");
     return fn;
 }
 
@@ -244,6 +246,26 @@ void stats_log_locked()
     g_stats.sample = true;
 }
 
+// A frame that can't be shown: hand the buffer straight back and keep the
+// producer's clock running. Takes ownership of fence.
+void skip_frame_locked(uint32_t id, uint64_t frame, int fence)
+{
+    g_stats.skipped++;
+    if (fence >= 0)
+        close(fence);
+    send_locked(CHAM_RELEASE, id, 0, 0);
+    send_locked(CHAM_FRAME_DONE, 0, frame, 0);
+}
+
+// Our preferred frame rate goes with the next transaction after it changed.
+void apply_frame_rate_vote_locked(ASurfaceTransaction *txn)
+{
+    if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {
+        set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
+        g_vote_dirty = false;
+    }
+}
+
 // ---- placement ----
 
 // Where a bw x bh frame goes on the sw x sh surface. The KWin shim switches
@@ -267,7 +289,7 @@ Placement place(int bw, int bh, int sw, int sh)
     }
     if (bw <= 0 || bh <= 0 || sw <= 0 || sh <= 0)
         return p;
-    // Same aspect ratio (within a pixel): fill, as before.
+    // Same aspect ratio (within a pixel): fill the surface.
     int64_t fit_w = (int64_t)bw * sh / bh;
     if (std::llabs(fit_w - sw) <= 1)
         return p;
@@ -311,6 +333,13 @@ bool gl_init()
     p_eglWaitSyncKHR = (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR");
     p_eglDupNativeFenceFDANDROID =
         (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    if (!p_eglCreateSyncKHR || !p_eglDestroySyncKHR || !p_eglWaitSyncKHR || !p_eglDupNativeFenceFDANDROID) {
+        LOGE("copy mode: the driver has no native fence sync");
+        eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+        eglDestroyContext(g_dpy, g_ctx);
+        g_ctx = EGL_NO_CONTEXT;
+        return false;
+    }
     LOGI("copy mode: GL %s", (const char *)glGetString(GL_RENDERER));
     return true;
 }
@@ -429,11 +458,7 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     int pi = gl_init() ? pool_acquire_locked() : -1;
     if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
         // Can't copy: skip the frame but keep the producer's clock running.
-        g_stats.skipped++;
-        if (fence >= 0)
-            close(fence);
-        send_locked(CHAM_RELEASE, id, 0, 0);
-        send_locked(CHAM_FRAME_DONE, 0, frame, 0);
+        skip_frame_locked(id, frame, fence);
         return;
     }
     PoolBuf &p = g_pool[pi];
@@ -474,10 +499,7 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     ASurfaceTransaction_setGeometry(txn, g_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
     ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
-    if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {
-        set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
-        g_vote_dirty = false;
-    }
+    apply_frame_rate_vote_locked(txn);
     p.held = true;
     bool commit = set_on_commit() != nullptr;
     int64_t prev = g_pool_displayed;
@@ -528,11 +550,7 @@ void present(uint32_t id, uint64_t frame, int fence)
     Buffer *buf = id < kMaxBuffers ? &g_buffers[id] : nullptr;
     if (!g_sc || !buf || !buf->ahb) {
         // Nothing to show on: hand the buffer straight back.
-        g_stats.skipped++;
-        if (fence >= 0)
-            close(fence);
-        send_locked(CHAM_RELEASE, id, 0, 0);
-        send_locked(CHAM_FRAME_DONE, 0, frame, 0);
+        skip_frame_locked(id, frame, fence);
         return;
     }
     if (g_copy_mode) {
@@ -548,10 +566,7 @@ void present(uint32_t id, uint64_t frame, int fence)
     ASurfaceTransaction_setGeometry(txn, g_sc, pl.src, pl.dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
     ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
-    if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {
-        set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
-        g_vote_dirty = false;
-    }
+    apply_frame_rate_vote_locked(txn);
     bool commit = set_on_commit() != nullptr;
     auto *ctx = new FrameCtx{g_client_gen, g_sc, id, g_displayed, frame, commit, {commit ? 2 : 1}};
     g_displayed = id;
@@ -723,10 +738,9 @@ int open_listener(const std::string &path, ino_t *ino)
     return listener;
 }
 
-void *server_main(void *arg)
+void *server_main(void *)
 {
-    std::string path = *static_cast<std::string *>(arg);
-    delete static_cast<std::string *>(arg);
+    const std::string path = CHAM_SOCKET_PATH;
 
     ino_t ino = 0;
     int listener = -1;
@@ -764,13 +778,10 @@ void *server_main(void *arg)
 extern "C" {
 
 JNIEXPORT void JNICALL
-Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStart(JNIEnv *env, jclass, jstring jpath)
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStart(JNIEnv *, jclass)
 {
-    const char *path = env->GetStringUTFChars(jpath, nullptr);
-    auto *arg = new std::string(path);
-    env->ReleaseStringUTFChars(jpath, path);
     pthread_t thread;
-    if (pthread_create(&thread, nullptr, server_main, arg) == 0)
+    if (pthread_create(&thread, nullptr, server_main, nullptr) == 0)
         pthread_detach(thread);
 }
 

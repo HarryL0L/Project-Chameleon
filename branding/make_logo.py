@@ -205,7 +205,7 @@ def layer(mono):
 
 if os.path.isdir(RES):
     os.makedirs(os.path.join(RES, "drawable"), exist_ok=True)
-    os.makedirs(os.path.join(RES, "mipmap-anydpi-v26"), exist_ok=True)
+    os.makedirs(os.path.join(RES, "mipmap-anydpi"), exist_ok=True)
     open(os.path.join(RES, "drawable", "ic_launcher_foreground.xml"), "w").write(layer(False))
     open(os.path.join(RES, "drawable", "ic_launcher_monochrome.xml"), "w").write(layer(True))
     open(os.path.join(RES, "values", "ic_launcher_colors.xml"), "w").write(
@@ -216,5 +216,5 @@ if os.path.isdir(RES):
                 '    <foreground android:drawable="@drawable/ic_launcher_foreground"/>\n'
                 '    <monochrome android:drawable="@drawable/ic_launcher_monochrome"/>\n'
                 '</adaptive-icon>\n')
-    for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
-        open(os.path.join(RES, "mipmap-anydpi-v26", name), "w").write(adaptive)
+    # An adaptive icon is masked by the launcher, so no separate round icon.
+    open(os.path.join(RES, "mipmap-anydpi", "ic_launcher.xml"), "w").write(adaptive)
