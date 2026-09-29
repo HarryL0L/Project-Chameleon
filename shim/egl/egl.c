@@ -74,7 +74,6 @@ FWD(EGLBoolean, eglBindTexImage, (EGLDisplay d, EGLSurface s, EGLint b), (d, s, 
 FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint n, EGLint *num), (d, a, c, n, num), EGL_FALSE)
 FWD(EGLint, eglClientWaitSync, (EGLDisplay d, EGLSync s, EGLint f, EGLTime t), (d, s, f, t), EGL_FALSE)
 FWD(EGLBoolean, eglCopyBuffers, (EGLDisplay d, EGLSurface s, EGLNativePixmapType p), (d, s, p), EGL_FALSE)
-FWD(EGLContext, eglCreateContext, (EGLDisplay d, EGLConfig c, EGLContext s, const EGLint *a), (d, c, s, a), EGL_NO_CONTEXT)
 FWD(EGLSurface, eglCreatePbufferFromClientBuffer, (EGLDisplay d, EGLenum t, EGLClientBuffer b, EGLConfig c, const EGLint *a), (d, t, b, c, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePbufferSurface, (EGLDisplay d, EGLConfig c, const EGLint *a), (d, c, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePixmapSurface, (EGLDisplay d, EGLConfig c, EGLNativePixmapType p, const EGLint *a), (d, c, p, a), EGL_NO_SURFACE)
@@ -106,6 +105,44 @@ FWD(EGLBoolean, eglWaitClient, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitGL, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitNative, (EGLint e), (e), EGL_FALSE)
 FWD(EGLBoolean, eglWaitSync, (EGLDisplay d, EGLSync s, EGLint f), (d, s, f), EGL_FALSE)
+
+/* ---- contexts ----
+ * KWin asks for robust access (+ lose-context-on-reset) and high priority.
+ * With that context, Mali-G77 crashed (SIGBUS, NULL+0x29) in glTexImage2D
+ * on KWin's first texture upload, while the same upload works in a plain
+ * context. Drop those attributes unless CHAMELEON_EGL_KEEP lists them
+ * ("robust", "priority"). KWin runs fine without either. */
+static int keep(const char *what)
+{
+    const char *list = getenv("CHAMELEON_EGL_KEEP");
+    return list && strstr(list, what);
+}
+
+EGLAPI EGLContext EGLAPIENTRY eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share, const EGLint *attribs)
+{
+    REAL(EGLContext, eglCreateContext, (EGLDisplay, EGLConfig, EGLContext, const EGLint *))
+    if (!p_eglCreateContext)
+        return EGL_NO_CONTEXT;
+    EGLint filtered[64];
+    int n = 0;
+    static int logged;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE && n < 62; a += 2) {
+        int robust = a[0] == EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT || a[0] == EGL_CONTEXT_OPENGL_ROBUST_ACCESS ||
+                     a[0] == EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT ||
+                     a[0] == EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY || a[0] == 0x334C /* NV purge */;
+        int priority = a[0] == EGL_CONTEXT_PRIORITY_LEVEL_IMG;
+        if ((robust && !keep("robust")) || (priority && !keep("priority"))) {
+            if (logged++ < 8)
+                cham_log("dropping context attribute 0x%x (set CHAMELEON_EGL_KEEP=%s to keep it)", a[0],
+                         robust ? "robust" : "priority");
+            continue;
+        }
+        filtered[n++] = a[0];
+        filtered[n++] = a[1];
+    }
+    filtered[n] = EGL_NONE;
+    return p_eglCreateContext(dpy, config, share, filtered);
+}
 
 static EGLBoolean fail(EGLint error)
 {

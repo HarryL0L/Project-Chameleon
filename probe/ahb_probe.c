@@ -164,6 +164,16 @@ static struct {
     const native_handle_t *(*getNativeHandle)(const AHardwareBuffer *); /* LL-NDK, may be hidden */
 } ahb;
 
+#define EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT 0x30BF
+#define EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT 0x3138
+#define EGL_LOSE_CONTEXT_ON_RESET_EXT 0x31BF
+#define EGL_CONTEXT_PRIORITY_LEVEL_IMG 0x3100
+#define EGL_CONTEXT_PRIORITY_HIGH_IMG 0x3101
+
+/* Context flavours: the probe's own, and what KWin 6.7 asks for. */
+enum ctx_kind { CTX_PLAIN3, CTX_V2, CTX_V2_ROBUST, CTX_V2_PRIORITY, CTX_KWIN };
+static enum ctx_kind g_ctx_kind = CTX_PLAIN3;
+
 /* ---- reporting ------------------------------------------------------------ */
 
 static int failures;
@@ -314,7 +324,21 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     PROC(gl, EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES");
 
     egl.BindAPI(EGL_OPENGL_ES_API);
-    const EGLint ctx_attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    EGLint ctx_attribs[16];
+    int na = 0;
+    ctx_attribs[na++] = EGL_CONTEXT_CLIENT_VERSION;
+    ctx_attribs[na++] = g_ctx_kind == CTX_PLAIN3 ? 3 : 2;
+    if (g_ctx_kind == CTX_V2_ROBUST || g_ctx_kind == CTX_KWIN) {
+        ctx_attribs[na++] = EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT;
+        ctx_attribs[na++] = EGL_TRUE;
+        ctx_attribs[na++] = EGL_CONTEXT_OPENGL_RESET_NOTIFICATION_STRATEGY_EXT;
+        ctx_attribs[na++] = EGL_LOSE_CONTEXT_ON_RESET_EXT;
+    }
+    if (g_ctx_kind == CTX_V2_PRIORITY || g_ctx_kind == CTX_KWIN) {
+        ctx_attribs[na++] = EGL_CONTEXT_PRIORITY_LEVEL_IMG;
+        ctx_attribs[na++] = EGL_CONTEXT_PRIORITY_HIGH_IMG;
+    }
+    ctx_attribs[na] = EGL_NONE;
     EGLContext ctx = EGL_NO_CONTEXT;
     if (has_ext(exts, "EGL_KHR_no_config_context"))
         ctx = egl.CreateContext(dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, ctx_attribs);
@@ -560,6 +584,8 @@ static void test_cpu_readback(EGLDisplay dpy, uint32_t w, uint32_t h)
 
 enum upload_mode { UPLOAD_MALLOC, UPLOAD_MMAP, UPLOAD_UNTAGGED };
 
+
+
 #define GL_UNPACK_ROW_LENGTH 0x0CF2
 #define GL_TEXTURE_2D_ 0x0DE1
 
@@ -597,17 +623,23 @@ static void test_uploads(void)
 {
     static const struct {
         enum upload_mode mode;
+        enum ctx_kind ctx;
         const char *what;
     } variants[] = {
-        {UPLOAD_MALLOC, "glTexImage2D from malloc'd (tagged 0xb4..) memory"},
-        {UPLOAD_MMAP, "glTexImage2D from mmap'd (untagged) memory"},
-        {UPLOAD_UNTAGGED, "glTexImage2D from malloc'd memory, tag stripped"},
+        {UPLOAD_MALLOC, CTX_PLAIN3, "upload, GLES3 context, malloc'd (tagged) data"},
+        {UPLOAD_MMAP, CTX_PLAIN3, "upload, GLES3 context, mmap'd data"},
+        {UPLOAD_MALLOC, CTX_V2, "upload, CLIENT_VERSION 2 context"},
+        {UPLOAD_MALLOC, CTX_V2_ROBUST, "upload, v2 + robust access context"},
+        {UPLOAD_MALLOC, CTX_V2_PRIORITY, "upload, v2 + high priority context"},
+        {UPLOAD_MALLOC, CTX_KWIN, "upload, KWin's context (v2 + robust + high priority)"},
     };
     for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
         fflush(stdout);
         pid_t pid = fork();
-        if (pid == 0)
+        if (pid == 0) {
+            g_ctx_kind = variants[i].ctx;
             _exit(upload_child(variants[i].mode));
+        }
         int status = 0;
         waitpid(pid, &status, 0);
         char msg[96];
