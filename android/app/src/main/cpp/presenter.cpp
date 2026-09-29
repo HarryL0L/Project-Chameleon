@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 
+#include <atomic>
 #include <mutex>
 #include <string>
 
@@ -61,6 +62,21 @@ SetFrameRateFn set_frame_rate()
     return fn;
 }
 
+// API 31: fires when SurfaceFlinger latches the transaction - the analogue of
+// a KMS page-flip event. OnComplete only fires after the frame was presented
+// (one vsync later), which halves the frame rate of a one-flip-in-flight
+// producer.
+using OnCommitFn = void (*)(void *context, ASurfaceTransactionStats *stats);
+using SetOnCommitFn = void (*)(ASurfaceTransaction *, void *, OnCommitFn);
+SetOnCommitFn set_on_commit()
+{
+    static SetOnCommitFn fn = [] {
+        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+        return lib ? (SetOnCommitFn)dlsym(lib, "ASurfaceTransaction_setOnCommit") : nullptr;
+    }();
+    return fn;
+}
+
 void send_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, int fd = -1)
 {
     if (g_client < 0)
@@ -85,7 +101,27 @@ struct FrameCtx {
     uint32_t id;
     int64_t prev;
     uint64_t frame;
+    bool frame_done_on_commit;
+    std::atomic<int> refs;  // one per registered callback
 };
+
+void unref(FrameCtx *ctx)
+{
+    if (ctx->refs.fetch_sub(1) == 1)
+        delete ctx;
+}
+
+void on_commit(void *context, ASurfaceTransactionStats *stats)
+{
+    auto *ctx = static_cast<FrameCtx *>(context);
+    int64_t latch = ASurfaceTransactionStats_getLatchTime(stats);
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        if (ctx->gen == g_client_gen)
+            send_locked(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch);
+    }
+    unref(ctx);
+}
 
 void on_complete(void *context, ASurfaceTransactionStats *stats)
 {
@@ -110,12 +146,13 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
             // The buffer this frame replaced is free once release_fence signals.
             if (ctx->prev >= 0 && ctx->prev != ctx->id)
                 send_locked(CHAM_RELEASE, (uint32_t)ctx->prev, 0, 0, release_fence);
-            send_locked(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch);
+            if (!ctx->frame_done_on_commit)
+                send_locked(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch);
         }
     }
     if (release_fence >= 0)
         close(release_fence);
-    delete ctx;
+    unref(ctx);
 }
 
 void present(uint32_t id, uint64_t frame, int fence)
@@ -143,8 +180,11 @@ void present(uint32_t id, uint64_t frame, int fence)
         set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
         g_vote_dirty = false;
     }
-    auto *ctx = new FrameCtx{g_client_gen, g_sc, id, g_displayed, frame};
+    bool commit = set_on_commit() != nullptr;
+    auto *ctx = new FrameCtx{g_client_gen, g_sc, id, g_displayed, frame, commit, {commit ? 2 : 1}};
     g_displayed = id;
+    if (commit)
+        set_on_commit()(txn, ctx, on_commit);
     ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
     ASurfaceTransaction_apply(txn);
     ASurfaceTransaction_delete(txn);
