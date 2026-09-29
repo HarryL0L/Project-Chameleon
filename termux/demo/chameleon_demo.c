@@ -193,7 +193,9 @@ static void init_gpu(void)
 /* ---- buffers ------------------------------------------------------------ */
 
 #define NUM_BUFFERS 3
-#define MAX_IN_FLIGHT 2
+/* Like KMS: one pending flip. More only queues frames SurfaceFlinger drops.
+ * Override with $CHAMELEON_IN_FLIGHT to experiment. */
+static int g_max_in_flight = 1;
 
 struct buffer {
     AHardwareBuffer *ahb;
@@ -377,7 +379,16 @@ int main(void)
     struct cham_msg hello = {CHAM_HELLO, 0, CHAM_PROTO_VERSION, 0};
     cham_send(g_sock, &hello, -1);
 
-    uint64_t frame = 0, done_frames = 0, latency_sum = 0, stat_start = now_ns();
+    const char *env = getenv("CHAMELEON_IN_FLIGHT");
+    if (env && atoi(env) > 0)
+        g_max_in_flight = atoi(env) < NUM_BUFFERS ? atoi(env) : NUM_BUFFERS - 1;
+
+    /* shown: frames SurfaceFlinger latched on their own vsync.
+     * dropped: frames superseded before being latched (same latch time as
+     * the previous frame, or none). latency: submit -> latch, and
+     * submit -> completion callback (includes the display's present). */
+    uint64_t frame = 0, shown = 0, dropped = 0, latch_sum = 0, done_sum = 0, last_latch = 0;
+    uint64_t stat_start = now_ns();
     int in_flight = 0;
 
     while (!g_quit) {
@@ -387,7 +398,7 @@ int main(void)
                 free_id = i;
                 break;
             }
-        int can_render = free_id >= 0 && in_flight < MAX_IN_FLIGHT;
+        int can_render = free_id >= 0 && in_flight < g_max_in_flight;
 
         struct pollfd pfd = {g_sock, POLLIN, 0};
         int n = poll(&pfd, 1, can_render ? 0 : 1000);
@@ -427,8 +438,17 @@ int main(void)
             case CHAM_FRAME_DONE:
                 if (in_flight > 0)
                     in_flight--;
-                done_frames++;
-                latency_sum += now_ns() - g_submit_ns[m.a % HISTORY];
+                {
+                    uint64_t submit = g_submit_ns[m.a % HISTORY];
+                    if (m.b == 0 || m.b == last_latch) {
+                        dropped++;
+                    } else {
+                        shown++;
+                        latch_sum += m.b > submit ? m.b - submit : 0;
+                        done_sum += now_ns() - submit;
+                        last_latch = m.b;
+                    }
+                }
                 break;
             }
             if (fd >= 0)
@@ -450,10 +470,12 @@ int main(void)
         uint64_t t = now_ns();
         if (t - stat_start >= 1000000000ull) {
             double secs = (t - stat_start) / 1e9;
-            if (done_frames)
-                printf("%6.1f fps   submit->on-screen %5.2f ms\n", done_frames / secs,
-                       latency_sum / 1e6 / (double)done_frames);
-            done_frames = latency_sum = 0;
+            if (shown || dropped)
+                printf("%6.1f fps shown  %3llu dropped   submit->latch %5.2f ms   submit->done %5.2f ms\n",
+                       shown / secs, (unsigned long long)dropped,
+                       shown ? latch_sum / 1e6 / (double)shown : 0.0,
+                       shown ? done_sum / 1e6 / (double)shown : 0.0);
+            shown = dropped = latch_sum = done_sum = 0;
             stat_start = t;
         }
     }

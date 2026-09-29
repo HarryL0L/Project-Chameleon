@@ -9,6 +9,7 @@
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <android/surface_control.h>
+#include <dlfcn.h>
 #include <fcntl.h>
 #include <jni.h>
 #include <poll.h>
@@ -46,6 +47,19 @@ int g_client = -1;
 uint64_t g_client_gen = 0;  // bumped per connection; stale callbacks are dropped
 Buffer g_buffers[kMaxBuffers];
 int64_t g_displayed = -1;   // buffer id currently latched on g_sc
+float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
+bool g_vote_dirty = false;
+
+// API 30; resolved at runtime because minSdk is 29.
+using SetFrameRateFn = void (*)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
+SetFrameRateFn set_frame_rate()
+{
+    static SetFrameRateFn fn = [] {
+        void *lib = dlopen("libandroid.so", RTLD_NOW | RTLD_NOLOAD);
+        return lib ? (SetFrameRateFn)dlsym(lib, "ASurfaceTransaction_setFrameRate") : nullptr;
+    }();
+    return fn;
+}
 
 void send_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, int fd = -1)
 {
@@ -125,6 +139,10 @@ void present(uint32_t id, uint64_t frame, int fence)
     ASurfaceTransaction_setGeometry(txn, g_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
     ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
     ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {
+        set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
+        g_vote_dirty = false;
+    }
     auto *ctx = new FrameCtx{g_client_gen, g_sc, id, g_displayed, frame};
     g_displayed = id;
     ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
@@ -296,6 +314,7 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceCreated(JNIEnv 
     std::lock_guard<std::mutex> lock(g_lock);
     g_sc = sc;
     g_displayed = -1;
+    g_vote_dirty = true;
     LOGI("surface control %s", sc ? "created" : "FAILED");
 }
 
@@ -328,6 +347,15 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
     g_displayed = -1;
     g_width = g_height = 0;
     send_config_locked();  // 0x0: producer pauses
+}
+
+JNIEXPORT void JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSetFrameRateVote(JNIEnv *, jclass, jfloat hz)
+{
+    std::lock_guard<std::mutex> lock(g_lock);
+    g_frame_rate_vote = hz;
+    g_vote_dirty = true;
+    LOGI("frame rate vote %.1f Hz", hz);
 }
 
 }  // extern "C"
