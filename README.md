@@ -157,8 +157,11 @@ Code: [`shim/gbm/`](shim/gbm/)
   `AHardwareBuffer`: it is registered with KWin's shim, wrapped in a
   `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
   is copied, and frame callbacks pace the app.
-- **Scope:** X11 windows, and Wayland windows under any other compositor,
-  still go to Mesa.
+- **Scope:** Android's driver speaks OpenGL ES only. Apps that insist on
+  desktop OpenGL keep using Mesa: that includes every Qt built for desktop
+  GL, which is Termux's default Qt. A Qt built with `-DINPUT_opengl=es2` (and
+  GTK, SDL and other GLES apps) renders on the GPU. X11 windows, and Wayland
+  windows under any other compositor, also still go to Mesa.
 
 Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/)
 </details>

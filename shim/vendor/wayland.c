@@ -332,11 +332,33 @@ static void (*k_registry_listener[])(void) = {
     (void (*)(void))registry_global_remove,
 };
 
+/* Android has OpenGL ES only. A Qt built for desktop OpenGL (Termux's
+ * default) asks for EGL_OPENGL_BIT configs and an EGL_OPENGL_API context
+ * whatever the display, so its windows are left to Mesa. Which kind of GL Qt
+ * uses is fixed when Qt is built: QOpenGLContext::openGLModuleType() is a
+ * constant (0 = LibGL, 1 = LibGLES). CHAMELEON_EGL_WAYLAND=all overrides. */
+static int app_needs_desktop_gl(void)
+{
+    const char *force = getenv("CHAMELEON_EGL_WAYLAND");
+    if (force && strcmp(force, "all") == 0)
+        return 0;
+    int (*qt_module_type)(void);
+    *(void **)&qt_module_type = dlsym(RTLD_DEFAULT, "_ZN14QOpenGLContext16openGLModuleTypeEv");
+    if (qt_module_type && qt_module_type() == 0) {
+        static int logged;
+        if (!logged++)
+            cham_log("wayland: this Qt is built for desktop OpenGL, which Android's GPU driver lacks; its "
+                     "windows stay on Mesa (a Qt built with -DINPUT_opengl=es2 renders on the GPU)");
+        return 1;
+    }
+    return 0;
+}
+
 /* The EGLDisplay for a wl_display: Android's, once we know we can serve it. */
 EGLDisplay cham_wl_get_display(void *native)
 {
     struct wl_display *wd = native;
-    if (!wd || !cham_wl_platform_available())
+    if (!wd || !cham_wl_platform_available() || app_needs_desktop_gl())
         return EGL_NO_DISPLAY;
     pthread_mutex_lock(&g_displays_lock);
     struct display *d = g_displays;

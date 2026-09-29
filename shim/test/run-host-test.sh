@@ -49,3 +49,11 @@ XDG_RUNTIME_DIR="$OUT/runtime-wl" WAYLAND_DISPLAY=wayland-cwl CHAMELEON_WAYLAND_
     CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
     CHAMELEON_DRM_PATH="$OUT/card3" CHAMELEON_SOCKET="$OUT/presenter-none" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/wayland_client_test"
+# ...and a Qt built for desktop OpenGL keeps its windows on Mesa.
+cc -O1 -Wall -Wextra -fPIC -shared -o "$OUT/fake_qtgui.so" shim/test/fake_qtgui.c
+rm -rf "$OUT/runtime-wl"/* && XDG_RUNTIME_DIR="$OUT/runtime-wl" WAYLAND_DISPLAY=wayland-cwl \
+    CHAMELEON_WAYLAND_SOCKET="$OUT/runtime-wl/wayland-cwl" EXPECT_DESKTOP_GL_QT=1 \
+    __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$FAKE" \
+    CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
+    CHAMELEON_DRM_PATH="$OUT/card4" CHAMELEON_SOCKET="$OUT/presenter-none" \
+    LD_PRELOAD="$OUT/libchameleon.so:$OUT/fake_qtgui.so" "$OUT/wayland_client_test"

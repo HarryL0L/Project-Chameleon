@@ -339,6 +339,17 @@ int main(void)
     struct wl_surface *surface = wl_compositor_create_surface(g_compositor);
     struct wl_egl_window *window = wl_egl_window_create(surface, 64, 32);
 
+    if (getenv("EXPECT_DESKTOP_GL_QT")) {
+        /* fake_qtgui.so is preloaded: a Qt built for desktop OpenGL */
+        printf("desktop-OpenGL Qt\n");
+        CHECK(eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, display, NULL) == EGL_NO_DISPLAY,
+              "its Wayland display is left to the other vendors (Mesa)");
+        srv.stop = 1;
+        pthread_join(thread, NULL);
+        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures != 0;
+    }
+
     const char *client_exts = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
     CHECK(client_exts && strstr(client_exts, "EGL_KHR_platform_wayland"), "Wayland platform advertised");
     EGLDisplay dpy = eglGetPlatformDisplay(EGL_PLATFORM_WAYLAND_KHR, display, NULL);
