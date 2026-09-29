@@ -3,15 +3,15 @@
  * Android's EGL (/system/lib64/libEGL.so -> the vendor driver, e.g.
  * libGLES_mali.so) and adds what KWin expects from a Mesa GBM stack:
  *
- *  - eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, ...) -> the Android display
  *  - EGL_EXT_image_dma_buf_import(_modifiers): a dmabuf that belongs to a
  *    Chameleon gbm_bo is imported as its AHardwareBuffer
  *    (EGL_NATIVE_BUFFER_ANDROID)
  *  - eglTerminate is a no-op, because the Android display is process-wide
  *
  * Nothing here is exported: glvnd's libEGL.so.1 gets every entry point
- * through cham_egl_get_proc() (see vendor/vendor.c). Android's own library
- * is called "libEGL.so" and loaded by absolute path, so they don't clash.
+ * through cham_egl_get_proc(), and displays through vendor/vendor.c's
+ * getPlatformDisplay (glvnd itself implements eglGetDisplay,
+ * eglGetPlatformDisplay, eglGetCurrent* and eglQueryAPI).
  */
 #define _GNU_SOURCE
 #define EGL_EGLEXT_PROTOTYPES
@@ -19,11 +19,8 @@
 #include <EGL/eglext.h>
 #include <dlfcn.h>
 #include <pthread.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#include <drm_fourcc.h>
 
 #include "../core/cham_shim.h"
 #include "../vendor/vendor.h"
@@ -86,12 +83,8 @@ FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
-FWD(EGLContext, eglGetCurrentContext, (void), (), EGL_NO_CONTEXT)
-FWD(EGLDisplay, eglGetCurrentDisplay, (void), (), EGL_NO_DISPLAY)
-FWD(EGLSurface, eglGetCurrentSurface, (EGLint r), (r), EGL_NO_SURFACE)
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor), EGL_FALSE)
-FWD(EGLenum, eglQueryAPI, (void), (), EGL_NONE)
 FWD(EGLBoolean, eglQueryContext, (EGLDisplay d, EGLContext c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglReleaseThread, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitClient, (void), (), EGL_FALSE)
@@ -316,41 +309,6 @@ static EGLDisplay android_display(void)
     return p_eglGetDisplay ? p_eglGetDisplay(EGL_DEFAULT_DISPLAY) : EGL_NO_DISPLAY;
 }
 
-/* The native display is a gbm_device (or nothing); either way there is one
- * GPU, Android's. */
-EGLAPI EGLDisplay EGLAPIENTRY eglGetDisplay(EGLNativeDisplayType native)
-{
-    (void)native;
-    return android_display();
-}
-
-static EGLDisplay platform_display(EGLenum platform)
-{
-    switch (platform) {
-    case EGL_PLATFORM_GBM_KHR:
-    case EGL_PLATFORM_SURFACELESS_MESA:
-    case EGL_PLATFORM_DEVICE_EXT:
-    case EGL_PLATFORM_ANDROID_KHR:
-        return android_display();
-    }
-    t_error = EGL_BAD_PARAMETER; /* wayland/x11 windows don't exist here */
-    return EGL_NO_DISPLAY;
-}
-
-EGLAPI EGLDisplay EGLAPIENTRY eglGetPlatformDisplay(EGLenum platform, void *native, const EGLAttrib *attribs)
-{
-    (void)native;
-    (void)attribs;
-    return platform_display(platform);
-}
-
-static EGLDisplay EGLAPIENTRY shim_eglGetPlatformDisplayEXT(EGLenum platform, void *native, const EGLint *attribs)
-{
-    (void)native;
-    (void)attribs;
-    return platform_display(platform);
-}
-
 /* KWin may create and destroy several EglDisplays; Android has one per
  * process, and terminating it would pull it from under the others. */
 EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay dpy)
@@ -542,12 +500,9 @@ static const struct {
     /* changed behaviour */
     OWN(eglCreateContext),
     OWN(eglGetError),
-    OWN(eglGetDisplay),
-    OWN(eglGetPlatformDisplay),
     OWN(eglTerminate),
     OWN(eglQueryString),
     OWN(eglCreateImage),
-    {"eglGetPlatformDisplayEXT", (void *)shim_eglGetPlatformDisplayEXT},
     {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
     {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
     {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
@@ -561,14 +516,12 @@ static const struct {
     OWN(eglCreatePbufferFromClientBuffer), OWN(eglCreatePbufferSurface), OWN(eglCreatePixmapSurface),
     OWN(eglCreatePlatformPixmapSurface), OWN(eglCreatePlatformWindowSurface), OWN(eglCreateSync),
     OWN(eglCreateWindowSurface), OWN(eglDestroyContext), OWN(eglDestroyImage), OWN(eglDestroySurface),
-    OWN(eglDestroySync), OWN(eglGetConfigAttrib), OWN(eglGetConfigs), OWN(eglGetCurrentContext),
-    OWN(eglGetCurrentDisplay), OWN(eglGetCurrentSurface), OWN(eglGetSyncAttrib), OWN(eglInitialize),
-    OWN(eglMakeCurrent), OWN(eglQueryAPI), OWN(eglQueryContext), OWN(eglQuerySurface), OWN(eglReleaseTexImage),
+    OWN(eglDestroySync), OWN(eglGetConfigAttrib), OWN(eglGetConfigs), OWN(eglGetSyncAttrib),
+    OWN(eglInitialize), OWN(eglMakeCurrent), OWN(eglQueryContext), OWN(eglQuerySurface), OWN(eglReleaseTexImage),
     OWN(eglReleaseThread), OWN(eglSurfaceAttrib), OWN(eglSwapBuffers), OWN(eglSwapInterval), OWN(eglWaitClient),
     OWN(eglWaitGL), OWN(eglWaitNative), OWN(eglWaitSync),
 };
 
-/* Our function for `name`, or Android's; NULL if neither has it. */
 /* glGetGraphicsResetStatus under any of its names. Apps with robustness
  * (Qt asks for it; the context attributes are dropped, see eglCreateContext)
  * call it on every make-current and treat anything but GL_NO_ERROR as a
@@ -609,6 +562,7 @@ static void *desktop_gl_proc(const char *name)
     return fn ? fn : (void *)-1;
 }
 
+/* Our function for `name`, or Android's; NULL if neither has it. */
 void *cham_egl_get_proc(const char *name)
 {
     for (size_t i = 0; i < sizeof k_own / sizeof k_own[0]; i++)

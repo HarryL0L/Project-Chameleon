@@ -29,7 +29,6 @@
 #include <EGL/eglext.h>
 #include <dlfcn.h>
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -147,6 +146,7 @@ static struct {
     uint32_t (*get_version)(struct wl_proxy *);
     void *(*create_wrapper)(void *);
     void (*wrapper_destroy)(void *);
+    struct wl_display *(*proxy_get_display)(struct wl_proxy *); /* 1.23+, optional */
     void (*set_queue)(struct wl_proxy *, struct wl_event_queue *);
     void (*proxy_destroy)(struct wl_proxy *);
     struct wl_event_queue *(*create_queue)(struct wl_display *);
@@ -177,6 +177,7 @@ static int load_wayland(void)
     W(get_version, "wl_proxy_get_version");
     W(create_wrapper, "wl_proxy_create_wrapper");
     W(wrapper_destroy, "wl_proxy_wrapper_destroy");
+    W(proxy_get_display, "wl_proxy_get_display");
     W(set_queue, "wl_proxy_set_queue");
     W(proxy_destroy, "wl_proxy_destroy");
     W(create_queue, "wl_display_create_queue");
@@ -455,7 +456,6 @@ struct buffer {
     struct wl_proxy *wl_buffer;
     uint32_t id;          /* registration with KWin */
     AImage *image;        /* held while KWin uses the buffer */
-    struct surface *owner;
 };
 
 /* One AImageReader + Android window surface at a given size. */
@@ -654,7 +654,16 @@ EGLSurface cham_wl_create_window_surface(EGLDisplay dpy, EGLConfig config, void 
         cham_setEGLError(EGL_BAD_ALLOC); /* already has a surface */
         return EGL_NO_SURFACE;
     }
-    struct display *d = g_displays; /* the display this surface's wl_surface belongs to */
+    /* The connection the window's wl_surface belongs to. Without
+     * wl_proxy_get_display (libwayland < 1.23), the last one opened. */
+    pthread_mutex_lock(&g_displays_lock);
+    struct display *d = g_displays;
+    if (wl.proxy_get_display) {
+        struct wl_display *wd = wl.proxy_get_display(window->surface);
+        while (d && d->wl != wd)
+            d = d->next;
+    }
+    pthread_mutex_unlock(&g_displays_lock);
     if (!d) {
         cham_setEGLError(EGL_BAD_NATIVE_WINDOW);
         return EGL_NO_SURFACE;
@@ -759,14 +768,19 @@ int cham_wl_swap_interval(EGLint interval)
     EGLSurface cur = real_get_current_surface(EGL_DRAW);
     pthread_mutex_lock(&g_surfaces_lock);
     struct surface *found = NULL;
-    for (size_t i = 0; i < sizeof g_surfaces / sizeof g_surfaces[0]; i++)
-        if (g_surfaces[i] && g_surfaces[i]->gen->android == cur)
-            found = g_surfaces[i];
+    for (size_t i = 0; i < sizeof g_surfaces / sizeof g_surfaces[0] && !found; i++) {
+        struct surface *s = g_surfaces[i];
+        if (!s)
+            continue;
+        pthread_mutex_lock(&s->lock); /* follow_resize() may swap s->gen */
+        if (s->gen->android == cur) {
+            found = s;
+            s->swap_interval = interval < 0 ? 0 : interval;
+        }
+        pthread_mutex_unlock(&s->lock);
+    }
     pthread_mutex_unlock(&g_surfaces_lock);
-    if (!found)
-        return 0;
-    found->swap_interval = interval < 0 ? 0 : interval;
-    return 1;
+    return found != NULL;
 }
 
 static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
@@ -814,7 +828,6 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
     b->ahb = ahb;
     b->id = id;
     b->wl_buffer = wl_buffer;
-    b->owner = s;
     wl.add_listener(wl_buffer, k_buffer_listener, b);
     return b;
 }

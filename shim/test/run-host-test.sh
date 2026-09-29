@@ -40,8 +40,8 @@ printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' "$OUT
     > "$OUT/chameleon-vendor.json"
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" "$OUT/vendor_test"
-__EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ORIG___EGL_VENDOR_LIBRARY_FILENAMES= \
-    CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" \
+__EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
+    CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" \
     CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_KWIN=1 \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
 # GPU rendering for Wayland apps: the vendor's Wayland platform against a

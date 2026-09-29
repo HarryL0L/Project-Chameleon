@@ -46,8 +46,6 @@ int main(void)
     CHECK(client && strstr(client, "EGL_MESA_platform_surfaceless"), "client extensions: surfaceless platform");
     if (kwin) {
         CHECK(client && strstr(client, "EGL_KHR_platform_gbm"), "GBM platform for KWin");
-        CHECK(!getenv("__EGL_VENDOR_LIBRARY_FILENAMES") && !getenv("CHAMELEON_ORIG___EGL_VENDOR_LIBRARY_FILENAMES"),
-              "vendor setting handed back for KWin's children");
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) != EGL_NO_DISPLAY, "default display for KWin");
         CHECK(eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL) != EGL_NO_DISPLAY, "GBM display for KWin");
     } else {

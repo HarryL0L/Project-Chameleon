@@ -8,29 +8,18 @@
  *    drivers (glsl_fix.c).
  *  - glGetString/glGetStringi/glGetIntegerv(GL_NUM_EXTENSIONS): hide
  *    extensions whose driver paths misbehave. Default:
- *    GL_EXT_texture_format_BGRA8888 - KWin then uploads textures as plain
- *    RGBA instead of GL_BGRA_EXT, after Mali-G77 crashed (SIGBUS, NULL+0x29)
- *    inside glTexImage2D on the BGRA path. Override with
- *    Also GL_EXT_disjoint_timer_query: the real cause of those crashes. After
- *    KWin's per-frame GL_TIMESTAMP query, Mali-G77 (r32p1) dies with SIGBUS
- *    (NULL+0x29) in the first write into texture memory, whatever the upload
- *    path; without timer queries KWin runs (the launcher also sets
- *    KWIN_NO_TIMER_QUERY=1). Override with
- *    CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
- *  - glTex(Sub)Image2D/3D: Mali-G77 crashed (SIGBUS, NULL+0x29) in
- *    glTexImage2D on KWin's very first, perfectly ordinary RGBA upload whose
- *    data was a *tagged* heap pointer (0xb4...: Android sets the top byte,
- *    which the CPU ignores but a kernel driver importing the memory may
- *    not). Tagged source data is first copied to an untagged (mmap'd)
- *    bounce buffer. CHAMELEON_GL_BOUNCE=0 disables that.
- *    The crash kept happening intermittently even so. KWin uploads in the
- *    middle of a frame, with its AHB-backed output framebuffer bound (the
- *    probe's clean uploads never do), so uploads run with the framebuffer
- *    unbound and it is restored right after. CHAMELEON_GL_UPLOAD_UNBIND=0
- *    disables that; CHAMELEON_GL_TRACE=1 logs every upload.
- *    It still crashed (16 frames deep in Mali, NULL+0x29 atomic, on KWin's
- *    shadow texture), so CHAMELEON_GL_UPLOAD=split|pbo route the pixels
- *    differently to find out which step of the upload Mali trips over.
+ *    GL_EXT_disjoint_timer_query - after KWin's per-frame GL_TIMESTAMP
+ *    query, Mali-G77 (r32p1) dies with SIGBUS (NULL+0x29) in the next write
+ *    into texture memory (the launcher also sets KWIN_NO_TIMER_QUERY=1), and
+ *    GL_EXT_texture_format_BGRA8888, so KWin uploads plain RGBA (hidden
+ *    while that crash was being hunted, kept as the well-trodden path).
+ *    Override with CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
+ *  - glTex(Sub)Image2D/3D: two precautions from the same hunt. Source data
+ *    at a *tagged* heap pointer (0xb4...: Android sets the top byte, which
+ *    the CPU ignores but a driver importing the memory may not) is copied to
+ *    an untagged bounce buffer first (CHAMELEON_GL_BOUNCE=0 disables it),
+ *    and uploads run with the framebuffer unbound, restored right after
+ *    (CHAMELEON_GL_UPLOAD_UNBIND=0 disables it).
  */
 #define _GNU_SOURCE
 #include <GLES3/gl32.h>
@@ -56,18 +45,8 @@ static void (GL_APIENTRY *p_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei
 static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum,
                                              GLenum, const void *);
 static void (GL_APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
-static int g_trace;
 static int g_bounce = 1;
 static int g_unbind = 1;
-/* CHAMELEON_GL_UPLOAD: how glTex(Sub)Image2D hand pixels to the driver.
- *   direct - as called (default)
- *   split  - glTexImage2D allocates only (NULL data), glTexSubImage2D fills it
- *   pbo    - pixels go through a pixel unpack buffer (GPU-side copy) */
-static enum { UPLOAD_DIRECT, UPLOAD_SPLIT, UPLOAD_PBO } g_upload;
-static void (GL_APIENTRY *p_glGenBuffers)(GLsizei, GLuint *);
-static void (GL_APIENTRY *p_glDeleteBuffers)(GLsizei, const GLuint *);
-static void (GL_APIENTRY *p_glBindBuffer)(GLenum, GLuint);
-static void (GL_APIENTRY *p_glBufferData)(GLenum, GLsizeiptr, const void *, GLenum);
 
 __attribute__((constructor)) static void load(void)
 {
@@ -89,25 +68,11 @@ __attribute__((constructor)) static void load(void)
     *(void **)&p_glTexSubImage2D = dlsym(lib, "glTexSubImage2D");
     *(void **)&p_glTexImage3D = dlsym(lib, "glTexImage3D");
     *(void **)&p_glTexSubImage3D = dlsym(lib, "glTexSubImage3D");
-    const char *trace = getenv("CHAMELEON_GL_TRACE");
-    g_trace = trace && *trace == '1';
     const char *bounce = getenv("CHAMELEON_GL_BOUNCE");
     g_bounce = !(bounce && *bounce == '0');
     *(void **)&p_glBindFramebuffer = dlsym(lib, "glBindFramebuffer");
     const char *unbind = getenv("CHAMELEON_GL_UPLOAD_UNBIND");
     g_unbind = !(unbind && *unbind == '0');
-    *(void **)&p_glGenBuffers = dlsym(lib, "glGenBuffers");
-    *(void **)&p_glDeleteBuffers = dlsym(lib, "glDeleteBuffers");
-    *(void **)&p_glBindBuffer = dlsym(lib, "glBindBuffer");
-    *(void **)&p_glBufferData = dlsym(lib, "glBufferData");
-    const char *upload = getenv("CHAMELEON_GL_UPLOAD");
-    if (upload && strcmp(upload, "split") == 0)
-        g_upload = UPLOAD_SPLIT;
-    else if (upload && strcmp(upload, "pbo") == 0 && p_glGenBuffers && p_glBindBuffer && p_glBufferData &&
-             p_glDeleteBuffers)
-        g_upload = UPLOAD_PBO;
-    if (g_upload != UPLOAD_DIRECT)
-        cham_log("texture uploads: %s", g_upload == UPLOAD_SPLIT ? "split (allocate, then fill)" : "through a PBO");
 }
 
 /* ---- hidden extensions ---- */
@@ -193,7 +158,9 @@ GL_APICALL const GLubyte *GL_APIENTRY glGetStringi(GLenum name, GLuint index)
         return p_glGetStringi(name, index);
     pthread_mutex_lock(&g_ext_lock);
     build_extensions_locked();
-    const GLubyte *ret = g_ext_count >= 0 && index < (GLuint)g_ext_count ? g_ext_list[index] : NULL;
+    const GLubyte *ret = g_ext_count < 0                   ? p_glGetStringi(name, index) /* no context yet */
+                         : index < (GLuint)g_ext_count ? g_ext_list[index]
+                                                       : NULL;
     pthread_mutex_unlock(&g_ext_lock);
     return ret;
 }
@@ -272,9 +239,6 @@ static size_t pixel_size(GLenum format, GLenum type)
     return 0;
 }
 
-/* Returns data itself, or an untagged copy of everything GL will read from
- * it under the current unpack state. The copy lives until the next upload
- * on this thread (GL has consumed it by then: uploads copy synchronously). */
 static int unpack_buffer_bound(void)
 {
     GLint pbo = 0;
@@ -308,6 +272,9 @@ static size_t upload_span(GLsizei width, GLsizei height, GLsizei depth, GLenum f
     return span;
 }
 
+/* Returns data itself, or an untagged copy of everything GL will read from
+ * it under the current unpack state. The copy lives until the next upload
+ * on this thread (GL has consumed it by then: uploads copy synchronously). */
 static const void *untagged(const void *data, GLsizei width, GLsizei height, GLsizei depth, GLenum format,
                             GLenum type)
 {
@@ -362,40 +329,6 @@ static void restore_framebuffer(const struct fb_binding *b)
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)b->read);
 }
 
-/* Binds a new pixel unpack buffer holding `size` bytes of `data`; the upload
- * then reads from offset 0. Returns 0 (nothing bound) on failure. */
-static GLuint pbo_fill(const void *data, size_t size)
-{
-    if (!size)
-        return 0;
-    GLuint pbo = 0;
-    p_glGenBuffers(1, &pbo);
-    if (!pbo)
-        return 0;
-    p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo);
-    p_glBufferData(GL_PIXEL_UNPACK_BUFFER, (GLsizeiptr)size, data, GL_STREAM_DRAW);
-    return pbo;
-}
-
-static void pbo_done(GLuint pbo)
-{
-    if (!pbo)
-        return;
-    p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
-    p_glDeleteBuffers(1, &pbo);
-}
-
-static void trace_upload(const char *fn, GLenum internal, GLsizei w, GLsizei h, GLenum format, GLenum type,
-                         const void *data, const void *used, const struct fb_binding *fb)
-{
-    GLint row_length = 0, texture = 0;
-    p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
-    p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
-    cham_log("%s internal 0x%x %dx%d format 0x%x type 0x%x row_length %d data %p%s texture %d framebuffer %d%s", fn,
-             internal, w, h, format, type, row_length, data, used != data ? " (bounced)" : "", texture, fb->draw,
-             fb->unbound ? " (unbound for the upload)" : "");
-}
-
 GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width,
                                          GLsizei height, GLint border, GLenum format, GLenum type,
                                          const void *pixels)
@@ -403,22 +336,11 @@ GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint inter
     const void *data = untagged(pixels, width, height, 1, format, type);
     struct fb_binding fb;
     unbind_framebuffer(&fb);
-    if (g_trace)
-        trace_upload("glTexImage2D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
     CHAM_NOTE_CALL("glTexImage2D");
     cham_crash_note("glTexImage2D %dx%d internal 0x%x format 0x%x type 0x%x data %p (from %p) framebuffer %d%s",
                     width, height, internalformat, format, type, data, pixels, fb.draw,
                     fb.unbound ? " (unbound)" : "");
-    if (!data || g_upload == UPLOAD_DIRECT || unpack_buffer_bound()) {
-        p_glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
-    } else if (g_upload == UPLOAD_SPLIT) {
-        p_glTexImage2D(target, level, internalformat, width, height, border, format, type, NULL);
-        p_glTexSubImage2D(target, level, 0, 0, width, height, format, type, data);
-    } else {
-        GLuint pbo = pbo_fill(data, upload_span(width, height, 1, format, type));
-        p_glTexImage2D(target, level, internalformat, width, height, border, format, type, pbo ? NULL : data);
-        pbo_done(pbo);
-    }
+    p_glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
     restore_framebuffer(&fb);
 }
 
@@ -428,19 +350,11 @@ GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xo
     const void *data = untagged(pixels, width, height, 1, format, type);
     struct fb_binding fb;
     unbind_framebuffer(&fb);
-    if (g_trace)
-        trace_upload("glTexSubImage2D", 0, width, height, format, type, pixels, data, &fb);
     CHAM_NOTE_CALL("glTexSubImage2D");
     cham_crash_note("glTexSubImage2D %dx%d at %d,%d format 0x%x type 0x%x data %p (from %p) framebuffer %d%s",
                     width, height, xoffset, yoffset, format, type, data, pixels, fb.draw,
                     fb.unbound ? " (unbound)" : "");
-    if (!data || g_upload != UPLOAD_PBO || unpack_buffer_bound()) {
-        p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, data);
-    } else {
-        GLuint pbo = pbo_fill(data, upload_span(width, height, 1, format, type));
-        p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, pbo ? NULL : data);
-        pbo_done(pbo);
-    }
+    p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, data);
     restore_framebuffer(&fb);
 }
 
@@ -451,8 +365,6 @@ GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint inter
     const void *data = untagged(pixels, width, height, depth, format, type);
     struct fb_binding fb;
     unbind_framebuffer(&fb);
-    if (g_trace)
-        trace_upload("glTexImage3D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
     CHAM_NOTE_CALL("glTexImage3D");
     p_glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, data);
     restore_framebuffer(&fb);
@@ -465,8 +377,6 @@ GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xo
     const void *data = untagged(pixels, width, height, depth, format, type);
     struct fb_binding fb;
     unbind_framebuffer(&fb);
-    if (g_trace)
-        trace_upload("glTexSubImage3D", 0, width, height, format, type, pixels, data, &fb);
     CHAM_NOTE_CALL("glTexSubImage3D");
     p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, data);
     restore_framebuffer(&fb);
