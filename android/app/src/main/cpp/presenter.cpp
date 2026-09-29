@@ -673,6 +673,16 @@ done:
         g_displayed = -1;
         for (uint32_t i = 0; i < kMaxBuffers; i++)
             remove_buffer_locked(i);
+        // Don't leave the producer's last frame up (e.g. Plasma's logout
+        // screen after it quit): the status line shows on black instead.
+        // The next producer's first frame shows the layer again.
+        g_pool_last = -1;
+        if (g_sc) {
+            ASurfaceTransaction *txn = ASurfaceTransaction_create();
+            ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+            ASurfaceTransaction_apply(txn);
+            ASurfaceTransaction_delete(txn);
+        }
     }
     close(client);
     LOGI("producer disconnected%s", replaced ? " (replaced by a new one)" : "");
