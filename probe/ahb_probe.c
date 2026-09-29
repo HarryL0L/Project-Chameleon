@@ -228,7 +228,7 @@ static const char *libdir(void)
 /* CHAMELEON_PROBE_GLVND=1 runs everything through Termux's glvnd
  * (libEGL.so.1 / libGLESv2.so.2) instead of Android's libraries, i.e.
  * through whichever vendor glvnd picks - the Chameleon vendor with
- *   __EGL_VENDOR_LIBRARY_FILENAMES=<kwin-shim>/chameleon-egl-vendor.json
+ *   __EGL_VENDOR_LIBRARY_FILENAMES=$XDG_RUNTIME_DIR/chameleon-egl-vendor.json (written by `chameleon`)
  *   CHAMELEON_EGL_DEFAULT=1   (the probe uses the default display) */
 static void *open_lib(const char *name)
 {

@@ -31,10 +31,17 @@ jobs:
           "$CC" -O2 -Wall -Wextra -Icommon -o out/chameleon_demo termux/demo/chameleon_demo.c -ldl -lm
           cp android/app/build/outputs/apk/debug/app-debug.apk out/chameleon.apk
 
-      - name: Build the KWin shim with the NDK
+      - name: Build the shim (chameleon/) with the NDK
         run: |
           CC="$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" \
-            shim/build-android.sh out/kwin-shim
+            shim/build-android.sh out/chameleon
+
+      - name: Termux package (.deb)
+        run: |
+          VERSION="0.1.0~git$(date -u +%Y%m%d).$(git rev-parse --short HEAD)"
+          packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo "$VERSION" out/
+          dpkg-deb --info out/chameleon_*_aarch64.deb
+          dpkg-deb --contents out/chameleon_*_aarch64.deb
 
       - uses: actions/upload-artifact@v4
         with:

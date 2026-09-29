@@ -12,20 +12,21 @@ app's screen, rendering with Android's GPU driver.
 ## Run
 
 1. Install `chameleon.apk` from the CI artifact and open it.
-2. Copy the artifact's `kwin-shim/` directory into Termux (not `/sdcard`,
-   which is `noexec`). Replace an older copy completely (`rm -rf kwin-shim`
-   first), then:
+2. Install the Termux package from the artifact
+   (`apt install ./chameleon_<version>_aarch64.deb`; files go to
+   `$PREFIX/lib/chameleon`, commands to `$PREFIX/bin`). Or copy the artifact's
+   `chameleon/` folder into Termux (not `/sdcard`, which is `noexec`),
+   replacing an older copy completely, and run
+   `chmod +x chameleon/chameleon* chameleon/bin/* && chameleon/chameleon --install`.
+   Then:
 
 ```sh
-chmod +x kwin-shim/chameleon* kwin-shim/bin/*
-kwin-shim/chameleon --install        # once: `chameleon` in $PREFIX/bin
-
 chameleon kwin_wayland               # just KWin
 chameleon kwin_wayland konsole       # KWin plus a first app
 chameleon startplasma-wayland        # a Plasma session
 ```
 
-`chameleon` puts `kwin-shim/bin` first in `PATH`, clears `DISPLAY` /
+`chameleon` puts its `bin/` directory first in `PATH`, clears `DISPLAY` /
 `WAYLAND_DISPLAY` and runs the command (in a new D-Bus session if there is
 none). Every `kwin_wayland` started inside - directly, by
 `kwin_wayland_wrapper` or by `startplasma-wayland` - is then
@@ -41,7 +42,7 @@ for KWin only. `chameleon-kwin ...` still works (= `chameleon kwin_wayland ...`)
 
 ### The EGL vendor for other programs
 
-`kwin-shim/chameleon-vendor-install` registers `libEGL_chameleon.so` with
+`chameleon-vendor-install` registers `libEGL_chameleon.so` with
 glvnd for every Termux program (`--remove` undoes it); `chameleon` already
 does the same for its session. It takes Wayland windows whose compositor is
 a Chameleon KWin (rendered on the GPU, handed over as `AHardwareBuffer`s),

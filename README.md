@@ -213,10 +213,10 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    U(["chameleon startplasma-wayland"]) --> P["PATH = kwin-shim/bin:$PATH<br/>unset DISPLAY, WAYLAND_DISPLAY<br/>+ D-Bus session"]
+    U(["chameleon startplasma-wayland"]) --> P["PATH = lib/chameleon/bin:$PATH<br/>unset DISPLAY, WAYLAND_DISPLAY<br/>+ D-Bus session"]
     P --> SP["startplasma-wayland"]
     SP --> W["kwin_wayland_wrapper --xwayland"]
-    W -->|"starts kwin_wayland by name"| B["kwin-shim/bin/kwin_wayland<br/>attaches the shim to this process only"]
+    W -->|"starts kwin_wayland by name"| B["lib/chameleon/bin/kwin_wayland<br/>attaches the shim to this process only"]
     B --> R["real kwin_wayland --drm"]
     SP --> PS["plasmashell, apps …<br/>(untouched)"]
 ```
@@ -231,25 +231,32 @@ No `--drm` flag or plasma-workspace change is needed: with neither
 (the app shares its signing key) with KWin installed.
 
 1. Download the `chameleon-<commit>` artifact from the latest
-   [Actions run](../../actions/workflows/build.yml) and unzip it. Always unzip
-   into a fresh folder, because extracting over an old one keeps stale files.
+   [Actions run](../../actions/workflows/build.yml) and unzip it.
 2. Install `chameleon.apk` and open **Chameleon**.
-3. In Termux:
+3. In Termux, install the package, then start a session:
 
    ```sh
-   cp -r /sdcard/Download/chameleon-*/kwin-shim ~ && chmod +x ~/kwin-shim/chameleon* ~/kwin-shim/bin/*
-   ~/kwin-shim/chameleon --install          # adds `chameleon` to $PATH
+   apt install /sdcard/Download/chameleon-*/chameleon_*_aarch64.deb
 
    chameleon kwin_wayland konsole           # KWin with a terminal
    chameleon startplasma-wayland            # or a full Plasma session
    ```
 
+   Without the package, the artifact's `chameleon/` folder works too. Copy it
+   into Termux (not `/sdcard`, which is `noexec`), run
+   `chmod +x chameleon/chameleon* chameleon/bin/*`, then
+   `chameleon/chameleon --install` to put `chameleon` in `$PATH`.
+
 4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ switches between
    **direct touch** and **trackpad** (tap to click, two-finger tap for right
    click, two-finger drag to scroll, tap-and-drag to hold).
 
-**Optional:** `~/kwin-shim/chameleon-vendor-install` registers the EGL vendor
-with glvnd for all Termux programs (`--remove` undoes it).
+**Optional:** `chameleon-vendor-install` registers the EGL vendor with glvnd
+for all Termux programs (`--remove` undoes it; removing the package does too).
+
+The package also installs `chameleon-probe`, which checks a device's EGL,
+AHardwareBuffer and AImageReader support, and `chameleon-demo`, a minimal
+zero-copy producer for the app.
 
 ## Repository layout
 
@@ -265,20 +272,24 @@ with glvnd for all Termux programs (`--remove` undoes it).
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
 | [`termux/demo/`](termux/demo/) | `chameleon_demo`: minimal zero-copy producer |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
+| [`packaging/`](packaging/) | Termux `.deb` packaging |
 | [`branding/`](branding/) | Logo and launcher-icon generator |
 
 ## Building
 
 Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml)).
-Each push produces the APK, the Termux tools and the `kwin-shim/` folder as
-one artifact, and runs the host tests.
+Each push produces one artifact: the APK, the Termux package
+(`chameleon_<version>_aarch64.deb`, built by
+[`packaging/build-deb.sh`](packaging/build-deb.sh)), the same files as a
+plain `chameleon/` folder, and the probe and demo. It also runs the host tests.
 
 Locally:
 
 ```sh
 gradle -p android assembleDebug                                       # the app
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
-    shim/build-android.sh out/kwin-shim                               # the shim
+    shim/build-android.sh out/chameleon                               # the shim
+packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo 0.1.0 out/
 shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev
 ```
 
