@@ -24,7 +24,7 @@
 
 enum cham_msg_type {
     /* producer -> presenter */
-    CHAM_HELLO = 1,         /* a = CHAM_PROTO_VERSION */
+    CHAM_HELLO = 1,         /* a = CHAM_PROTO_VERSION, b = CHAM_HELLO_* flags */
     CHAM_BUFFER_ADD = 2,    /* id; next packet is the AHardwareBuffer */
     CHAM_BUFFER_REMOVE = 3, /* id */
     CHAM_PRESENT = 4,       /* id, a = frame number, b = producer CLOCK_MONOTONIC ns;
@@ -37,6 +37,16 @@ enum cham_msg_type {
                                once the fence signals */
     CHAM_FRAME_DONE = 102,  /* a = frame number, b = SurfaceFlinger latch time (ns) */
 };
+
+/* HELLO flags.
+ *
+ * CHAM_HELLO_COPY: the producer follows KMS rules - it reuses a buffer as soon
+ * as the *next* frame's FRAME_DONE arrives (like a page flip), not when
+ * RELEASE arrives. SurfaceFlinger still scans that buffer out for one more
+ * vsync, so the presenter blits each frame into its own buffer pool and
+ * sends RELEASE (with the blit fence) right after the copy is queued. KWin
+ * via the shim uses this; the demo stays zero-copy. */
+#define CHAM_HELLO_COPY 1u
 
 struct cham_msg {
     uint32_t type;

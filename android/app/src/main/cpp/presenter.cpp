@@ -3,12 +3,24 @@
 // ASurfaceControl child of the activity's SurfaceView. No pixel copies:
 // SurfaceFlinger (and usually an HWC overlay) reads the producer's buffer.
 //
+// Copy mode (CHAM_HELLO_COPY, used by the KWin shim): the producer reuses a
+// buffer as soon as the next frame is latched, KMS-style, while
+// SurfaceFlinger still scans it out for one more vsync. Each frame is then
+// blitted on the GPU into a small presenter-owned pool and the pool buffer is
+// shown instead.
+//
 // Protocol: common/chameleon_proto.h.
 
 #include <android/hardware_buffer.h>
 #include <android/log.h>
 #include <android/native_window_jni.h>
 #include <android/surface_control.h>
+#define EGL_EGLEXT_PROTOTYPES
+#define GL_GLEXT_PROTOTYPES
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <jni.h>
@@ -32,10 +44,26 @@ namespace {
 
 constexpr uint32_t kMaxBuffers = 64;
 
+constexpr int kPoolSize = 4;
+
 struct Buffer {
     AHardwareBuffer *ahb = nullptr;
     int32_t width = 0;
     int32_t height = 0;
+    // Copy mode only: the producer buffer as a blit source.
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    GLuint tex = 0, fbo = 0;
+};
+
+// Copy mode: presenter-owned buffers that SurfaceFlinger actually shows.
+struct PoolBuf {
+    AHardwareBuffer *ahb = nullptr;
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    GLuint tex = 0, fbo = 0;
+    int32_t width = 0, height = 0;
+    bool held = false;      // on screen or queued in SurfaceFlinger
+    int release_fence = -1; // must signal before we draw into it again
+    uint64_t serial = 0;    // guards against callbacks for a reallocated slot
 };
 
 // All state below is guarded by g_lock. SurfaceFlinger completion callbacks
@@ -50,6 +78,10 @@ Buffer g_buffers[kMaxBuffers];
 int64_t g_displayed = -1;   // buffer id currently latched on g_sc
 float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
 bool g_vote_dirty = false;
+bool g_copy_mode = false;    // negotiated per connection via HELLO
+PoolBuf g_pool[kPoolSize];
+int64_t g_pool_displayed = -1;
+uint64_t g_pool_serial = 0;
 
 // API 30; resolved at runtime because minSdk is 29.
 using SetFrameRateFn = void (*)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
@@ -103,6 +135,8 @@ struct FrameCtx {
     uint64_t frame;
     bool frame_done_on_commit;
     std::atomic<int> refs;  // one per registered callback
+    bool copy = false;       // id/prev are pool indices
+    uint64_t serial = 0;     // pool serial of `prev`
 };
 
 void unref(FrameCtx *ctx)
@@ -140,7 +174,20 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
     ASurfaceTransactionStats_releaseASurfaceControls(controls);
     int64_t latch = ASurfaceTransactionStats_getLatchTime(stats);
 
-    {
+    if (ctx->copy) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        // The pool buffer this frame replaced is ours again once the fence signals.
+        if (ctx->prev >= 0 && ctx->prev != ctx->id && g_pool[ctx->prev].serial == ctx->serial) {
+            PoolBuf &p = g_pool[ctx->prev];
+            p.held = false;
+            if (p.release_fence >= 0)
+                close(p.release_fence);
+            p.release_fence = release_fence;
+            release_fence = -1;
+        }
+        if (ctx->gen == g_client_gen && !ctx->frame_done_on_commit)
+            send_locked(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch);
+    } else {
         std::lock_guard<std::mutex> lock(g_lock);
         if (ctx->gen == g_client_gen) {
             // The buffer this frame replaced is free once release_fence signals.
@@ -155,6 +202,198 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
     unref(ctx);
 }
 
+// ---- copy mode (runs on the server thread, which owns the GL context) ----
+
+EGLDisplay g_dpy = EGL_NO_DISPLAY;
+EGLContext g_ctx = EGL_NO_CONTEXT;
+PFNEGLCREATESYNCKHRPROC p_eglCreateSyncKHR;
+PFNEGLDESTROYSYNCKHRPROC p_eglDestroySyncKHR;
+PFNEGLWAITSYNCKHRPROC p_eglWaitSyncKHR;
+PFNEGLDUPNATIVEFENCEFDANDROIDPROC p_eglDupNativeFenceFDANDROID;
+
+bool gl_init()
+{
+    if (g_ctx != EGL_NO_CONTEXT)
+        return true;
+    g_dpy = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (!eglInitialize(g_dpy, nullptr, nullptr))
+        return false;
+    eglBindAPI(EGL_OPENGL_ES_API);
+    const EGLint attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 3, EGL_NONE};
+    g_ctx = eglCreateContext(g_dpy, EGL_NO_CONFIG_KHR, EGL_NO_CONTEXT, attribs);
+    if (g_ctx == EGL_NO_CONTEXT || !eglMakeCurrent(g_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, g_ctx)) {
+        LOGE("copy mode: cannot create a GLES 3 context (0x%x)", eglGetError());
+        g_ctx = EGL_NO_CONTEXT;
+        return false;
+    }
+    p_eglCreateSyncKHR = (PFNEGLCREATESYNCKHRPROC)eglGetProcAddress("eglCreateSyncKHR");
+    p_eglDestroySyncKHR = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
+    p_eglWaitSyncKHR = (PFNEGLWAITSYNCKHRPROC)eglGetProcAddress("eglWaitSyncKHR");
+    p_eglDupNativeFenceFDANDROID =
+        (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
+    LOGI("copy mode: GL %s", (const char *)glGetString(GL_RENDERER));
+    return true;
+}
+
+// Makes the GPU (not the CPU) wait for a sync_file. Takes ownership of fd.
+void gpu_wait(int fd)
+{
+    if (fd < 0)
+        return;
+    const EGLint attribs[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd, EGL_NONE};
+    EGLSyncKHR sync = p_eglCreateSyncKHR(g_dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    if (sync == EGL_NO_SYNC_KHR) {
+        close(fd);
+        return;
+    }
+    p_eglWaitSyncKHR(g_dpy, sync, 0);
+    p_eglDestroySyncKHR(g_dpy, sync);  // EGL owns and closes fd
+}
+
+int gpu_fence()
+{
+    const EGLint attribs[] = {EGL_NONE};
+    EGLSyncKHR sync = p_eglCreateSyncKHR(g_dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, attribs);
+    glFlush();
+    int fd = sync != EGL_NO_SYNC_KHR ? p_eglDupNativeFenceFDANDROID(g_dpy, sync) : -1;
+    if (sync != EGL_NO_SYNC_KHR)
+        p_eglDestroySyncKHR(g_dpy, sync);
+    if (fd < 0)
+        glFinish();  // no fence available: make the copy synchronous instead
+    return fd;
+}
+
+bool wrap_ahb(AHardwareBuffer *ahb, EGLImageKHR *image, GLuint *tex, GLuint *fbo)
+{
+    const EGLint attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    *image = eglCreateImageKHR(g_dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID,
+                               eglGetNativeClientBufferANDROID(ahb), attribs);
+    if (*image == EGL_NO_IMAGE_KHR)
+        return false;
+    glGenTextures(1, tex);
+    glBindTexture(GL_TEXTURE_2D, *tex);
+    glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, (GLeglImageOES)*image);
+    glGenFramebuffers(1, fbo);
+    glBindFramebuffer(GL_FRAMEBUFFER, *fbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, *tex, 0);
+    bool ok = glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    return ok;
+}
+
+void unwrap(EGLImageKHR *image, GLuint *tex, GLuint *fbo)
+{
+    if (g_ctx == EGL_NO_CONTEXT)
+        return;
+    if (*fbo)
+        glDeleteFramebuffers(1, fbo);
+    if (*tex)
+        glDeleteTextures(1, tex);
+    if (*image != EGL_NO_IMAGE_KHR)
+        eglDestroyImageKHR(g_dpy, *image);
+    *image = EGL_NO_IMAGE_KHR;
+    *tex = *fbo = 0;
+}
+
+void pool_free_locked(PoolBuf &p)
+{
+    unwrap(&p.image, &p.tex, &p.fbo);
+    if (p.ahb)
+        AHardwareBuffer_release(p.ahb);  // SurfaceFlinger keeps its own reference
+    if (p.release_fence >= 0)
+        close(p.release_fence);
+    p = PoolBuf{};
+}
+
+// Returns a pool index we may draw into at the current surface size, or -1.
+int pool_acquire_locked()
+{
+    int empty = -1, stale = -1;
+    for (int i = 0; i < kPoolSize; i++) {
+        PoolBuf &p = g_pool[i];
+        if (!p.ahb) {
+            if (empty < 0)
+                empty = i;
+        } else if (!p.held) {
+            if (p.width == g_width && p.height == g_height)
+                return i;
+            if (stale < 0)
+                stale = i;
+        }
+    }
+    int i = empty >= 0 ? empty : stale;
+    if (i < 0)
+        return -1;
+    pool_free_locked(g_pool[i]);
+    PoolBuf &p = g_pool[i];
+    AHardwareBuffer_Desc desc{};
+    desc.width = (uint32_t)g_width;
+    desc.height = (uint32_t)g_height;
+    desc.layers = 1;
+    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+    desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                 AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
+    if (AHardwareBuffer_allocate(&desc, &p.ahb) != 0 || !wrap_ahb(p.ahb, &p.image, &p.tex, &p.fbo)) {
+        LOGE("copy mode: cannot allocate a %dx%d pool buffer", g_width, g_height);
+        pool_free_locked(p);
+        return -1;
+    }
+    p.width = g_width;
+    p.height = g_height;
+    p.serial = ++g_pool_serial;
+    return i;
+}
+
+void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
+{
+    int pi = gl_init() ? pool_acquire_locked() : -1;
+    if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
+        // Can't copy: skip the frame but keep the producer's clock running.
+        if (fence >= 0)
+            close(fence);
+        send_locked(CHAM_RELEASE, id, 0, 0);
+        send_locked(CHAM_FRAME_DONE, 0, frame, 0);
+        return;
+    }
+    PoolBuf &p = g_pool[pi];
+    gpu_wait(p.release_fence);  // SurfaceFlinger finished scanning it out
+    p.release_fence = -1;
+    gpu_wait(fence);            // the producer finished rendering
+
+    glBindFramebuffer(GL_READ_FRAMEBUFFER, buf->fbo);
+    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p.fbo);
+    glBlitFramebuffer(0, 0, buf->width, buf->height, 0, 0, p.width, p.height, GL_COLOR_BUFFER_BIT,
+                      buf->width == p.width && buf->height == p.height ? GL_NEAREST : GL_LINEAR);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    int blit_fence = gpu_fence();
+
+    // The producer's buffer is free as soon as the copy has read it.
+    send_locked(CHAM_RELEASE, id, 0, 0, blit_fence);
+
+    ASurfaceTransaction *txn = ASurfaceTransaction_create();
+    ASurfaceTransaction_setBuffer(txn, g_sc, p.ahb, blit_fence);  // takes ownership
+    ARect src{0, 0, p.width, p.height};
+    ARect dst{0, 0, g_width, g_height};
+    ASurfaceTransaction_setGeometry(txn, g_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
+    ASurfaceTransaction_setBufferTransparency(txn, g_sc, ASURFACE_TRANSACTION_TRANSPARENCY_OPAQUE);
+    ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    if (g_vote_dirty && g_frame_rate_vote > 0 && set_frame_rate()) {
+        set_frame_rate()(txn, g_sc, g_frame_rate_vote, 0 /* COMPATIBILITY_DEFAULT */);
+        g_vote_dirty = false;
+    }
+    p.held = true;
+    bool commit = set_on_commit() != nullptr;
+    int64_t prev = g_pool_displayed;
+    uint64_t prev_serial = prev >= 0 ? g_pool[prev].serial : 0;
+    auto *ctx = new FrameCtx{g_client_gen, g_sc, (uint32_t)pi, prev, frame, commit, {commit ? 2 : 1}, true, prev_serial};
+    g_pool_displayed = pi;
+    if (commit)
+        set_on_commit()(txn, ctx, on_commit);
+    ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
+    ASurfaceTransaction_apply(txn);
+    ASurfaceTransaction_delete(txn);
+}
+
 void present(uint32_t id, uint64_t frame, int fence)
 {
     std::lock_guard<std::mutex> lock(g_lock);
@@ -165,6 +404,10 @@ void present(uint32_t id, uint64_t frame, int fence)
             close(fence);
         send_locked(CHAM_RELEASE, id, 0, 0);
         send_locked(CHAM_FRAME_DONE, 0, frame, 0);
+        return;
+    }
+    if (g_copy_mode) {
+        present_copy_locked(id, frame, fence, buf);
         return;
     }
 
@@ -197,17 +440,23 @@ void add_buffer(uint32_t id, AHardwareBuffer *ahb)
         AHardwareBuffer_release(ahb);
         return;
     }
-    if (g_buffers[id].ahb)
+    if (g_buffers[id].ahb) {
+        unwrap(&g_buffers[id].image, &g_buffers[id].tex, &g_buffers[id].fbo);
         AHardwareBuffer_release(g_buffers[id].ahb);
+    }
     AHardwareBuffer_Desc desc{};
     AHardwareBuffer_describe(ahb, &desc);
-    g_buffers[id] = {ahb, (int32_t)desc.width, (int32_t)desc.height};
+    g_buffers[id] = Buffer{};
+    g_buffers[id].ahb = ahb;
+    g_buffers[id].width = (int32_t)desc.width;
+    g_buffers[id].height = (int32_t)desc.height;
     LOGI("buffer %u: %ux%u format %u", id, desc.width, desc.height, desc.format);
 }
 
 void remove_buffer_locked(uint32_t id)
 {
     if (id < kMaxBuffers && g_buffers[id].ahb) {
+        unwrap(&g_buffers[id].image, &g_buffers[id].tex, &g_buffers[id].fbo);
         // SurfaceFlinger keeps its own reference while the buffer is on screen.
         AHardwareBuffer_release(g_buffers[id].ahb);
         g_buffers[id] = {};
@@ -222,6 +471,7 @@ bool serve(int client, int listener)
         g_client = client;
         g_client_gen++;
         g_displayed = -1;
+        g_copy_mode = false;
         send_config_locked();
     }
     LOGI("producer connected");
@@ -251,9 +501,12 @@ bool serve(int client, int listener)
             break;
         }
         switch (msg.type) {
-        case CHAM_HELLO:
-            LOGI("producer protocol v%llu", (unsigned long long)msg.a);
+        case CHAM_HELLO: {
+            std::lock_guard<std::mutex> lock(g_lock);
+            g_copy_mode = (msg.b & CHAM_HELLO_COPY) != 0;
+            LOGI("producer protocol v%llu%s", (unsigned long long)msg.a, g_copy_mode ? ", copy mode" : "");
             break;
+        }
         case CHAM_BUFFER_ADD: {
             AHardwareBuffer *ahb = nullptr;
             int err = AHardwareBuffer_recvHandleFromUnixSocket(client, &ahb);
@@ -382,6 +635,10 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
         ASurfaceControl_release(g_sc);
         g_sc = nullptr;
     }
+    // Detached from the display: SurfaceFlinger drops every pool buffer.
+    for (PoolBuf &p : g_pool)
+        p.held = false;
+    g_pool_displayed = -1;
     if (g_displayed >= 0)
         send_locked(CHAM_RELEASE, (uint32_t)g_displayed, 0, 0);
     g_displayed = -1;

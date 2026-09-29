@@ -1,0 +1,313 @@
+/*
+ * libEGL.so.1 replacement for kwin_wayland: forwards to Android's EGL
+ * (/system/lib64/libEGL.so -> the vendor driver, e.g. libGLES_mali.so) and
+ * adds what KWin expects from a Mesa GBM stack:
+ *
+ *  - eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, ...) -> the Android display
+ *  - EGL_EXT_image_dma_buf_import(_modifiers): a dmabuf that belongs to a
+ *    Chameleon gbm_bo is imported as its AHardwareBuffer
+ *    (EGL_NATIVE_BUFFER_ANDROID)
+ *  - eglTerminate is a no-op, because the Android display is process-wide
+ *
+ * Termux's libepoxy dlopen()s "libEGL.so.1" and glvnd owns that soname, so
+ * this library is found first through LD_LIBRARY_PATH. Android's own library
+ * is called "libEGL.so" and loaded by absolute path, so they don't clash.
+ */
+#define _GNU_SOURCE
+#define EGL_EGLEXT_PROTOTYPES
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <drm_fourcc.h>
+
+#include "../core/cham_shim.h"
+
+#pragma GCC visibility push(default)
+
+static void *g_lib;
+static __thread EGLint t_error; /* error raised by the shim itself */
+
+static void *(*real_get_proc)(const char *);
+
+static void load(void)
+{
+    g_lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libEGL.so" : "/system/lib/libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    if (!g_lib) {
+        cham_log("cannot load Android's libEGL: %s", dlerror());
+        return;
+    }
+    *(void **)&real_get_proc = dlsym(g_lib, "eglGetProcAddress");
+}
+
+static void *real(const char *name)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, load);
+    void *p = g_lib ? dlsym(g_lib, name) : NULL;
+    if (!p && real_get_proc)
+        p = real_get_proc(name);
+    return p;
+}
+
+#define REAL(ret, name, params) \
+    static ret(*p_##name) params; \
+    if (!p_##name)                \
+        *(void **)&p_##name = real(#name);
+
+/* Plain pass-through for everything the shim doesn't need to change. */
+#define FWD(ret, name, params, args, fail) \
+    EGLAPI ret EGLAPIENTRY name params     \
+    {                                      \
+        REAL(ret, name, params)            \
+        if (!p_##name)                     \
+            return fail;                   \
+        return p_##name args;              \
+    }
+
+FWD(EGLBoolean, eglBindAPI, (EGLenum api), (api), EGL_FALSE)
+FWD(EGLBoolean, eglBindTexImage, (EGLDisplay d, EGLSurface s, EGLint b), (d, s, b), EGL_FALSE)
+FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint n, EGLint *num), (d, a, c, n, num), EGL_FALSE)
+FWD(EGLint, eglClientWaitSync, (EGLDisplay d, EGLSync s, EGLint f, EGLTime t), (d, s, f, t), EGL_FALSE)
+FWD(EGLBoolean, eglCopyBuffers, (EGLDisplay d, EGLSurface s, EGLNativePixmapType p), (d, s, p), EGL_FALSE)
+FWD(EGLContext, eglCreateContext, (EGLDisplay d, EGLConfig c, EGLContext s, const EGLint *a), (d, c, s, a), EGL_NO_CONTEXT)
+FWD(EGLSurface, eglCreatePbufferFromClientBuffer, (EGLDisplay d, EGLenum t, EGLClientBuffer b, EGLConfig c, const EGLint *a), (d, t, b, c, a), EGL_NO_SURFACE)
+FWD(EGLSurface, eglCreatePbufferSurface, (EGLDisplay d, EGLConfig c, const EGLint *a), (d, c, a), EGL_NO_SURFACE)
+FWD(EGLSurface, eglCreatePixmapSurface, (EGLDisplay d, EGLConfig c, EGLNativePixmapType p, const EGLint *a), (d, c, p, a), EGL_NO_SURFACE)
+FWD(EGLSurface, eglCreatePlatformPixmapSurface, (EGLDisplay d, EGLConfig c, void *p, const EGLAttrib *a), (d, c, p, a), EGL_NO_SURFACE)
+FWD(EGLSurface, eglCreatePlatformWindowSurface, (EGLDisplay d, EGLConfig c, void *w, const EGLAttrib *a), (d, c, w, a), EGL_NO_SURFACE)
+FWD(EGLSync, eglCreateSync, (EGLDisplay d, EGLenum t, const EGLAttrib *a), (d, t, a), EGL_NO_SYNC)
+FWD(EGLSurface, eglCreateWindowSurface, (EGLDisplay d, EGLConfig c, EGLNativeWindowType w, const EGLint *a), (d, c, w, a), EGL_NO_SURFACE)
+FWD(EGLBoolean, eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c), EGL_FALSE)
+FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
+FWD(EGLBoolean, eglDestroySurface, (EGLDisplay d, EGLSurface s), (d, s), EGL_FALSE)
+FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
+FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
+FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
+FWD(EGLContext, eglGetCurrentContext, (void), (), EGL_NO_CONTEXT)
+FWD(EGLDisplay, eglGetCurrentDisplay, (void), (), EGL_NO_DISPLAY)
+FWD(EGLSurface, eglGetCurrentSurface, (EGLint r), (r), EGL_NO_SURFACE)
+FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
+FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor), EGL_FALSE)
+FWD(EGLBoolean, eglMakeCurrent, (EGLDisplay d, EGLSurface dr, EGLSurface rd, EGLContext c), (d, dr, rd, c), EGL_FALSE)
+FWD(EGLenum, eglQueryAPI, (void), (), EGL_NONE)
+FWD(EGLBoolean, eglQueryContext, (EGLDisplay d, EGLContext c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
+FWD(EGLBoolean, eglQuerySurface, (EGLDisplay d, EGLSurface s, EGLint a, EGLint *v), (d, s, a, v), EGL_FALSE)
+FWD(EGLBoolean, eglReleaseTexImage, (EGLDisplay d, EGLSurface s, EGLint b), (d, s, b), EGL_FALSE)
+FWD(EGLBoolean, eglReleaseThread, (void), (), EGL_FALSE)
+FWD(EGLBoolean, eglSurfaceAttrib, (EGLDisplay d, EGLSurface s, EGLint a, EGLint v), (d, s, a, v), EGL_FALSE)
+FWD(EGLBoolean, eglSwapBuffers, (EGLDisplay d, EGLSurface s), (d, s), EGL_FALSE)
+FWD(EGLBoolean, eglSwapInterval, (EGLDisplay d, EGLint i), (d, i), EGL_FALSE)
+FWD(EGLBoolean, eglWaitClient, (void), (), EGL_FALSE)
+FWD(EGLBoolean, eglWaitGL, (void), (), EGL_FALSE)
+FWD(EGLBoolean, eglWaitNative, (EGLint e), (e), EGL_FALSE)
+FWD(EGLBoolean, eglWaitSync, (EGLDisplay d, EGLSync s, EGLint f), (d, s, f), EGL_FALSE)
+
+static EGLBoolean fail(EGLint error)
+{
+    t_error = error;
+    return EGL_FALSE;
+}
+
+EGLAPI EGLint EGLAPIENTRY eglGetError(void)
+{
+    REAL(EGLint, eglGetError, (void))
+    EGLint real_error = p_eglGetError ? p_eglGetError() : EGL_NOT_INITIALIZED;
+    if (t_error) {
+        EGLint e = t_error;
+        t_error = 0;
+        return e;
+    }
+    return real_error;
+}
+
+/* ---- displays ---- */
+
+static EGLDisplay android_display(void)
+{
+    REAL(EGLDisplay, eglGetDisplay, (EGLNativeDisplayType))
+    return p_eglGetDisplay ? p_eglGetDisplay(EGL_DEFAULT_DISPLAY) : EGL_NO_DISPLAY;
+}
+
+/* The native display is a gbm_device (or nothing); either way there is one
+ * GPU, Android's. */
+EGLAPI EGLDisplay EGLAPIENTRY eglGetDisplay(EGLNativeDisplayType native)
+{
+    (void)native;
+    return android_display();
+}
+
+static EGLDisplay platform_display(EGLenum platform)
+{
+    switch (platform) {
+    case EGL_PLATFORM_GBM_KHR:
+    case EGL_PLATFORM_SURFACELESS_MESA:
+    case EGL_PLATFORM_DEVICE_EXT:
+    case EGL_PLATFORM_ANDROID_KHR:
+        return android_display();
+    }
+    t_error = EGL_BAD_PARAMETER; /* wayland/x11 windows don't exist here */
+    return EGL_NO_DISPLAY;
+}
+
+EGLAPI EGLDisplay EGLAPIENTRY eglGetPlatformDisplay(EGLenum platform, void *native, const EGLAttrib *attribs)
+{
+    (void)native;
+    (void)attribs;
+    return platform_display(platform);
+}
+
+static EGLDisplay EGLAPIENTRY shim_eglGetPlatformDisplayEXT(EGLenum platform, void *native, const EGLint *attribs)
+{
+    (void)native;
+    (void)attribs;
+    return platform_display(platform);
+}
+
+/* KWin may create and destroy several EglDisplays; Android has one per
+ * process, and terminating it would pull it from under the others. */
+EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay dpy)
+{
+    (void)dpy;
+    return EGL_TRUE;
+}
+
+static const char k_client_extensions[] =
+    "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
+    "EGL_MESA_platform_surfaceless EGL_KHR_platform_android EGL_KHR_client_get_all_proc_addresses";
+
+EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
+{
+    REAL(const char *, eglQueryString, (EGLDisplay, EGLint))
+    if (dpy == EGL_NO_DISPLAY && name == EGL_EXTENSIONS)
+        return k_client_extensions;
+    const char *s = p_eglQueryString ? p_eglQueryString(dpy, name) : NULL;
+    if (name != EGL_EXTENSIONS || !s)
+        return s;
+
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static char *cached;
+    pthread_mutex_lock(&lock);
+    if (!cached) {
+        const char *extra = " EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers";
+        cached = malloc(strlen(s) + strlen(extra) + 1);
+        strcpy(cached, s);
+        if (!strstr(s, "EGL_EXT_image_dma_buf_import_modifiers"))
+            strcat(cached, extra);
+    }
+    pthread_mutex_unlock(&lock);
+    return cached;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglQueryDisplayAttribEXT(EGLDisplay dpy, EGLint attribute, EGLAttrib *value)
+{
+    (void)dpy, (void)attribute, (void)value;
+    return fail(EGL_BAD_ATTRIBUTE); /* no EGLDevice: we don't advertise EGL_EXT_device_query */
+}
+
+/* ---- dmabuf import ---- */
+
+static EGLBoolean EGLAPIENTRY shim_eglQueryDmaBufFormatsEXT(EGLDisplay dpy, EGLint max, EGLint *formats, EGLint *num)
+{
+    (void)dpy;
+    int n;
+    const uint32_t *ours = cham_formats(&n);
+    if (max > 0 && formats)
+        for (int i = 0; i < n && i < max; i++)
+            formats[i] = (EGLint)ours[i];
+    *num = max > 0 && formats ? (n < max ? n : max) : n;
+    return EGL_TRUE;
+}
+
+/* No explicit modifiers: gralloc picks the layout (implicit). */
+static EGLBoolean EGLAPIENTRY shim_eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EGLint format, EGLint max,
+                                                                EGLuint64KHR *modifiers, EGLBoolean *external_only,
+                                                                EGLint *num)
+{
+    (void)dpy, (void)format, (void)max, (void)modifiers, (void)external_only;
+    *num = 0;
+    return EGL_TRUE;
+}
+
+static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
+{
+    int fd = -1;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
+        if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
+            fd = a[1];
+    struct cham_bo *bo = cham_bo_from_fd(fd);
+    if (!bo) {
+        /* A dmabuf we didn't allocate has no AHardwareBuffer behind it. */
+        t_error = EGL_BAD_MATCH;
+        return EGL_NO_IMAGE_KHR;
+    }
+    static EGLClientBuffer (*get_client_buffer)(const struct AHardwareBuffer *);
+    static EGLImageKHR (*create_image)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
+    if (!get_client_buffer)
+        *(void **)&get_client_buffer = real("eglGetNativeClientBufferANDROID");
+    if (!create_image)
+        *(void **)&create_image = real("eglCreateImageKHR");
+    if (!get_client_buffer || !create_image) {
+        t_error = EGL_BAD_ALLOC;
+        return EGL_NO_IMAGE_KHR;
+    }
+    const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(cham_bo_ahb(bo)),
+                        image_attribs);
+}
+
+static EGLImageKHR EGLAPIENTRY shim_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
+                                                       EGLClientBuffer buffer, const EGLint *attribs)
+{
+    if (target == EGL_LINUX_DMA_BUF_EXT)
+        return import_dmabuf(dpy, attribs);
+    REAL(EGLImageKHR, eglCreateImageKHR, (EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *))
+    return p_eglCreateImageKHR ? p_eglCreateImageKHR(dpy, ctx, target, buffer, attribs) : EGL_NO_IMAGE_KHR;
+}
+
+EGLAPI EGLImage EGLAPIENTRY eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLenum target, EGLClientBuffer buffer,
+                                           const EGLAttrib *attribs)
+{
+    EGLint converted[64];
+    int n = 0;
+    for (const EGLAttrib *a = attribs; a && a[0] != EGL_NONE && n < 62; a += 2) {
+        converted[n++] = (EGLint)a[0];
+        converted[n++] = (EGLint)a[1];
+    }
+    converted[n] = EGL_NONE;
+    return shim_eglCreateImageKHR(dpy, ctx, target, buffer, converted);
+}
+
+/* ---- proc addresses ---- */
+
+static const struct {
+    const char *name;
+    void *fn;
+} k_overrides[] = {
+    {"eglGetDisplay", (void *)eglGetDisplay},
+    {"eglGetPlatformDisplay", (void *)eglGetPlatformDisplay},
+    {"eglGetPlatformDisplayEXT", (void *)shim_eglGetPlatformDisplayEXT},
+    {"eglQueryString", (void *)eglQueryString},
+    {"eglTerminate", (void *)eglTerminate},
+    {"eglGetError", (void *)eglGetError},
+    {"eglCreateImage", (void *)eglCreateImage},
+    {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
+    {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
+    {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
+    {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
+};
+
+EGLAPI __eglMustCastToProperFunctionPointerType EGLAPIENTRY eglGetProcAddress(const char *name)
+{
+    for (size_t i = 0; i < sizeof k_overrides / sizeof k_overrides[0]; i++)
+        if (strcmp(name, k_overrides[i].name) == 0)
+            return (__eglMustCastToProperFunctionPointerType)k_overrides[i].fn;
+    real("eglGetProcAddress"); /* makes sure real_get_proc is loaded */
+    return real_get_proc ? (__eglMustCastToProperFunctionPointerType)real_get_proc(name) : NULL;
+}
+
+#pragma GCC visibility pop

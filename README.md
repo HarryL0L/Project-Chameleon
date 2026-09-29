@@ -19,8 +19,9 @@ Presenter app → ASurfaceTransaction_setBuffer → SurfaceFlinger
 1. [`probe/`](probe/) — verified on Mali-G77 (see `probe/RESULTS.md`).
 2. **Presenter app** ([`android/`](android/)) + **demo producer**
    ([`termux/demo/`](termux/demo/)) — zero-copy GPU frames from Termux to the
-   screen. ← current
-3. Fake libgbm / libdrm / EGL shim for KWin.
+   screen: 120 fps, 0 dropped on a 120 Hz panel.
+3. **KWin shim** ([`shim/`](shim/)) — fake KMS device + libgbm + EGL for an
+   unmodified `kwin_wayland --drm`. ← current (output only, no input yet)
 
 ## How the app talks to Termux
 
