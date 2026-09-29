@@ -11,8 +11,10 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
 - `addGpu` → `Session::openRestricted(path)` (noop session = plain `open`)
   → `drmIsKMS(fd)` → `DrmDevice::openWithAuthentication` (`drmGetVersion`,
   GBM device) → `EGL_PLATFORM_GBM_KHR` display.
-- The shim (LD_PRELOAD) fakes that device: libdrm KMS calls, libgbm (bo =
-  AHardwareBuffer, fd = the gralloc handle's dmabuf fd), EGL → system libEGL.
+- `libchameleon.so` (LD_PRELOAD) fakes that device (libdrm KMS calls), the
+  fake `libgbm.so` (LD_LIBRARY_PATH) makes a bo an AHardwareBuffer (fd = the
+  gralloc handle's dmabuf fd), and EGL goes through glvnd to the
+  `libEGL_chameleon.so` vendor, which forwards to Android's libEGL.
 - Atomic commit → `CHAM_PRESENT`; `CHAM_FRAME_DONE` → page-flip event on the
   fake fd. One pending flip, exactly like the demo's default pacing.
 
@@ -32,7 +34,9 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
 Implemented in `shim/core/input.c`:
 
 - The socket path comes from KWin's own `bind()` of `$XDG_RUNTIME_DIR/wayland-N`
-  (interposed), libwayland-client is `dlopen()`ed, and the protocol tables are
+  (interposed), or from `$CHAMELEON_WAYLAND_SOCKET` when `kwin_wayland_wrapper`
+  created the socket and passed KWin only its fd (`bin/kwin_wayland` sets it
+  from `--socket`); libwayland-client is `dlopen()`ed, and the protocol tables are
   written out by hand (no wayland-scanner at build time).
 - The app sends `CHAM_INPUT` messages with positions as fractions of its
   surface; the shim maps them onto the output's logical geometry from

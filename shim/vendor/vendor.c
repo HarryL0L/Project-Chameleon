@@ -12,8 +12,9 @@
  * Which displays it takes (anything else is left to the next vendor, e.g.
  * Mesa):
  *  - EGL_PLATFORM_GBM_KHR, and eglGetDisplay(EGL_DEFAULT_DISPLAY): only in a
- *    process running on Chameleon's fake KMS device (kwin_wayland started by
- *    chameleon-kwin, where libchameleon.so provides the gbm buffers);
+ *    process running on Chameleon's fake KMS device (kwin_wayland started
+ *    through bin/kwin_wayland, where libchameleon.so provides the gbm
+ *    buffers);
  *    CHAMELEON_EGL_DEFAULT=1 also takes the default display elsewhere.
  *  - EGL_PLATFORM_SURFACELESS_MESA and EGL_PLATFORM_ANDROID_KHR: always
  *    (off-screen rendering on the GPU).

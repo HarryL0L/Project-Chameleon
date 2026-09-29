@@ -6,7 +6,10 @@
 # Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev.
 set -e
 cd "$(dirname "$0")/../.."
-OUT=${OUT:-$(mktemp -d)}
+if [ -z "$OUT" ]; then
+    OUT=$(mktemp -d)
+    trap 'rm -rf "$OUT"' EXIT
+fi
 mkdir -p "$OUT"
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/*.c -ldl -lpthread \

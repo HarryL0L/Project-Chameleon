@@ -32,19 +32,17 @@ for lib in libchameleon.so libgbm.so libEGL_chameleon.so; do
         exit 1
     fi
 done
-for old in libGLESv2.so.2 libEGL.so.1; do
-    if [ -e "$SHIM_DIR/$old" ] || [ -L "$SHIM_DIR/$old" ]; then
-        echo "chameleon: $SHIM_DIR/$old is left over from an older version and would hide" >&2
-        echo "  Termux's glvnd. Remove it (and from wherever you copied the folder from," >&2
-        echo "  e.g. /sdcard: unpacking a new artifact over an old folder keeps old files):" >&2
-        echo "    rm -f $SHIM_DIR/libGLESv2.so.2 $SHIM_DIR/libEGL.so.1" >&2
-        exit 1
-    fi
-done
 
-# One KWin per Chameleon app (this script's own process is also called
-# kwin_wayland, hence the pid filter).
-if command -v pgrep >/dev/null 2>&1 && pgrep -x kwin_wayland | grep -qvx "$$"; then
+# One KWin per Chameleon app. This script's own process is also called
+# kwin_wayland, hence the pid filter; no pipe, whose forked side would also
+# briefly carry that name.
+running=
+if command -v pgrep >/dev/null 2>&1; then
+    for pid in $(pgrep -x kwin_wayland); do
+        [ "$pid" = "$$" ] || running=1
+    done
+fi
+if [ -n "$running" ]; then
     echo "chameleon: another kwin_wayland is already running (pgrep -af kwin_wayland);" >&2
     echo "  only one can use the Chameleon app. Stop it first: pkill -x kwin_wayland" >&2
     exit 1

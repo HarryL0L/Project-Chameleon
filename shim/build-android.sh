@@ -15,7 +15,7 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 "$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
-cp shim/chameleon shim/chameleon-kwin shim/chameleon-vendor-install "$OUT/"
+cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
 mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland "$OUT/bin/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
@@ -31,12 +31,10 @@ if "$NM" -D --undefined-only "$OUT/libEGL_chameleon.so" | grep -q 'cham_'; then
     echo "build-android.sh: libEGL_chameleon.so must not depend on libchameleon.so" >&2
     exit 1
 fi
-for lib in libgbm.so; do
-    "$NM" -D --defined-only "$OUT/$lib" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"
-    if ! diff -u "shim/exports/$lib.txt" "$OUT/.exports"; then
-        echo "build-android.sh: $lib exports differ from shim/exports/$lib.txt" >&2
-        exit 1
-    fi
-done
+"$NM" -D --defined-only "$OUT/libgbm.so" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"
+if ! diff -u shim/exports/libgbm.so.txt "$OUT/.exports"; then
+    echo "build-android.sh: libgbm.so exports differ from shim/exports/libgbm.so.txt" >&2
+    exit 1
+fi
 rm -f "$OUT/.exports"
 echo "shim built in $OUT (exports verified)"

@@ -1,9 +1,9 @@
 /*
  * chameleon_demo - Termux-side producer that renders with the vendor GPU
  * (through /system/lib64/libEGL.so) into AHardwareBuffers and streams them to
- * the Chameleon presenter app with zero copies. It exercises exactly the path
- * the KWin shim will use: allocate -> render -> fence -> PRESENT -> wait for
- * FRAME_DONE ("page flip") and RELEASE.
+ * the Chameleon presenter app with zero copies. It exercises the path the
+ * KWin shim uses: allocate -> render -> fence -> PRESENT -> wait for
+ * FRAME_DONE ("page flip") and RELEASE (the shim then asks for copy mode).
  *
  * Prints frames per second and the submit -> on-screen (FRAME_DONE) latency.
  */

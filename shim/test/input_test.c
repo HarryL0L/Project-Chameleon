@@ -19,15 +19,7 @@
 
 #include "../../common/cham_io.h"
 
-static int failures;
-#define CHECK(cond, ...)                          \
-    do {                                          \
-        int ok_ = (cond);                         \
-        printf("  %s  ", ok_ ? "ok  " : "FAIL"); \
-        printf(__VA_ARGS__);                      \
-        printf("\n");                             \
-        failures += !ok_;                         \
-    } while (0)
+#include "check.h"
 
 /* ---- fake-input server ---- */
 

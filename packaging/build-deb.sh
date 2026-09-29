@@ -28,7 +28,7 @@ LIB="$ROOT$PREFIX/lib/chameleon"
 mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT/DEBIAN"
 
 install -m 644 "$SHIM/libchameleon.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
-install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-kwin" "$SHIM/chameleon-vendor-install" "$LIB/"
+install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$LIB/"
 install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"

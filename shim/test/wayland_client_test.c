@@ -27,15 +27,7 @@
 
 #include <drm_fourcc.h>
 
-static int failures;
-#define CHECK(cond, ...)                         \
-    do {                                         \
-        int ok_ = (cond);                        \
-        printf("  %s  ", ok_ ? "ok  " : "FAIL"); \
-        printf(__VA_ARGS__);                     \
-        printf("\n");                            \
-        failures += !ok_;                        \
-    } while (0)
+#include "check.h"
 
 /* ---- compositor ---- */
 

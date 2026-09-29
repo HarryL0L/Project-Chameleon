@@ -1,7 +1,7 @@
-# KWin shim
+# Chameleon for Termux (the shim)
 
-Runs the Termux `kwin_wayland --drm` (6.7.5, unmodified) on the Chameleon
-app's screen, rendering with Android's GPU driver.
+Runs the Termux `kwin_wayland` (6.7.5, unmodified) and a Plasma session on
+the Chameleon app's screen, rendering with Android's GPU driver.
 
 | file | replaces | does |
 |---|---|---|
@@ -37,8 +37,9 @@ script adds `--drm` anyway unless another backend is asked for), so
 plasma-workspace needs no change either.
 
 KWin loads the EGL vendor through Termux's own glvnd (`libEGL.so.1`,
-`libGLESv2.so.2`): the script points `__EGL_VENDOR_LIBRARY_FILENAMES` at it
-for KWin only. `chameleon-kwin ...` still works (= `chameleon kwin_wayland ...`).
+`libGLESv2.so.2`): `chameleon` sets `__EGL_VENDOR_LIBRARY_FILENAMES` for the
+whole session, with this vendor first and the installed ones (Mesa) after
+it.
 
 ### The EGL vendor for other programs
 
@@ -84,8 +85,11 @@ libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one;
 - the input path against a real libwayland-server fake-input global;
+- the screen following the app's window and refresh rate, against a
+  stand-in for KWin's output management (`output_test`);
+- the GLSL fix-ups (`glsl_fix_test`);
 - the EGL vendor through the system's real glvnd, with a stand-in for
-  Android's driver, both as any program and as KWin.
+  Android's driver, both as any program and as KWin;
 - a Wayland app rendering through the vendor into a real libwayland-server
   compositor: buffers registered with the KWin side, dmabuf parameters,
   releases, frame pacing and resizing.

@@ -17,7 +17,7 @@ LIB="$SHIM_DIR/libEGL_chameleon.so" # in place: $PREFIX/lib/chameleon with the p
 JSON="$PREFIX/share/glvnd/egl_vendor.d/10_chameleon.json"
 
 if [ "$1" = "--remove" ]; then
-    rm -f "$JSON" "$PREFIX/lib/libEGL_chameleon.so" # (older versions copied the library there)
+    rm -f "$JSON"
     echo "Chameleon EGL vendor removed"
     exit 0
 fi

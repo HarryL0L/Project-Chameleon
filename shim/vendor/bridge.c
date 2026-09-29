@@ -3,7 +3,7 @@
  *
  * libEGL_chameleon.so is loaded into every EGL program that glvnd routes to
  * it, while libchameleon.so (fake KMS device, gbm buffers, crash reporter)
- * is only LD_PRELOADed into kwin_wayland by chameleon-kwin. So the vendor
+ * is only LD_PRELOADed into kwin_wayland (bin/kwin_wayland). So the vendor
  * does not link against it: the few core functions the EGL code uses are
  * looked up with dlsym(RTLD_DEFAULT) and simply absent elsewhere (no dmabuf
  * import, which only makes sense for Chameleon's own gbm buffers anyway).

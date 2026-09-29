@@ -13,15 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int failures;
-#define CHECK(cond, ...)                         \
-    do {                                         \
-        int ok_ = (cond);                        \
-        printf("  %s  ", ok_ ? "ok  " : "FAIL"); \
-        printf(__VA_ARGS__);                     \
-        printf("\n");                            \
-        failures += !ok_;                        \
-    } while (0)
+#include "check.h"
 
 struct fake_state {
     int robust_attrib_seen, client_version;

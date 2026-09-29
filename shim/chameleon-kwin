@@ -1,3 +1,0 @@
-#!/data/data/com.termux/files/usr/bin/sh
-# Old name, kept for existing habits: same as `chameleon kwin_wayland ...`.
-exec "$(cd "$(dirname "$(readlink -f "$0")")" && pwd)/chameleon" kwin_wayland "$@"
