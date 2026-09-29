@@ -10,7 +10,7 @@
 set -e
 
 SHIM_DIR=${CHAMELEON_SHIM_DIR:-$(cd "$(dirname "$(readlink -f "$0")")" && pwd)}
-for lib in libchameleon.so libgbm.so libEGL.so.1 libGLESv2.so.2; do
+for lib in libchameleon.so libgbm.so libEGL_chameleon.so; do
     if [ ! -f "$SHIM_DIR/$lib" ]; then
         echo "chameleon-kwin: $SHIM_DIR/$lib is missing (set CHAMELEON_SHIM_DIR)" >&2
         exit 1
@@ -30,11 +30,13 @@ if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 
     exec dbus-run-session -- "$0" "$@"
 fi
 
-if [ -L "$SHIM_DIR/libGLESv2.so.2" ]; then
-    echo "chameleon-kwin: $SHIM_DIR/libGLESv2.so.2 is a symlink left by an older version;" >&2
-    echo "  delete the kwin-shim directory and copy the new one in its place." >&2
-    exit 1
-fi
+for old in libGLESv2.so.2 libEGL.so.1; do
+    if [ -e "$SHIM_DIR/$old" ] || [ -L "$SHIM_DIR/$old" ]; then
+        echo "chameleon-kwin: $SHIM_DIR/$old is left over from an older version and would hide" >&2
+        echo "  glvnd; delete the kwin-shim directory and copy the new one in its place." >&2
+        exit 1
+    fi
+done
 
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
@@ -46,9 +48,19 @@ export KWIN_DISABLE_VULKAN=1
 export KWIN_DRM_USE_MODIFIERS=0              # gralloc picks buffer layouts
 export KWIN_NO_TIMER_QUERY=${KWIN_NO_TIMER_QUERY-1}  # Mali-G77 crashes (SIGBUS) on texture writes after GL_TIMESTAMP queries
 
+# EGL/GLES: glvnd (Termux's libEGL.so.1 / libGLESv2.so.2) with the Chameleon
+# vendor library as KWin's only vendor. If it is installed system-wide
+# (egl_vendor.d), this still pins KWin to this copy. The vendor puts the
+# original setting back once glvnd has loaded it, for KWin's children.
+VENDOR_JSON="$XDG_RUNTIME_DIR/chameleon-egl-vendor.json"
+printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' \
+    "$SHIM_DIR/libEGL_chameleon.so" > "$VENDOR_JSON"
+export CHAMELEON_ORIG___EGL_VENDOR_LIBRARY_FILENAMES=${__EGL_VENDOR_LIBRARY_FILENAMES:-}
+export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDOR_JSON"
+
 export CHAMELEON_ORIG_LD_PRELOAD=${LD_PRELOAD:-}
 export CHAMELEON_ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
-export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"  # the fake libgbm.so
 export LD_PRELOAD="$SHIM_DIR/libchameleon.so${LD_PRELOAD:+:$LD_PRELOAD}"
 
 exec kwin_wayland --drm "$@"

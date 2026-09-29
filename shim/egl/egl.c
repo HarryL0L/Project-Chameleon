@@ -1,7 +1,7 @@
 /*
- * libEGL.so.1 replacement for kwin_wayland: forwards to Android's EGL
- * (/system/lib64/libEGL.so -> the vendor driver, e.g. libGLES_mali.so) and
- * adds what KWin expects from a Mesa GBM stack:
+ * EGL side of the Chameleon glvnd vendor (libEGL_chameleon.so): forwards to
+ * Android's EGL (/system/lib64/libEGL.so -> the vendor driver, e.g.
+ * libGLES_mali.so) and adds what KWin expects from a Mesa GBM stack:
  *
  *  - eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, ...) -> the Android display
  *  - EGL_EXT_image_dma_buf_import(_modifiers): a dmabuf that belongs to a
@@ -9,8 +9,8 @@
  *    (EGL_NATIVE_BUFFER_ANDROID)
  *  - eglTerminate is a no-op, because the Android display is process-wide
  *
- * Termux's libepoxy dlopen()s "libEGL.so.1" and glvnd owns that soname, so
- * this library is found first through LD_LIBRARY_PATH. Android's own library
+ * Nothing here is exported: glvnd's libEGL.so.1 gets every entry point
+ * through cham_egl_get_proc() (see vendor/vendor.c). Android's own library
  * is called "libEGL.so" and loaded by absolute path, so they don't clash.
  */
 #define _GNU_SOURCE
@@ -26,8 +26,7 @@
 #include <drm_fourcc.h>
 
 #include "../core/cham_shim.h"
-
-#pragma GCC visibility push(default)
+#include "../vendor/vendor.h"
 
 static void *g_lib;
 static __thread EGLint t_error; /* error raised by the shim itself */
@@ -36,7 +35,11 @@ static void *(*real_get_proc)(const char *);
 
 static void load(void)
 {
-    g_lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libEGL.so" : "/system/lib/libEGL.so", RTLD_NOW | RTLD_LOCAL);
+    /* CHAMELEON_ANDROID_EGL: a stand-in library for the host tests */
+    const char *path = getenv("CHAMELEON_ANDROID_EGL");
+    if (!path)
+        path = sizeof(void *) == 8 ? "/system/lib64/libEGL.so" : "/system/lib/libEGL.so";
+    g_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!g_lib) {
         cham_log("cannot load Android's libEGL: %s", dlerror());
         return;
@@ -214,15 +217,19 @@ EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay dpy)
     return EGL_TRUE;
 }
 
-static const char k_client_extensions[] =
+/* GBM only where Chameleon's gbm (libchameleon.so, i.e. KWin) is loaded. */
+static const char k_client_extensions_kms[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
     "EGL_MESA_platform_surfaceless EGL_KHR_platform_android EGL_KHR_client_get_all_proc_addresses";
+static const char k_client_extensions[] =
+    "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_MESA_platform_surfaceless EGL_KHR_platform_android "
+    "EGL_KHR_client_get_all_proc_addresses";
 
 EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
 {
     REAL(const char *, eglQueryString, (EGLDisplay, EGLint))
     if (dpy == EGL_NO_DISPLAY && name == EGL_EXTENSIONS)
-        return k_client_extensions;
+        return cham_core_present() ? k_client_extensions_kms : k_client_extensions;
     const char *s = p_eglQueryString ? p_eglQueryString(dpy, name) : NULL;
     if (name != EGL_EXTENSIONS || !s)
         return s;
@@ -231,7 +238,10 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
     static char *cached;
     pthread_mutex_lock(&lock);
     if (!cached) {
-        const char *extra = " EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers";
+        /* dmabufs can only be imported when they are Chameleon gbm buffers */
+        const char *extra = cham_core_present()
+                                ? " EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers"
+                                : "";
         cached = malloc(strlen(s) + strlen(extra) + 1);
         strcpy(cached, s);
         if (!strstr(s, "EGL_EXT_image_dma_buf_import_modifiers"))
@@ -320,28 +330,13 @@ EGLAPI EGLImage EGLAPIENTRY eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLen
     return shim_eglCreateImageKHR(dpy, ctx, target, buffer, converted);
 }
 
-/* ---- proc addresses ---- */
+/* ---- proc addresses ----
+ *
+ * glvnd's libEGL asks the vendor for each entry point by name (core EGL for
+ * its static dispatch, extensions for its dynamic dispatch table). Ours come
+ * first; everything else is Android's own function. */
 
-static const struct {
-    const char *name;
-    void *fn;
-} k_overrides[] = {
-    {"eglGetDisplay", (void *)eglGetDisplay},
-    {"eglGetPlatformDisplay", (void *)eglGetPlatformDisplay},
-    {"eglGetPlatformDisplayEXT", (void *)shim_eglGetPlatformDisplayEXT},
-    {"eglQueryString", (void *)eglQueryString},
-    {"eglTerminate", (void *)eglTerminate},
-    {"eglGetError", (void *)eglGetError},
-    {"eglCreateImage", (void *)eglCreateImage},
-    {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
-    {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
-    {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
-    {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
-};
-
-/* Extension entry points KWin fetches with eglGetProcAddress (so they bypass
- * the libGLESv2.so.2 forwarders) get a thin wrapper that records the call
- * for the crash report, then calls the driver. */
+/* Extension entry points whose calls are recorded for the crash report. */
 #define TRACED_VOID(id, str, params, args)             \
     static void (*p_tr_##id) params;                   \
     static void tr_##id params                         \
@@ -368,7 +363,6 @@ TRACED_VOID(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferS
             (unsigned target, void *image), (target, image))
 TRACED(unsigned, GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT", (void), ())
 TRACED(unsigned, GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR", (void), ())
-TRACED(unsigned, GetGraphicsResetStatus, "glGetGraphicsResetStatus", (void), ())
 TRACED(EGLSyncKHR, CreateSyncKHR, "eglCreateSyncKHR", (EGLDisplay d, EGLenum t, const EGLint *a), (d, t, a))
 TRACED(EGLBoolean, DestroySyncKHR, "eglDestroySyncKHR", (EGLDisplay d, EGLSyncKHR s), (d, s))
 TRACED(EGLint, ClientWaitSyncKHR, "eglClientWaitSyncKHR", (EGLDisplay d, EGLSyncKHR s, EGLint f, EGLTimeKHR t),
@@ -391,7 +385,6 @@ static const struct {
     TR(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES"),
     TR(GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT"),
     TR(GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR"),
-    TR(GetGraphicsResetStatus, "glGetGraphicsResetStatus"),
     TR(CreateSyncKHR, "eglCreateSyncKHR"),
     TR(DestroySyncKHR, "eglDestroySyncKHR"),
     TR(ClientWaitSyncKHR, "eglClientWaitSyncKHR"),
@@ -399,22 +392,59 @@ static const struct {
     TR(DupNativeFenceFDANDROID, "eglDupNativeFenceFDANDROID"),
 };
 
-EGLAPI __eglMustCastToProperFunctionPointerType EGLAPIENTRY eglGetProcAddress(const char *name)
+#define OWN(name) {#name, (void *)name}
+static const struct {
+    const char *name;
+    void *fn;
+} k_own[] = {
+    /* changed behaviour */
+    OWN(eglCreateContext),
+    OWN(eglGetError),
+    OWN(eglGetDisplay),
+    OWN(eglGetPlatformDisplay),
+    OWN(eglTerminate),
+    OWN(eglQueryString),
+    OWN(eglCreateImage),
+    {"eglGetPlatformDisplayEXT", (void *)shim_eglGetPlatformDisplayEXT},
+    {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
+    {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
+    {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
+    {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
+    /* pass-through, recorded for the crash report */
+    OWN(eglBindAPI), OWN(eglBindTexImage), OWN(eglChooseConfig), OWN(eglClientWaitSync), OWN(eglCopyBuffers),
+    OWN(eglCreatePbufferFromClientBuffer), OWN(eglCreatePbufferSurface), OWN(eglCreatePixmapSurface),
+    OWN(eglCreatePlatformPixmapSurface), OWN(eglCreatePlatformWindowSurface), OWN(eglCreateSync),
+    OWN(eglCreateWindowSurface), OWN(eglDestroyContext), OWN(eglDestroyImage), OWN(eglDestroySurface),
+    OWN(eglDestroySync), OWN(eglGetConfigAttrib), OWN(eglGetConfigs), OWN(eglGetCurrentContext),
+    OWN(eglGetCurrentDisplay), OWN(eglGetCurrentSurface), OWN(eglGetSyncAttrib), OWN(eglInitialize),
+    OWN(eglMakeCurrent), OWN(eglQueryAPI), OWN(eglQueryContext), OWN(eglQuerySurface), OWN(eglReleaseTexImage),
+    OWN(eglReleaseThread), OWN(eglSurfaceAttrib), OWN(eglSwapBuffers), OWN(eglSwapInterval), OWN(eglWaitClient),
+    OWN(eglWaitGL), OWN(eglWaitNative), OWN(eglWaitSync),
+};
+
+/* Our function for `name`, or Android's; NULL if neither has it. */
+void *cham_egl_get_proc(const char *name)
 {
-    for (size_t i = 0; i < sizeof k_overrides / sizeof k_overrides[0]; i++)
-        if (strcmp(name, k_overrides[i].name) == 0)
-            return (__eglMustCastToProperFunctionPointerType)k_overrides[i].fn;
-    real("eglGetProcAddress"); /* makes sure real_get_proc is loaded */
-    if (!real_get_proc)
-        return NULL;
-    void *fn = (void *)real_get_proc(name);
+    for (size_t i = 0; i < sizeof k_own / sizeof k_own[0]; i++)
+        if (strcmp(name, k_own[i].name) == 0)
+            return k_own[i].fn;
+    void *fn = real(name);
     for (size_t i = 0; fn && i < sizeof k_traced / sizeof k_traced[0]; i++) {
         if (strcmp(name, k_traced[i].name) == 0) {
             *k_traced[i].real = fn;
-            return (__eglMustCastToProperFunctionPointerType)k_traced[i].wrapper;
+            return k_traced[i].wrapper;
         }
     }
-    return (__eglMustCastToProperFunctionPointerType)fn;
+    return fn;
 }
 
-#pragma GCC visibility pop
+int cham_egl_available(void)
+{
+    return real("eglGetDisplay") != NULL;
+}
+
+/* Android's EGLDisplay (there is one per process), for the vendor glue. */
+EGLDisplay cham_egl_android_display(void)
+{
+    return android_display();
+}

@@ -1,7 +1,8 @@
 /*
- * libGLESv2.so.2 replacement for kwin_wayland. Termux's libepoxy dlopen()s
- * this name (glvnd's soname); every entry point forwards to Android's
- * libGLESv2.so (the vendor driver), except:
+ * GLES side of the Chameleon glvnd vendor (libEGL_chameleon.so). glvnd's
+ * libGLESv2.so.2 dispatches every GL call to the function cham_gl_get_proc()
+ * returns: a forwarder to Android's libGLESv2.so (the vendor driver) that
+ * records the call for the crash report, or one of these overrides:
  *
  *  - glShaderSource: makes KWin's Mesa-tested GLSL acceptable to strict
  *    drivers (glsl_fix.c).
@@ -70,8 +71,10 @@ static void (GL_APIENTRY *p_glBufferData)(GLenum, GLsizeiptr, const void *, GLen
 
 __attribute__((constructor)) static void load(void)
 {
-    void *lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libGLESv2.so" : "/system/lib/libGLESv2.so",
-                       RTLD_NOW | RTLD_LOCAL);
+    const char *path = getenv("CHAMELEON_ANDROID_GLES"); /* host tests */
+    if (!path)
+        path = sizeof(void *) == 8 ? "/system/lib64/libGLESv2.so" : "/system/lib/libGLESv2.so";
+    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         cham_log("cannot load Android's libGLESv2: %s", dlerror());
         return;
@@ -173,7 +176,6 @@ static void build_extensions_locked(void)
         g_ext_list[i++] = (const GLubyte *)t;
 }
 
-__attribute__((visibility("default")))
 GL_APICALL const GLubyte *GL_APIENTRY glGetString(GLenum name)
 {
     if (name != GL_EXTENSIONS)
@@ -185,7 +187,6 @@ GL_APICALL const GLubyte *GL_APIENTRY glGetString(GLenum name)
     return ret;
 }
 
-__attribute__((visibility("default")))
 GL_APICALL const GLubyte *GL_APIENTRY glGetStringi(GLenum name, GLuint index)
 {
     if (name != GL_EXTENSIONS)
@@ -197,7 +198,6 @@ GL_APICALL const GLubyte *GL_APIENTRY glGetStringi(GLenum name, GLuint index)
     return ret;
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glGetIntegerv(GLenum pname, GLint *data)
 {
     if (pname == GL_NUM_EXTENSIONS) {
@@ -396,7 +396,6 @@ static void trace_upload(const char *fn, GLenum internal, GLsizei w, GLsizei h, 
              fb->unbound ? " (unbound for the upload)" : "");
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width,
                                          GLsizei height, GLint border, GLenum format, GLenum type,
                                          const void *pixels)
@@ -423,7 +422,6 @@ GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint inter
     restore_framebuffer(&fb);
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width,
                                             GLsizei height, GLenum format, GLenum type, const void *pixels)
 {
@@ -446,7 +444,6 @@ GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xo
     restore_framebuffer(&fb);
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint internalformat, GLsizei width,
                                          GLsizei height, GLsizei depth, GLint border, GLenum format, GLenum type,
                                          const void *pixels)
@@ -461,7 +458,6 @@ GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint inter
     restore_framebuffer(&fb);
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset,
                                             GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLenum type,
                                             const void *pixels)
@@ -476,7 +472,6 @@ GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xo
     restore_framebuffer(&fb);
 }
 
-__attribute__((visibility("default")))
 GL_APICALL void GL_APIENTRY glShaderSource(GLuint shader, GLsizei count, const GLchar *const *string,
                                            const GLint *length)
 {
@@ -499,4 +494,28 @@ GL_APICALL void GL_APIENTRY glShaderSource(GLuint shader, GLsizei count, const G
     p_glShaderSource(shader, 1, &src, NULL);
     free(fixed);
     free(joined);
+}
+
+/* ---- entry points for glvnd ---- */
+
+#define OWN(name) {#name, (void *)name}
+static const struct {
+    const char *name;
+    void *fn;
+} k_own[] = {
+    OWN(glShaderSource), OWN(glGetString),  OWN(glGetStringi),    OWN(glGetIntegerv),
+    OWN(glTexImage2D),   OWN(glTexSubImage2D), OWN(glTexImage3D), OWN(glTexSubImage3D),
+};
+
+/* Our function for a core GLES 3.2 entry point, NULL for anything else
+ * (extensions are resolved through EGL). */
+void *cham_gl_get_proc(const char *name)
+{
+    for (size_t i = 0; i < sizeof k_own / sizeof k_own[0]; i++)
+        if (strcmp(name, k_own[i].name) == 0)
+            return k_own[i].fn;
+    for (const struct cham_gl_entry *e = cham_gl_entries; e->name; e++)
+        if (strcmp(name, e->name) == 0)
+            return *e->fn ? e->wrapper : NULL;
+    return NULL;
 }

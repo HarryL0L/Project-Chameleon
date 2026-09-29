@@ -45,7 +45,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Install libdrm
-        run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev
+      - name: Install libdrm, libwayland, glvnd
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev
       - name: Fake KMS device against the real libdrm
         run: shim/test/run-host-test.sh

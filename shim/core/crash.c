@@ -1,6 +1,6 @@
 /*
  * Crash reporter for kwin_wayland under the shim. On SIGSEGV/SIGBUS it writes
- * the fault, the last GL entry point libGLESv2.so.2 forwarded, the last
+ * the fault, the last GL entry point the EGL vendor forwarded, the last
  * texture upload and a symbolized backtrace to stderr (kwin.log), then hands
  * the signal on to whoever had it before (debuggerd's tombstone, KCrash).
  *
@@ -24,17 +24,12 @@
 
 #include "internal.h"
 
-CHAM_EXPORT const char *volatile cham_last_gl;
-CHAM_EXPORT const char *volatile cham_call_ring[CHAM_CALL_RING];
-CHAM_EXPORT volatile unsigned cham_call_pos;
-static char g_note[256];
+/* Set by the glvnd vendor library once glvnd loads it. */
+static const struct cham_crash_breadcrumbs *volatile g_crumbs;
 
-CHAM_EXPORT void cham_crash_note(const char *fmt, ...)
+CHAM_EXPORT void cham_crash_attach(const struct cham_crash_breadcrumbs *crumbs)
 {
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(g_note, sizeof g_note, fmt, ap);
-    va_end(ap);
+    g_crumbs = crumbs;
 }
 
 static int (*real_sigaction)(int, const struct sigaction *, struct sigaction *);
@@ -178,29 +173,34 @@ static void report(int sig, siginfo_t *si, void *ucv)
     out_dec(" pid ", getpid());
     out_dec(" tid ", (long)syscall(SYS_gettid));
     out(syscall(SYS_gettid) == getpid() ? " (main thread)\n" : " (not the main thread)\n");
-    const char *gl = cham_last_gl;
-    out("chameleon: last GL call forwarded: ");
-    out(gl ? gl : "(none)");
-    out("\nchameleon: last texture upload: ");
-    out(g_note[0] ? g_note : "(none)");
-    out("\n");
+    const struct cham_crash_breadcrumbs *c = g_crumbs;
+    if (c) {
+        const char *gl = *c->last_call;
+        out("chameleon: last GL call forwarded: ");
+        out(gl ? gl : "(none)");
+        out("\nchameleon: last texture upload: ");
+        out(c->note[0] ? c->note : "(none)");
+        out("\n");
 
-    /* Oldest first, runs of the same call folded into "name xN". */
-    unsigned end = cham_call_pos, start = end > CHAM_CALL_RING ? end - CHAM_CALL_RING : 0;
-    out_dec("chameleon: last GL/EGL calls (of ", (long)end);
-    out("):");
-    for (unsigned i = start; i < end;) {
-        const char *name = cham_call_ring[i % CHAM_CALL_RING];
-        unsigned run = 1;
-        while (i + run < end && cham_call_ring[(i + run) % CHAM_CALL_RING] == name)
-            run++;
-        out(" ");
-        out(name ? name : "?");
-        if (run > 1)
-            out_dec(" x", (long)run);
-        i += run;
+        /* Oldest first, runs of the same call folded into "name xN". */
+        unsigned end = *c->pos, start = end > CHAM_CALL_RING ? end - CHAM_CALL_RING : 0;
+        out_dec("chameleon: last GL/EGL calls (of ", (long)end);
+        out("):");
+        for (unsigned i = start; i < end;) {
+            const char *name = c->ring[i % CHAM_CALL_RING];
+            unsigned run = 1;
+            while (i + run < end && c->ring[(i + run) % CHAM_CALL_RING] == name)
+                run++;
+            out(" ");
+            out(name ? name : "?");
+            if (run > 1)
+                out_dec(" x", (long)run);
+            i += run;
+        }
+        out("\n");
+    } else {
+        out("chameleon: no GL/EGL breadcrumbs (the Chameleon EGL vendor was not loaded)\n");
     }
-    out("\n");
 
 #if defined(__aarch64__)
     ucontext_t *uc = ucv;

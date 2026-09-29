@@ -10,16 +10,27 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
     -Ishim/include -Ishim/include/libdrm"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" shim/core/*.c -ldl -Wl,-soname,libchameleon.so
 "$CC" $CFLAGS -shared -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon -Wl,-soname,libgbm.so
-"$CC" $CFLAGS -shared -o "$OUT/libEGL.so.1" shim/egl/egl.c -L"$OUT" -lchameleon -ldl -Wl,-soname,libEGL.so.1
-"$CC" $CFLAGS -shared -o "$OUT/libGLESv2.so.2" shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c \
-    -L"$OUT" -lchameleon -ldl -Wl,-soname,libGLESv2.so.2
-cp shim/chameleon-kwin "$OUT/"
+# glvnd EGL vendor (EGL + GLES on Android's driver); not linked to
+# libchameleon.so, since it is loaded into every program glvnd routes to it.
+"$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/egl/egl.c \
+    shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
+    -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
+cp shim/chameleon-kwin shim/chameleon-vendor-install "$OUT/"
 
-# Each replacement must export exactly what the Termux library it shadows
-# does (lists taken from Termux's glvnd 1.7 / Mesa 26.2 packages): a missing
-# symbol breaks KWin or epoxy at load time or, worse, silently skips a fix.
+# The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
+# missing symbol breaks KWin at load time. The vendor exports only its entry.
 NM="$(dirname "$CC")/llvm-nm"
-for lib in libGLESv2.so.2 libEGL.so.1 libgbm.so; do
+"$NM" -D --defined-only "$OUT/libEGL_chameleon.so" | awk '{print $3}' | grep -v '^__\(bss\|end\|edata\)' > "$OUT/.exports"
+if [ "$(cat "$OUT/.exports")" != "__egl_Main" ]; then
+    echo "build-android.sh: libEGL_chameleon.so must export only __egl_Main, not:" >&2
+    cat "$OUT/.exports" >&2
+    exit 1
+fi
+if "$NM" -D --undefined-only "$OUT/libEGL_chameleon.so" | grep -q 'cham_'; then
+    echo "build-android.sh: libEGL_chameleon.so must not depend on libchameleon.so" >&2
+    exit 1
+fi
+for lib in libgbm.so; do
     "$NM" -D --defined-only "$OUT/$lib" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"
     if ! diff -u "shim/exports/$lib.txt" "$OUT/.exports"; then
         echo "build-android.sh: $lib exports differ from shim/exports/$lib.txt" >&2

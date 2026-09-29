@@ -1,6 +1,6 @@
 /*
  * Internal interface of libchameleon.so, shared by the fake libgbm.so and
- * libEGL.so.1 that sit next to it. Not a public ABI.
+ * EGL vendor (which finds it at run time). Not a public ABI.
  */
 #ifndef CHAM_SHIM_H
 #define CHAM_SHIM_H
@@ -53,9 +53,17 @@ CHAM_EXPORT int cham_format_supported(uint32_t format);
 CHAM_EXPORT void *cham_bo_lock(struct cham_bo *bo);
 CHAM_EXPORT void cham_bo_unlock(struct cham_bo *bo);
 
-/* Crash-report breadcrumbs (crash.c): the last GL/EGL entry points called,
- * recorded by the forwarders in libGLESv2.so.2 and libEGL.so.1. */
+/* Crash-report breadcrumbs: the last GL/EGL entry points called, recorded
+ * by the glvnd vendor library (libEGL_chameleon.so, vendor/bridge.c) and
+ * handed to libchameleon's crash reporter with cham_crash_attach(). */
 #define CHAM_CALL_RING 64
+struct cham_crash_breadcrumbs {
+    const char *volatile *last_call;
+    const char *volatile *ring; /* CHAM_CALL_RING entries */
+    volatile unsigned *pos;
+    const char *note;           /* last texture upload */
+};
+CHAM_EXPORT void cham_crash_attach(const struct cham_crash_breadcrumbs *crumbs);
 CHAM_EXPORT extern const char *volatile cham_last_gl;
 CHAM_EXPORT extern const char *volatile cham_call_ring[CHAM_CALL_RING];
 CHAM_EXPORT extern volatile unsigned cham_call_pos;

@@ -7,8 +7,7 @@ app's screen, rendering with Android's GPU driver.
 |---|---|---|
 | `libchameleon.so` (LD_PRELOAD) | the kernel | fake KMS device at `$PREFIX/tmp/chameleon-card0`: one DSI connector sized to the app, one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event |
 | `libgbm.so` (LD_LIBRARY_PATH) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
-| `libEGL.so.1` (LD_LIBRARY_PATH) | glvnd's libEGL | forwards to `/system/lib64/libEGL.so` (→ vendor driver), adds the GBM platform and dmabuf import (as `AHardwareBuffer`) |
-| `libGLESv2.so.2` (LD_LIBRARY_PATH) | glvnd's libGLESv2 | forwards all 358 GLES 3.2 entry points to Android's `libGLESv2.so`; `glShaderSource` first rewrites bare `GL_*` names in `#if` to `defined(GL_*)` (Mesa tolerates them, the spec and Mali don't) |
+| `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform and dmabuf import (as `AHardwareBuffer`) inside KWin, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden BGRA8888 / timer-query extensions, no robust/priority contexts |
 
 ## Run
 
@@ -18,9 +17,22 @@ app's screen, rendering with Android's GPU driver.
    first), then:
 
 ```sh
-chmod +x kwin-shim/chameleon-kwin
+chmod +x kwin-shim/chameleon-kwin kwin-shim/chameleon-vendor-install
 kwin-shim/chameleon-kwin            # or: kwin-shim/chameleon-kwin konsole
 ```
+
+KWin loads the EGL vendor through Termux's own glvnd (`libEGL.so.1`,
+`libGLESv2.so.2`): the launcher points `__EGL_VENDOR_LIBRARY_FILENAMES` at it
+for KWin only.
+
+### The EGL vendor for other programs
+
+`kwin-shim/chameleon-vendor-install` registers `libEGL_chameleon.so` with
+glvnd for every Termux program (`--remove` undoes it). Today it takes
+off-screen displays (`EGL_PLATFORM_SURFACELESS_MESA`, `EGL_PLATFORM_ANDROID_KHR`,
+and the default display with `CHAMELEON_EGL_DEFAULT=1`); Wayland and X11
+windows still go to Mesa until the vendor gets a Wayland platform. Check it
+with the probe: `CHAMELEON_PROBE_GLVND=1 CHAMELEON_EGL_DEFAULT=1 ./ahb_probe`.
 
 Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 `CHAMELEON_MODE=1080x2400@120` (mode if the app isn't open), `CHAMELEON_DPI`
@@ -28,7 +40,8 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 
 ## Status / limits
 
-- Output only: no input yet (next: touch/keys → KWin's fake-input protocol).
+- Input: touch (direct or trackpad), mouse and keyboard from the app, injected
+  through KWin's fake-input protocol (`core/input.c`).
 - The mode is fixed when KWin starts; later app window size changes are
   scaled by the app.
 - Apps inside KWin render in software (`wl_shm`); client dmabufs are refused
@@ -39,8 +52,14 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 
 ## Test on a desktop
 
-`shim/test/run-host-test.sh` (needs `libdrm-dev`) builds the core with memfd
-stand-ins for `AHardwareBuffer` and drives the fake device with the real
-libdrm the way KWin does: enumeration, properties, gbm → prime → framebuffer,
-modesets, 60 page flips through a stub presenter, simulated vblank without
-one. CI runs it on every push.
+`shim/test/run-host-test.sh` (needs `libdrm-dev libwayland-dev libegl-dev
+libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
+
+- the fake device driven by the real libdrm the way KWin does: enumeration,
+  properties, gbm → prime → framebuffer, modesets, 60 page flips through a
+  stub presenter, simulated vblank without one;
+- the input path against a real libwayland-server fake-input global;
+- the EGL vendor through the system's real glvnd, with a stand-in for
+  Android's driver, both as any program and as KWin.
+
+CI runs it on every push.

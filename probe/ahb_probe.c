@@ -220,15 +220,19 @@ static const char *libdir(void)
     return sizeof(void *) == 8 ? "/system/lib64" : "/system/lib";
 }
 
-/* CHAMELEON_PROBE_LIBDIR=<kwin-shim dir> runs everything through the shim's
- * libEGL.so.1 / libGLESv2.so.2 (as KWin does; also LD_PRELOAD libchameleon.so
- * and put the dir in LD_LIBRARY_PATH). */
+/* CHAMELEON_PROBE_GLVND=1 runs everything through Termux's glvnd
+ * (libEGL.so.1 / libGLESv2.so.2) instead of Android's libraries, i.e.
+ * through whichever vendor glvnd picks - the Chameleon vendor with
+ *   __EGL_VENDOR_LIBRARY_FILENAMES=<kwin-shim>/chameleon-egl-vendor.json
+ *   CHAMELEON_EGL_DEFAULT=1   (the probe uses the default display) */
 static void *open_lib(const char *name)
 {
     char path[256], msg[512];
-    const char *shim = getenv("CHAMELEON_PROBE_LIBDIR");
-    if (shim && *shim && strcmp(name, "libnativewindow.so") != 0)
-        snprintf(path, sizeof path, "%s/%s", shim, strcmp(name, "libEGL.so") == 0 ? "libEGL.so.1" : "libGLESv2.so.2");
+    const char *glvnd = getenv("CHAMELEON_PROBE_GLVND");
+    const char *prefix = getenv("PREFIX");
+    if (glvnd && *glvnd == '1' && strcmp(name, "libnativewindow.so") != 0)
+        snprintf(path, sizeof path, "%s/lib/%s", prefix && *prefix ? prefix : "/data/data/com.termux/files/usr",
+                 strcmp(name, "libEGL.so") == 0 ? "libEGL.so.1" : "libGLESv2.so.2");
     else
         snprintf(path, sizeof path, "%s/%s", libdir(), name);
     void *h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
@@ -675,7 +679,7 @@ static void test_uploads(void)
         {UPLOAD_MALLOC, CTX_KWIN, "upload, KWin's context (v2 + robust + high priority)"},
         {UPLOAD_MID_FRAME, CTX_PLAIN3, "30 uploads while an AHB framebuffer is bound"},
         {UPLOAD_MID_FRAME, CTX_KWIN, "same, KWin's context"},
-        {UPLOAD_MALLOC, CTX_V2, "upload, v2 context sharing a global context (KWin via the shim)", 1},
+        {UPLOAD_MALLOC, CTX_V2, "upload, v2 context sharing a global context (as KWin does)", 1},
         {UPLOAD_MID_FRAME, CTX_V2, "30 mid-frame uploads, same shared contexts", 1},
         {UPLOAD_MID_FRAME, CTX_KWIN, "same, KWin's full attributes", 1},
     };

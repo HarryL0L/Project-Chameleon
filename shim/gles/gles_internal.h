@@ -5,7 +5,8 @@
 
 struct cham_gl_entry {
     const char *name;
-    void **fn;
+    void **fn;     /* where the forwarder keeps Android's function */
+    void *wrapper; /* the forwarder */
 };
 extern const struct cham_gl_entry cham_gl_entries[];
 

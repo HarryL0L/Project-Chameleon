@@ -1,0 +1,7 @@
+/* libEGL_chameleon.so exports only the glvnd entry point; everything else
+ * (including the EGL and GL names the Android headers mark as exported) stays
+ * local, so it can't interpose on glvnd's libEGL.so.1 / libGLESv2.so.2. */
+{
+    global: __egl_Main;
+    local: *;
+};
