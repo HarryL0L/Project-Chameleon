@@ -582,7 +582,7 @@ static void test_cpu_readback(EGLDisplay dpy, uint32_t w, uint32_t h)
  * (SIGBUS, NULL+0x29) on its first upload; the data pointer was a tagged
  * heap pointer (0xb4...). These isolate whether tagging is the trigger. */
 
-enum upload_mode { UPLOAD_MALLOC, UPLOAD_MMAP, UPLOAD_UNTAGGED };
+enum upload_mode { UPLOAD_MALLOC, UPLOAD_MMAP, UPLOAD_UNTAGGED, UPLOAD_MID_FRAME };
 
 
 
@@ -596,7 +596,8 @@ static int upload_child(enum upload_mode mode)
     if (!load_libs())
         return 10;
     EGLContext ctx;
-    if (!init_egl(&ctx))
+    EGLDisplay dpy = init_egl(&ctx);
+    if (!dpy)
         return 11;
     const int w = 273, h = 273;
     size_t size = (size_t)w * h * 4;
@@ -609,12 +610,33 @@ static int upload_child(enum upload_mode mode)
             data = (uint8_t *)((uintptr_t)data & ((1ull << 56) - 1));
     }
     memset(data, 0x80, size);
-    GLuint tex;
-    gl.GenTextures(1, &tex);
-    gl.BindTexture(GL_TEXTURE_2D_, tex);
-    gl.PixelStorei(GL_UNPACK_ROW_LENGTH, w); /* as KWin does */
-    gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
-    gl.TexSubImage2D(GL_TEXTURE_2D_, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, data);
+    int rounds = 1;
+    if (mode == UPLOAD_MID_FRAME) {
+        /* Like KWin: render into an AHB-backed framebuffer and upload
+         * textures while it is still bound, several frames in a row. */
+        AHardwareBuffer *fb = alloc_ahb(1080, 1800,
+                                        AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE |
+                                            AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
+                                            AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY,
+                                        "frame");
+        EGLImageKHR img;
+        GLuint fbtex;
+        if (!fb || !wrap_ahb(dpy, fb, &img, &fbtex))
+            return 13;
+        rounds = 30;
+    }
+    for (int i = 0; i < rounds; i++) {
+        if (mode == UPLOAD_MID_FRAME)
+            render_color(1080, 1800);
+        GLuint tex;
+        gl.GenTextures(1, &tex);
+        gl.BindTexture(GL_TEXTURE_2D_, tex);
+        gl.PixelStorei(GL_UNPACK_ROW_LENGTH, w); /* as KWin does */
+        gl.TexImage2D(GL_TEXTURE_2D_, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        gl.TexSubImage2D(GL_TEXTURE_2D_, 0, 0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, data);
+        gl.PixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+        gl.Flush();
+    }
     gl.Finish();
     return gl.GetError() == GL_NO_ERROR ? 0 : 12;
 }
@@ -632,6 +654,8 @@ static void test_uploads(void)
         {UPLOAD_MALLOC, CTX_V2_ROBUST, "upload, v2 + robust access context"},
         {UPLOAD_MALLOC, CTX_V2_PRIORITY, "upload, v2 + high priority context"},
         {UPLOAD_MALLOC, CTX_KWIN, "upload, KWin's context (v2 + robust + high priority)"},
+        {UPLOAD_MID_FRAME, CTX_PLAIN3, "30 uploads while an AHB framebuffer is bound"},
+        {UPLOAD_MID_FRAME, CTX_KWIN, "same, KWin's context"},
     };
     for (size_t i = 0; i < sizeof variants / sizeof variants[0]; i++) {
         fflush(stdout);
@@ -649,6 +673,7 @@ static void test_uploads(void)
             snprintf(msg, sizeof msg, "%s", WEXITSTATUS(status) == 0    ? "ok"
                                             : WEXITSTATUS(status) == 10 ? "could not load the GL libraries"
                                             : WEXITSTATUS(status) == 11 ? "could not create a GL context"
+                                            : WEXITSTATUS(status) == 13 ? "could not set up the AHB framebuffer"
                                                                         : "GL error");
         result(WIFEXITED(status) && WEXITSTATUS(status) == 0, 0, variants[i].what, msg);
     }

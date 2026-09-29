@@ -16,8 +16,12 @@
  *    data was a *tagged* heap pointer (0xb4...: Android sets the top byte,
  *    which the CPU ignores but a kernel driver importing the memory may
  *    not). Tagged source data is first copied to an untagged (mmap'd)
- *    bounce buffer. CHAMELEON_GL_BOUNCE=0 disables that;
- *    CHAMELEON_GL_TRACE=1 logs every upload.
+ *    bounce buffer. CHAMELEON_GL_BOUNCE=0 disables that.
+ *    The crash kept happening intermittently even so. KWin uploads in the
+ *    middle of a frame, with its AHB-backed output framebuffer bound (the
+ *    probe's clean uploads never do), so uploads run with the framebuffer
+ *    unbound and it is restored right after. CHAMELEON_GL_UPLOAD_UNBIND=0
+ *    disables that; CHAMELEON_GL_TRACE=1 logs every upload.
  */
 #define _GNU_SOURCE
 #include <GLES3/gl32.h>
@@ -42,8 +46,10 @@ static void (GL_APIENTRY *p_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei
                                           const void *);
 static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum,
                                              GLenum, const void *);
+static void (GL_APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
 static int g_trace;
 static int g_bounce = 1;
+static int g_unbind = 1;
 
 __attribute__((constructor)) static void load(void)
 {
@@ -67,6 +73,9 @@ __attribute__((constructor)) static void load(void)
     g_trace = trace && *trace == '1';
     const char *bounce = getenv("CHAMELEON_GL_BOUNCE");
     g_bounce = !(bounce && *bounce == '0');
+    *(void **)&p_glBindFramebuffer = dlsym(lib, "glBindFramebuffer");
+    const char *unbind = getenv("CHAMELEON_GL_UPLOAD_UNBIND");
+    g_unbind = !(unbind && *unbind == '0');
 }
 
 /* ---- hidden extensions ---- */
@@ -284,13 +293,40 @@ static const void *untagged(const void *data, GLsizei width, GLsizei height, GLs
     return buf;
 }
 
-static void trace_upload(const char *fn, GLenum internal, GLsizei w, GLsizei h, GLenum format, GLenum type,
-                         const void *data, const void *used)
+struct fb_binding {
+    GLint draw, read;
+    int unbound;
+};
+
+static void unbind_framebuffer(struct fb_binding *b)
 {
-    GLint row_length = 0;
+    b->draw = b->read = 0;
+    b->unbound = 0;
+    p_glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &b->draw);
+    p_glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &b->read);
+    if (g_unbind && p_glBindFramebuffer && (b->draw || b->read)) {
+        p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        b->unbound = 1;
+    }
+}
+
+static void restore_framebuffer(const struct fb_binding *b)
+{
+    if (!b->unbound)
+        return;
+    p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, (GLuint)b->draw);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)b->read);
+}
+
+static void trace_upload(const char *fn, GLenum internal, GLsizei w, GLsizei h, GLenum format, GLenum type,
+                         const void *data, const void *used, const struct fb_binding *fb)
+{
+    GLint row_length = 0, texture = 0;
     p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
-    cham_log("%s internal 0x%x %dx%d format 0x%x type 0x%x row_length %d data %p%s", fn, internal, w, h, format,
-             type, row_length, data, used != data ? " (bounced)" : "");
+    p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+    cham_log("%s internal 0x%x %dx%d format 0x%x type 0x%x row_length %d data %p%s texture %d framebuffer %d%s", fn,
+             internal, w, h, format, type, row_length, data, used != data ? " (bounced)" : "", texture, fb->draw,
+             fb->unbound ? " (unbound for the upload)" : "");
 }
 
 __attribute__((visibility("default")))
@@ -299,9 +335,12 @@ GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint inter
                                          const void *pixels)
 {
     const void *data = untagged(pixels, width, height, 1, format, type);
+    struct fb_binding fb;
+    unbind_framebuffer(&fb);
     if (g_trace)
-        trace_upload("glTexImage2D", (GLenum)internalformat, width, height, format, type, pixels, data);
+        trace_upload("glTexImage2D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
     p_glTexImage2D(target, level, internalformat, width, height, border, format, type, data);
+    restore_framebuffer(&fb);
 }
 
 __attribute__((visibility("default")))
@@ -309,9 +348,12 @@ GL_APICALL void GL_APIENTRY glTexSubImage2D(GLenum target, GLint level, GLint xo
                                             GLsizei height, GLenum format, GLenum type, const void *pixels)
 {
     const void *data = untagged(pixels, width, height, 1, format, type);
+    struct fb_binding fb;
+    unbind_framebuffer(&fb);
     if (g_trace)
-        trace_upload("glTexSubImage2D", 0, width, height, format, type, pixels, data);
+        trace_upload("glTexSubImage2D", 0, width, height, format, type, pixels, data, &fb);
     p_glTexSubImage2D(target, level, xoffset, yoffset, width, height, format, type, data);
+    restore_framebuffer(&fb);
 }
 
 __attribute__((visibility("default")))
@@ -320,9 +362,12 @@ GL_APICALL void GL_APIENTRY glTexImage3D(GLenum target, GLint level, GLint inter
                                          const void *pixels)
 {
     const void *data = untagged(pixels, width, height, depth, format, type);
+    struct fb_binding fb;
+    unbind_framebuffer(&fb);
     if (g_trace)
-        trace_upload("glTexImage3D", (GLenum)internalformat, width, height, format, type, pixels, data);
+        trace_upload("glTexImage3D", (GLenum)internalformat, width, height, format, type, pixels, data, &fb);
     p_glTexImage3D(target, level, internalformat, width, height, depth, border, format, type, data);
+    restore_framebuffer(&fb);
 }
 
 __attribute__((visibility("default")))
@@ -331,9 +376,12 @@ GL_APICALL void GL_APIENTRY glTexSubImage3D(GLenum target, GLint level, GLint xo
                                             const void *pixels)
 {
     const void *data = untagged(pixels, width, height, depth, format, type);
+    struct fb_binding fb;
+    unbind_framebuffer(&fb);
     if (g_trace)
-        trace_upload("glTexSubImage3D", 0, width, height, format, type, pixels, data);
+        trace_upload("glTexSubImage3D", 0, width, height, format, type, pixels, data, &fb);
     p_glTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, type, data);
+    restore_framebuffer(&fb);
 }
 
 __attribute__((visibility("default")))
