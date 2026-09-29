@@ -3,7 +3,13 @@ package io.github.harryl0l.chameleon;
 import android.app.Activity;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
+import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.Gravity;
+import android.widget.FrameLayout;
+import android.widget.TextView;
 import android.view.Display;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
@@ -28,9 +34,25 @@ public class PresenterActivity extends Activity
     private static native void nativeSurfaceChanged(int width, int height, int refreshMilliHz);
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
+    private static native String nativeStatus();
 
     private static boolean sStarted;
     private int mWidth, mHeight;
+    private TextView mStatus;
+    private final Handler mHandler = new Handler(Looper.getMainLooper());
+    // Shows the connection state until frames arrive, so problems are
+    // visible without logcat.
+    private final Runnable mStatusPoll = new Runnable() {
+        @Override
+        public void run() {
+            String status = nativeStatus();
+            boolean showing = "showing frames".equals(status);
+            mStatus.setVisibility(showing ? View.GONE : View.VISIBLE);
+            if (!showing)
+                mStatus.setText("Chameleon: " + status);
+            mHandler.postDelayed(this, 500);
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -50,7 +72,15 @@ public class PresenterActivity extends Activity
 
         SurfaceView view = new SurfaceView(this);
         view.getHolder().addCallback(this);
-        setContentView(view);
+        mStatus = new TextView(this);
+        mStatus.setTextColor(Color.LTGRAY);
+        mStatus.setTextSize(12);
+        mStatus.setPadding(32, 96, 32, 32);
+        FrameLayout root = new FrameLayout(this);
+        root.addView(view);
+        root.addView(mStatus, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
+        setContentView(root);
 
         if (!sStarted) {
             // Same path as CHAM_SOCKET_PATH; we run as the Termux user.
@@ -91,10 +121,12 @@ public class PresenterActivity extends Activity
     protected void onResume() {
         super.onResume();
         getSystemService(DisplayManager.class).registerDisplayListener(this, null);
+        mHandler.post(mStatusPoll);
     }
 
     @Override
     protected void onPause() {
+        mHandler.removeCallbacks(mStatusPoll);
         getSystemService(DisplayManager.class).unregisterDisplayListener(this);
         super.onPause();
     }

@@ -382,12 +382,6 @@ GL_APICALL void GL_APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target,
     p_glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
 }
 
-static void (GL_APIENTRY *p_glGetIntegerv)(GLenum pname, GLint *data);
-GL_APICALL void GL_APIENTRY glGetIntegerv(GLenum pname, GLint *data)
-{
-    p_glGetIntegerv(pname, data);
-}
-
 static void (GL_APIENTRY *p_glGetProgramiv)(GLuint program, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint *params)
 {
@@ -428,12 +422,6 @@ static void (GL_APIENTRY *p_glGetShaderSource)(GLuint shader, GLsizei bufSize, G
 GL_APICALL void GL_APIENTRY glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source)
 {
     p_glGetShaderSource(shader, bufSize, length, source);
-}
-
-static const GLubyte * (GL_APIENTRY *p_glGetString)(GLenum name);
-GL_APICALL const GLubyte * GL_APIENTRY glGetString(GLenum name)
-{
-    return p_glGetString(name);
 }
 
 static void (GL_APIENTRY *p_glGetTexParameterfv)(GLenum target, GLenum pname, GLfloat *params);
@@ -626,12 +614,6 @@ static void (GL_APIENTRY *p_glStencilOpSeparate)(GLenum face, GLenum sfail, GLen
 GL_APICALL void GL_APIENTRY glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass)
 {
     p_glStencilOpSeparate(face, sfail, dpfail, dppass);
-}
-
-static void (GL_APIENTRY *p_glTexImage2D)(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels);
-GL_APICALL void GL_APIENTRY glTexImage2D(GLenum target, GLint level, GLint internalformat, GLsizei width, GLsizei height, GLint border, GLenum format, GLenum type, const void *pixels)
-{
-    p_glTexImage2D(target, level, internalformat, width, height, border, format, type, pixels);
 }
 
 static void (GL_APIENTRY *p_glTexParameterf)(GLenum target, GLenum pname, GLfloat param);
@@ -1208,12 +1190,6 @@ static void (GL_APIENTRY *p_glClearBufferfi)(GLenum buffer, GLint drawbuffer, GL
 GL_APICALL void GL_APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil)
 {
     p_glClearBufferfi(buffer, drawbuffer, depth, stencil);
-}
-
-static const GLubyte * (GL_APIENTRY *p_glGetStringi)(GLenum name, GLuint index);
-GL_APICALL const GLubyte * GL_APIENTRY glGetStringi(GLenum name, GLuint index)
-{
-    return p_glGetStringi(name, index);
 }
 
 static void (GL_APIENTRY *p_glCopyBufferSubData)(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
@@ -2212,7 +2188,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glGetError", (void **)&p_glGetError},
     {"glGetFloatv", (void **)&p_glGetFloatv},
     {"glGetFramebufferAttachmentParameteriv", (void **)&p_glGetFramebufferAttachmentParameteriv},
-    {"glGetIntegerv", (void **)&p_glGetIntegerv},
     {"glGetProgramiv", (void **)&p_glGetProgramiv},
     {"glGetProgramInfoLog", (void **)&p_glGetProgramInfoLog},
     {"glGetRenderbufferParameteriv", (void **)&p_glGetRenderbufferParameteriv},
@@ -2220,7 +2195,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glGetShaderInfoLog", (void **)&p_glGetShaderInfoLog},
     {"glGetShaderPrecisionFormat", (void **)&p_glGetShaderPrecisionFormat},
     {"glGetShaderSource", (void **)&p_glGetShaderSource},
-    {"glGetString", (void **)&p_glGetString},
     {"glGetTexParameterfv", (void **)&p_glGetTexParameterfv},
     {"glGetTexParameteriv", (void **)&p_glGetTexParameteriv},
     {"glGetUniformfv", (void **)&p_glGetUniformfv},
@@ -2253,7 +2227,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glStencilMaskSeparate", (void **)&p_glStencilMaskSeparate},
     {"glStencilOp", (void **)&p_glStencilOp},
     {"glStencilOpSeparate", (void **)&p_glStencilOpSeparate},
-    {"glTexImage2D", (void **)&p_glTexImage2D},
     {"glTexParameterf", (void **)&p_glTexParameterf},
     {"glTexParameterfv", (void **)&p_glTexParameterfv},
     {"glTexParameteri", (void **)&p_glTexParameteri},
@@ -2350,7 +2323,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glClearBufferuiv", (void **)&p_glClearBufferuiv},
     {"glClearBufferfv", (void **)&p_glClearBufferfv},
     {"glClearBufferfi", (void **)&p_glClearBufferfi},
-    {"glGetStringi", (void **)&p_glGetStringi},
     {"glCopyBufferSubData", (void **)&p_glCopyBufferSubData},
     {"glGetUniformIndices", (void **)&p_glGetUniformIndices},
     {"glGetActiveUniformsiv", (void **)&p_glGetActiveUniformsiv},

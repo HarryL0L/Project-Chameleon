@@ -584,35 +584,71 @@ done:
     return replaced;
 }
 
-void *server_main(void *arg)
-{
-    std::string path = *static_cast<std::string *>(arg);
-    delete static_cast<std::string *>(arg);
+// Human-readable state for the on-screen status line (nativeStatus()).
+std::mutex g_status_lock;
+std::string g_status = "starting";
 
+void set_status(const std::string &status)
+{
+    std::lock_guard<std::mutex> lock(g_status_lock);
+    g_status = status;
+}
+
+int open_listener(const std::string &path, ino_t *ino)
+{
     int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, path.c_str(), sizeof addr.sun_path - 1);
     unlink(path.c_str());
     if (listener < 0 || bind(listener, (sockaddr *)&addr, sizeof addr) != 0 || listen(listener, 4) != 0) {
-        LOGE("cannot listen on %s: %s (is this app installed with Termux's shared user?)",
-             path.c_str(), strerror(errno));
-        return nullptr;
+        std::string err = strerror(errno);
+        LOGE("cannot listen on %s: %s (is this app installed with Termux's shared user?)", path.c_str(), err.c_str());
+        set_status("cannot listen on " + path + ": " + err);
+        if (listener >= 0)
+            close(listener);
+        return -1;
     }
     chmod(path.c_str(), 0600);
+    struct stat st{};
+    stat(path.c_str(), &st);
+    *ino = st.st_ino;
     LOGI("listening on %s", path.c_str());
+    set_status("waiting for Termux (listening on " + path + ")");
+    return listener;
+}
 
+void *server_main(void *arg)
+{
+    std::string path = *static_cast<std::string *>(arg);
+    delete static_cast<std::string *>(arg);
+
+    ino_t ino = 0;
+    int listener = -1;
     for (;;) {
-        int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
-        if (client < 0) {
-            if (errno != EINTR)
-                LOGE("accept failed: %s", strerror(errno));
-            continue;
+        // (Re)create the socket if it's missing or someone replaced the file:
+        // then nothing could ever connect to us again.
+        struct stat st{};
+        if (listener < 0 || stat(path.c_str(), &st) != 0 || st.st_ino != ino) {
+            if (listener >= 0) {
+                LOGE("socket %s vanished; re-creating it", path.c_str());
+                close(listener);
+            }
+            listener = open_listener(path, &ino);
+            if (listener < 0) {
+                sleep(2);
+                continue;
+            }
         }
-        while (serve(client, listener)) {
-            client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
-            if (client < 0)
-                break;
+        pollfd pfd{listener, POLLIN, 0};
+        if (poll(&pfd, 1, 2000) <= 0)
+            continue;
+        int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
+        while (client >= 0) {
+            set_status("connected to Termux");
+            bool replaced = serve(client, listener);
+            set_status("waiting for Termux (listening on " + path + ")");
+            client = replaced ? accept4(listener, nullptr, nullptr, SOCK_CLOEXEC) : -1;
         }
     }
     return nullptr;
@@ -681,6 +717,22 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
     g_displayed = -1;
     g_width = g_height = 0;
     send_config_locked();  // 0x0: producer pauses
+}
+
+JNIEXPORT jstring JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStatus(JNIEnv *env, jclass)
+{
+    std::string status;
+    {
+        std::lock_guard<std::mutex> lock(g_status_lock);
+        status = g_status;
+    }
+    {
+        std::lock_guard<std::mutex> lock(g_lock);
+        if (g_client >= 0 && (g_displayed >= 0 || g_pool_displayed >= 0))
+            status = "showing frames";
+    }
+    return env->NewStringUTF(status.c_str());
 }
 
 JNIEXPORT void JNICALL
