@@ -58,7 +58,7 @@ static uint64_t now_ns(void)
 /* ---- stub presenter ---- */
 
 static const char *g_sock_path;
-static int g_presents, g_buffers_added, g_copy_mode;
+static int g_presents, g_buffers_added, g_copy_mode, g_accepts;
 static volatile int g_stop_presenter;
 
 static void *presenter_main(void *arg)
@@ -71,12 +71,24 @@ static void *presenter_main(void *arg)
     bind(l, (struct sockaddr *)&addr, sizeof addr);
     listen(l, 1);
     int c = accept(l, NULL, NULL);
+    g_accepts++;
     struct cham_msg cfg = {CHAM_CONFIG, 0, 1080ull | (1800ull << 32), 120000};
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
     while (!g_stop_presenter) {
-        struct pollfd p = {c, POLLIN, 0};
-        if (poll(&p, 1, 50) <= 0)
+        struct pollfd p[2] = {{c, POLLIN, 0}, {l, POLLIN, 0}};
+        if (poll(p, 2, 50) <= 0)
+            continue;
+        if (p[1].revents & POLLIN) {
+            /* like the app: the newest producer wins, the old one is told */
+            struct cham_msg bye = {CHAM_BYE, 0, CHAM_BYE_REPLACED, 0};
+            cham_send(c, &bye, -1);
+            close(c);
+            c = accept(l, NULL, NULL);
+            g_accepts++;
+            continue;
+        }
+        if (!(p[0].revents & POLLIN))
             continue;
         struct cham_msg m;
         int fd;
@@ -307,6 +319,15 @@ int main(void)
     CHECK(g_presents >= 61 && g_buffers_added == 3, "presenter saw %d presents of %d buffers", g_presents,
           g_buffers_added);
     CHECK(g_copy_mode, "shim asked for copy mode");
+
+    printf("second producer takes over\n");
+    int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    strncpy(addr.sun_path, g_sock_path, sizeof addr.sun_path - 1);
+    connect(intruder, (struct sockaddr *)&addr, sizeof addr);
+    usleep(2500000);
+    CHECK(g_accepts == 2, "replaced shim does not reconnect (%d connections, want 2)", g_accepts);
+    close(intruder);
 
     printf("presenter gone -> simulated vblank\n");
     g_stop_presenter = 1;

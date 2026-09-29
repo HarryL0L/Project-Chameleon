@@ -17,6 +17,12 @@ for lib in libchameleon.so libgbm.so libEGL.so.1 libGLESv2.so.2; do
     fi
 done
 
+if command -v pgrep >/dev/null 2>&1 && pgrep -x kwin_wayland >/dev/null 2>&1; then
+    echo "chameleon-kwin: another kwin_wayland is already running (pgrep -af kwin_wayland);" >&2
+    echo "  only one can use the Chameleon app. Stop it first: pkill -x kwin_wayland" >&2
+    exit 1
+fi
+
 # KWin wants a session bus. Start one *before* the shim variables are set:
 # the shim restores LD_PRELOAD/LD_LIBRARY_PATH for child processes, so it must
 # only be loaded into kwin_wayland itself.

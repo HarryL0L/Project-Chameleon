@@ -34,6 +34,7 @@ static uint32_t g_cfg_w, g_cfg_h, g_cfg_mhz;
 static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
 static uint32_t g_first_w, g_first_h, g_first_mhz; /* ...and what it said */
 static pthread_cond_t g_cond;
+static int g_replaced;              /* another producer took the app over */
 
 static struct {
     int active;
@@ -243,6 +244,10 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame)
             emit_flip_locked(m->b ? m->b : now_ns());
         break;
+    case CHAM_BYE:
+        if (m->a == CHAM_BYE_REPLACED)
+            g_replaced = 1;
+        break;
     }
 }
 
@@ -267,7 +272,7 @@ static void *reader_main(void *arg)
         g_gen++;
         memset(g_slots, 0, sizeof g_slots);
         pthread_mutex_unlock(&g_lock);
-        cham_log("connected to the presenter");
+        cham_log("connected to the presenter (pid %d)", (int)getpid());
 
         for (;;) {
             struct cham_msg m;
@@ -292,7 +297,16 @@ static void *reader_main(void *arg)
         }
         pthread_mutex_unlock(&g_lock);
         close(s);
+        pthread_mutex_lock(&g_lock);
+        int replaced = g_replaced;
+        pthread_mutex_unlock(&g_lock);
+        if (replaced) {
+            cham_log("another producer (e.g. a second KWin) took over the Chameleon app; this KWin "
+                     "keeps running without a screen. Stop the other one and restart this one.");
+            return NULL;
+        }
         cham_log("presenter disconnected");
+        sleep(1); /* never spin, whatever went wrong */
     }
     return NULL;
 }

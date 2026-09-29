@@ -36,7 +36,12 @@ enum cham_msg_type {
     CHAM_RELEASE = 101,     /* id; fd = release fence (optional); buffer may be reused
                                once the fence signals */
     CHAM_FRAME_DONE = 102,  /* a = frame number, b = SurfaceFlinger latch time (ns) */
+    CHAM_BYE = 103,         /* a = CHAM_BYE_*; sent right before the presenter closes */
 };
+
+/* BYE reasons. A replaced producer must not reconnect by itself, or two
+ * producers would keep taking the screen from each other. */
+#define CHAM_BYE_REPLACED 1u
 
 /* HELLO flags.
  *

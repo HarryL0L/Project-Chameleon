@@ -519,7 +519,10 @@ bool serve(int client, int listener)
             break;
         }
         if (fds[1].revents & POLLIN) {
-            // Newest producer wins, like a compositor restarting.
+            // Newest producer wins, like a compositor restarting; tell the
+            // old one so it doesn't reconnect and take the screen back.
+            std::lock_guard<std::mutex> lock(g_lock);
+            send_locked(CHAM_BYE, 0, CHAM_BYE_REPLACED, 0);
             replaced = true;
             break;
         }
