@@ -14,6 +14,10 @@
  *    GL_EXT_texture_format_BGRA8888, so KWin uploads plain RGBA (hidden
  *    while that crash was being hunted, kept as the well-trodden path).
  *    Override with CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
+ *    One is added: GL_EXT_unpack_subimage on OpenGL ES 3.0+, where its
+ *    GL_UNPACK_ROW_LENGTH/SKIP_* are core (same enums). KWin demands the
+ *    name on any GLES, but most ES 3 drivers (all Adreno, PowerVR, newer
+ *    Mali) no longer list it.
  *  - glTex(Sub)Image2D/3D: two precautions from the same hunt. Source data
  *    at a *tagged* heap pointer (0xb4...: Android sets the top byte, which
  *    the CPU ignores but a driver importing the memory may not) is copied to
@@ -26,6 +30,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <string.h>
@@ -101,6 +106,27 @@ static char *g_ext_string;
 static const GLubyte **g_ext_list;
 static GLint g_ext_count = -1;
 
+static int has_extension(const char *list, const char *name)
+{
+    size_t len = strlen(name);
+    for (const char *p = list; (p = strstr(p, name)); p += len)
+        if ((p == list || p[-1] == ' ') && (p[len] == ' ' || p[len] == 0))
+            return 1;
+    return 0;
+}
+
+/* Extensions implied by the context's core version that KWin still asks
+ * for by name. */
+static const char *implied_extension(const char *all)
+{
+    const char *version = (const char *)p_glGetString(GL_VERSION);
+    int major = 0;
+    if (version && sscanf(version, "OpenGL ES %d", &major) == 1 && major >= 3 &&
+        !has_extension(all, "GL_EXT_unpack_subimage"))
+        return "GL_EXT_unpack_subimage";
+    return NULL;
+}
+
 static void build_extensions_locked(void)
 {
     if (g_ext_string)
@@ -108,8 +134,9 @@ static void build_extensions_locked(void)
     const char *all = (const char *)p_glGetString(GL_EXTENSIONS);
     if (!all)
         return; /* no context yet: try again next time */
-    g_ext_string = calloc(1, strlen(all) + 1);
-    size_t max = 1;
+    const char *added = implied_extension(all);
+    g_ext_string = calloc(1, strlen(all) + (added ? strlen(added) + 1 : 0) + 1);
+    size_t max = 2;
     for (const char *c = all; *c; c++)
         max += *c == ' ';
     g_ext_list = calloc(max, sizeof *g_ext_list);
@@ -132,6 +159,13 @@ static void build_extensions_locked(void)
             cham_log("hiding GL extension %.*s", (int)n, p);
         }
         p = e;
+    }
+    if (added) {
+        if (out != g_ext_string)
+            *out++ = ' ';
+        strcpy(out, added);
+        g_ext_count++;
+        cham_log("adding GL extension %s (core in OpenGL ES 3.0)", added);
     }
     /* glGetStringi needs NUL-terminated names: split a private copy */
     char *names = strdup(g_ext_string);

@@ -75,6 +75,8 @@ int main(void)
     CHECK(glexts && strstr(glexts, "GL_OES_a") && strstr(glexts, "GL_OES_b") &&
               !strstr(glexts, "BGRA8888") && !strstr(glexts, "disjoint_timer_query"),
           "glGetString through glvnd hides extensions: '%s'", glexts ? glexts : "(null)");
+    CHECK(glexts && strstr(glexts, "GL_EXT_unpack_subimage"),
+          "GL_EXT_unpack_subimage added on OpenGL ES 3 (KWin asks for it by name)");
     const char *src = "#if GL_FOO\nx\n#endif\n";
     glShaderSource(1, 1, &src, NULL);
     CHECK(strstr(st->shader, "defined(GL_FOO)") != NULL, "glShaderSource through glvnd gets the GLSL fix");
