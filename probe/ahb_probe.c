@@ -374,16 +374,25 @@ static void inspect_handle(AHardwareBuffer *buf)
         result(0, 0, "native handle", "no fds");
         return;
     }
-    char link[128] = "?", path[64], msg[320];
-    snprintf(path, sizeof path, "/proc/self/fd/%d", nh->data[0]);
-    ssize_t n = readlink(path, link, sizeof link - 1);
-    link[n > 0 ? n : 0] = '\0';
-    struct stat st;
-    fstat(nh->data[0], &st);
-    int dmabuf = strstr(link, "dmabuf") != NULL;
-    snprintf(msg, sizeof msg, "%d fds, %d ints; fd[0] -> \"%s\" inode %llu", nh->numFds,
-             nh->numInts, link, (unsigned long long)st.st_ino);
-    result(dmabuf, 0, "native handle fd[0] is a dmabuf", msg);
+    /* Vendor grallocs order their fds differently (MediaTek puts a
+     * gralloc_extra metadata fd first), so look at every one. */
+    int dmabuf_index = -1;
+    printf("       native handle: %d fds, %d ints\n", nh->numFds, nh->numInts);
+    for (int i = 0; i < nh->numFds; i++) {
+        char link[128] = "?", path[64];
+        snprintf(path, sizeof path, "/proc/self/fd/%d", nh->data[i]);
+        ssize_t n = readlink(path, link, sizeof link - 1);
+        link[n > 0 ? n : 0] = '\0';
+        struct stat st = {0};
+        fstat(nh->data[i], &st);
+        printf("       fd[%d] -> \"%s\" inode %llu size %lld\n", i, link,
+               (unsigned long long)st.st_ino, (long long)st.st_size);
+        if (dmabuf_index < 0 && strstr(link, "dmabuf"))
+            dmabuf_index = i;
+    }
+    char msg[64];
+    snprintf(msg, sizeof msg, "fd[%d]", dmabuf_index);
+    result(dmabuf_index >= 0, 0, "native handle contains a dmabuf", dmabuf_index >= 0 ? msg : "none found");
 }
 
 /* Wraps an AHB as a texture-backed FBO. Returns the FBO, or 0. */
