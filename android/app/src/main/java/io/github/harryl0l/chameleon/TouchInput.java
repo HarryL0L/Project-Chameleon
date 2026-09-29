@@ -38,15 +38,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     private float mScrollX, mScrollY;
     private final Handler mHandler = new Handler(Looper.getMainLooper());
     private View mView;
-    // One finger held still: press the button, as tap-then-drag does.
-    private final Runnable mLongPress = () -> {
-        if (mDragging || mMaxPointers != 1 || mTravel >= mTouchSlop)
-            return;
-        mDragging = true;
-        InputSender.button(InputSender.BTN_LEFT, true);
-        if (mView != null)
-            mView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
-    };
+    private final Runnable mLongPress = this::longPress;
 
     private int mMouseButtons;
 
@@ -60,6 +52,16 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
         mMode = mode;
         mSpeed = speed;
         mTapToClick = tapToClick;
+    }
+
+    /** One finger held still: press the button, as tap-then-drag does. */
+    private void longPress() {
+        if (mDragging || mMaxPointers != 1 || mTravel >= mTouchSlop)
+            return;
+        mDragging = true;
+        InputSender.button(InputSender.BTN_LEFT, true);
+        if (mView != null)
+            mView.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
     }
 
     private void reset() {
