@@ -10,6 +10,11 @@
  *    GL_EXT_texture_format_BGRA8888 - KWin then uploads textures as plain
  *    RGBA instead of GL_BGRA_EXT, after Mali-G77 crashed (SIGBUS, NULL+0x29)
  *    inside glTexImage2D on the BGRA path. Override with
+ *    Also GL_EXT_disjoint_timer_query: the real cause of those crashes. After
+ *    KWin's per-frame GL_TIMESTAMP query, Mali-G77 (r32p1) dies with SIGBUS
+ *    (NULL+0x29) in the first write into texture memory, whatever the upload
+ *    path; without timer queries KWin runs (the launcher also sets
+ *    KWIN_NO_TIMER_QUERY=1). Override with
  *    CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
  *  - glTex(Sub)Image2D/3D: Mali-G77 crashed (SIGBUS, NULL+0x29) in
  *    glTexImage2D on KWin's very first, perfectly ordinary RGBA upload whose
@@ -108,7 +113,7 @@ static int is_hidden(const char *name, size_t len)
 {
     const char *list = getenv("CHAMELEON_GL_HIDE");
     if (!list)
-        list = "GL_EXT_texture_format_BGRA8888";
+        list = "GL_EXT_texture_format_BGRA8888 GL_EXT_disjoint_timer_query";
     for (const char *p = list; *p;) {
         while (*p == ' ' || *p == ',')
             p++;

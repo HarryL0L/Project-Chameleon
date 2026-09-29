@@ -44,6 +44,7 @@ export KWIN_DRM_DEVICES=$CHAMELEON_DRM_PATH  # a name only; the shim answers for
 export KWIN_COMPOSE=O2ES                     # Android EGL is GLES-only
 export KWIN_DISABLE_VULKAN=1
 export KWIN_DRM_USE_MODIFIERS=0              # gralloc picks buffer layouts
+export KWIN_NO_TIMER_QUERY=${KWIN_NO_TIMER_QUERY-1}  # Mali-G77 crashes (SIGBUS) on texture writes after GL_TIMESTAMP queries
 
 export CHAMELEON_ORIG_LD_PRELOAD=${LD_PRELOAD:-}
 export CHAMELEON_ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
