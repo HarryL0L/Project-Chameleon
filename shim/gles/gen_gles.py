@@ -27,7 +27,7 @@ for ret, name, params in funcs:
     args = [] if params.strip() == "void" else [re.findall(r"\w+", p)[-1] for p in params.split(",")]
     ret_kw = "" if ret == "void" else "return "
     out.append(f"static {ret} (GL_APIENTRY *p_{name})({params});")
-    out.append(f"GL_APICALL {ret} GL_APIENTRY {name}({params})\n{{\n    {ret_kw}p_{name}({', '.join(args)});\n}}\n")
+    out.append(f"GL_APICALL {ret} GL_APIENTRY {name}({params})\n{{\n    cham_last_gl = \"{name}\";\n    {ret_kw}p_{name}({', '.join(args)});\n}}\n")
     table.append(f'    {{"{name}", (void **)&p_{name}}},')
 out += ['#pragma GCC visibility pop', '',
         'const struct cham_gl_entry cham_gl_entries[] = {'] + table + ['    {0, 0},', '};', '']

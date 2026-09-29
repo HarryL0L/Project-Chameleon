@@ -7,2100 +7,2450 @@
 static void (GL_APIENTRY *p_glActiveTexture)(GLenum texture);
 GL_APICALL void GL_APIENTRY glActiveTexture(GLenum texture)
 {
+    cham_last_gl = "glActiveTexture";
     p_glActiveTexture(texture);
 }
 
 static void (GL_APIENTRY *p_glAttachShader)(GLuint program, GLuint shader);
 GL_APICALL void GL_APIENTRY glAttachShader(GLuint program, GLuint shader)
 {
+    cham_last_gl = "glAttachShader";
     p_glAttachShader(program, shader);
 }
 
 static void (GL_APIENTRY *p_glBindAttribLocation)(GLuint program, GLuint index, const GLchar *name);
 GL_APICALL void GL_APIENTRY glBindAttribLocation(GLuint program, GLuint index, const GLchar *name)
 {
+    cham_last_gl = "glBindAttribLocation";
     p_glBindAttribLocation(program, index, name);
 }
 
 static void (GL_APIENTRY *p_glBindBuffer)(GLenum target, GLuint buffer);
 GL_APICALL void GL_APIENTRY glBindBuffer(GLenum target, GLuint buffer)
 {
+    cham_last_gl = "glBindBuffer";
     p_glBindBuffer(target, buffer);
 }
 
 static void (GL_APIENTRY *p_glBindFramebuffer)(GLenum target, GLuint framebuffer);
 GL_APICALL void GL_APIENTRY glBindFramebuffer(GLenum target, GLuint framebuffer)
 {
+    cham_last_gl = "glBindFramebuffer";
     p_glBindFramebuffer(target, framebuffer);
 }
 
 static void (GL_APIENTRY *p_glBindRenderbuffer)(GLenum target, GLuint renderbuffer);
 GL_APICALL void GL_APIENTRY glBindRenderbuffer(GLenum target, GLuint renderbuffer)
 {
+    cham_last_gl = "glBindRenderbuffer";
     p_glBindRenderbuffer(target, renderbuffer);
 }
 
 static void (GL_APIENTRY *p_glBindTexture)(GLenum target, GLuint texture);
 GL_APICALL void GL_APIENTRY glBindTexture(GLenum target, GLuint texture)
 {
+    cham_last_gl = "glBindTexture";
     p_glBindTexture(target, texture);
 }
 
 static void (GL_APIENTRY *p_glBlendColor)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 GL_APICALL void GL_APIENTRY glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
 {
+    cham_last_gl = "glBlendColor";
     p_glBlendColor(red, green, blue, alpha);
 }
 
 static void (GL_APIENTRY *p_glBlendEquation)(GLenum mode);
 GL_APICALL void GL_APIENTRY glBlendEquation(GLenum mode)
 {
+    cham_last_gl = "glBlendEquation";
     p_glBlendEquation(mode);
 }
 
 static void (GL_APIENTRY *p_glBlendEquationSeparate)(GLenum modeRGB, GLenum modeAlpha);
 GL_APICALL void GL_APIENTRY glBlendEquationSeparate(GLenum modeRGB, GLenum modeAlpha)
 {
+    cham_last_gl = "glBlendEquationSeparate";
     p_glBlendEquationSeparate(modeRGB, modeAlpha);
 }
 
 static void (GL_APIENTRY *p_glBlendFunc)(GLenum sfactor, GLenum dfactor);
 GL_APICALL void GL_APIENTRY glBlendFunc(GLenum sfactor, GLenum dfactor)
 {
+    cham_last_gl = "glBlendFunc";
     p_glBlendFunc(sfactor, dfactor);
 }
 
 static void (GL_APIENTRY *p_glBlendFuncSeparate)(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha);
 GL_APICALL void GL_APIENTRY glBlendFuncSeparate(GLenum sfactorRGB, GLenum dfactorRGB, GLenum sfactorAlpha, GLenum dfactorAlpha)
 {
+    cham_last_gl = "glBlendFuncSeparate";
     p_glBlendFuncSeparate(sfactorRGB, dfactorRGB, sfactorAlpha, dfactorAlpha);
 }
 
 static void (GL_APIENTRY *p_glBufferData)(GLenum target, GLsizeiptr size, const void *data, GLenum usage);
 GL_APICALL void GL_APIENTRY glBufferData(GLenum target, GLsizeiptr size, const void *data, GLenum usage)
 {
+    cham_last_gl = "glBufferData";
     p_glBufferData(target, size, data, usage);
 }
 
 static void (GL_APIENTRY *p_glBufferSubData)(GLenum target, GLintptr offset, GLsizeiptr size, const void *data);
 GL_APICALL void GL_APIENTRY glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, const void *data)
 {
+    cham_last_gl = "glBufferSubData";
     p_glBufferSubData(target, offset, size, data);
 }
 
 static GLenum (GL_APIENTRY *p_glCheckFramebufferStatus)(GLenum target);
 GL_APICALL GLenum GL_APIENTRY glCheckFramebufferStatus(GLenum target)
 {
+    cham_last_gl = "glCheckFramebufferStatus";
     return p_glCheckFramebufferStatus(target);
 }
 
 static void (GL_APIENTRY *p_glClear)(GLbitfield mask);
 GL_APICALL void GL_APIENTRY glClear(GLbitfield mask)
 {
+    cham_last_gl = "glClear";
     p_glClear(mask);
 }
 
 static void (GL_APIENTRY *p_glClearColor)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 GL_APICALL void GL_APIENTRY glClearColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
 {
+    cham_last_gl = "glClearColor";
     p_glClearColor(red, green, blue, alpha);
 }
 
 static void (GL_APIENTRY *p_glClearDepthf)(GLfloat d);
 GL_APICALL void GL_APIENTRY glClearDepthf(GLfloat d)
 {
+    cham_last_gl = "glClearDepthf";
     p_glClearDepthf(d);
 }
 
 static void (GL_APIENTRY *p_glClearStencil)(GLint s);
 GL_APICALL void GL_APIENTRY glClearStencil(GLint s)
 {
+    cham_last_gl = "glClearStencil";
     p_glClearStencil(s);
 }
 
 static void (GL_APIENTRY *p_glColorMask)(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha);
 GL_APICALL void GL_APIENTRY glColorMask(GLboolean red, GLboolean green, GLboolean blue, GLboolean alpha)
 {
+    cham_last_gl = "glColorMask";
     p_glColorMask(red, green, blue, alpha);
 }
 
 static void (GL_APIENTRY *p_glCompileShader)(GLuint shader);
 GL_APICALL void GL_APIENTRY glCompileShader(GLuint shader)
 {
+    cham_last_gl = "glCompileShader";
     p_glCompileShader(shader);
 }
 
 static void (GL_APIENTRY *p_glCompressedTexImage2D)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data);
 GL_APICALL void GL_APIENTRY glCompressedTexImage2D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLint border, GLsizei imageSize, const void *data)
 {
+    cham_last_gl = "glCompressedTexImage2D";
     p_glCompressedTexImage2D(target, level, internalformat, width, height, border, imageSize, data);
 }
 
 static void (GL_APIENTRY *p_glCompressedTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data);
 GL_APICALL void GL_APIENTRY glCompressedTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLsizei imageSize, const void *data)
 {
+    cham_last_gl = "glCompressedTexSubImage2D";
     p_glCompressedTexSubImage2D(target, level, xoffset, yoffset, width, height, format, imageSize, data);
 }
 
 static void (GL_APIENTRY *p_glCopyTexImage2D)(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border);
 GL_APICALL void GL_APIENTRY glCopyTexImage2D(GLenum target, GLint level, GLenum internalformat, GLint x, GLint y, GLsizei width, GLsizei height, GLint border)
 {
+    cham_last_gl = "glCopyTexImage2D";
     p_glCopyTexImage2D(target, level, internalformat, x, y, width, height, border);
 }
 
 static void (GL_APIENTRY *p_glCopyTexSubImage2D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glCopyTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glCopyTexSubImage2D";
     p_glCopyTexSubImage2D(target, level, xoffset, yoffset, x, y, width, height);
 }
 
 static GLuint (GL_APIENTRY *p_glCreateProgram)(void);
 GL_APICALL GLuint GL_APIENTRY glCreateProgram(void)
 {
+    cham_last_gl = "glCreateProgram";
     return p_glCreateProgram();
 }
 
 static GLuint (GL_APIENTRY *p_glCreateShader)(GLenum type);
 GL_APICALL GLuint GL_APIENTRY glCreateShader(GLenum type)
 {
+    cham_last_gl = "glCreateShader";
     return p_glCreateShader(type);
 }
 
 static void (GL_APIENTRY *p_glCullFace)(GLenum mode);
 GL_APICALL void GL_APIENTRY glCullFace(GLenum mode)
 {
+    cham_last_gl = "glCullFace";
     p_glCullFace(mode);
 }
 
 static void (GL_APIENTRY *p_glDeleteBuffers)(GLsizei n, const GLuint *buffers);
 GL_APICALL void GL_APIENTRY glDeleteBuffers(GLsizei n, const GLuint *buffers)
 {
+    cham_last_gl = "glDeleteBuffers";
     p_glDeleteBuffers(n, buffers);
 }
 
 static void (GL_APIENTRY *p_glDeleteFramebuffers)(GLsizei n, const GLuint *framebuffers);
 GL_APICALL void GL_APIENTRY glDeleteFramebuffers(GLsizei n, const GLuint *framebuffers)
 {
+    cham_last_gl = "glDeleteFramebuffers";
     p_glDeleteFramebuffers(n, framebuffers);
 }
 
 static void (GL_APIENTRY *p_glDeleteProgram)(GLuint program);
 GL_APICALL void GL_APIENTRY glDeleteProgram(GLuint program)
 {
+    cham_last_gl = "glDeleteProgram";
     p_glDeleteProgram(program);
 }
 
 static void (GL_APIENTRY *p_glDeleteRenderbuffers)(GLsizei n, const GLuint *renderbuffers);
 GL_APICALL void GL_APIENTRY glDeleteRenderbuffers(GLsizei n, const GLuint *renderbuffers)
 {
+    cham_last_gl = "glDeleteRenderbuffers";
     p_glDeleteRenderbuffers(n, renderbuffers);
 }
 
 static void (GL_APIENTRY *p_glDeleteShader)(GLuint shader);
 GL_APICALL void GL_APIENTRY glDeleteShader(GLuint shader)
 {
+    cham_last_gl = "glDeleteShader";
     p_glDeleteShader(shader);
 }
 
 static void (GL_APIENTRY *p_glDeleteTextures)(GLsizei n, const GLuint *textures);
 GL_APICALL void GL_APIENTRY glDeleteTextures(GLsizei n, const GLuint *textures)
 {
+    cham_last_gl = "glDeleteTextures";
     p_glDeleteTextures(n, textures);
 }
 
 static void (GL_APIENTRY *p_glDepthFunc)(GLenum func);
 GL_APICALL void GL_APIENTRY glDepthFunc(GLenum func)
 {
+    cham_last_gl = "glDepthFunc";
     p_glDepthFunc(func);
 }
 
 static void (GL_APIENTRY *p_glDepthMask)(GLboolean flag);
 GL_APICALL void GL_APIENTRY glDepthMask(GLboolean flag)
 {
+    cham_last_gl = "glDepthMask";
     p_glDepthMask(flag);
 }
 
 static void (GL_APIENTRY *p_glDepthRangef)(GLfloat n, GLfloat f);
 GL_APICALL void GL_APIENTRY glDepthRangef(GLfloat n, GLfloat f)
 {
+    cham_last_gl = "glDepthRangef";
     p_glDepthRangef(n, f);
 }
 
 static void (GL_APIENTRY *p_glDetachShader)(GLuint program, GLuint shader);
 GL_APICALL void GL_APIENTRY glDetachShader(GLuint program, GLuint shader)
 {
+    cham_last_gl = "glDetachShader";
     p_glDetachShader(program, shader);
 }
 
 static void (GL_APIENTRY *p_glDisable)(GLenum cap);
 GL_APICALL void GL_APIENTRY glDisable(GLenum cap)
 {
+    cham_last_gl = "glDisable";
     p_glDisable(cap);
 }
 
 static void (GL_APIENTRY *p_glDisableVertexAttribArray)(GLuint index);
 GL_APICALL void GL_APIENTRY glDisableVertexAttribArray(GLuint index)
 {
+    cham_last_gl = "glDisableVertexAttribArray";
     p_glDisableVertexAttribArray(index);
 }
 
 static void (GL_APIENTRY *p_glDrawArrays)(GLenum mode, GLint first, GLsizei count);
 GL_APICALL void GL_APIENTRY glDrawArrays(GLenum mode, GLint first, GLsizei count)
 {
+    cham_last_gl = "glDrawArrays";
     p_glDrawArrays(mode, first, count);
 }
 
 static void (GL_APIENTRY *p_glDrawElements)(GLenum mode, GLsizei count, GLenum type, const void *indices);
 GL_APICALL void GL_APIENTRY glDrawElements(GLenum mode, GLsizei count, GLenum type, const void *indices)
 {
+    cham_last_gl = "glDrawElements";
     p_glDrawElements(mode, count, type, indices);
 }
 
 static void (GL_APIENTRY *p_glEnable)(GLenum cap);
 GL_APICALL void GL_APIENTRY glEnable(GLenum cap)
 {
+    cham_last_gl = "glEnable";
     p_glEnable(cap);
 }
 
 static void (GL_APIENTRY *p_glEnableVertexAttribArray)(GLuint index);
 GL_APICALL void GL_APIENTRY glEnableVertexAttribArray(GLuint index)
 {
+    cham_last_gl = "glEnableVertexAttribArray";
     p_glEnableVertexAttribArray(index);
 }
 
 static void (GL_APIENTRY *p_glFinish)(void);
 GL_APICALL void GL_APIENTRY glFinish(void)
 {
+    cham_last_gl = "glFinish";
     p_glFinish();
 }
 
 static void (GL_APIENTRY *p_glFlush)(void);
 GL_APICALL void GL_APIENTRY glFlush(void)
 {
+    cham_last_gl = "glFlush";
     p_glFlush();
 }
 
 static void (GL_APIENTRY *p_glFramebufferRenderbuffer)(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 GL_APICALL void GL_APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer)
 {
+    cham_last_gl = "glFramebufferRenderbuffer";
     p_glFramebufferRenderbuffer(target, attachment, renderbuffertarget, renderbuffer);
 }
 
 static void (GL_APIENTRY *p_glFramebufferTexture2D)(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level);
 GL_APICALL void GL_APIENTRY glFramebufferTexture2D(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level)
 {
+    cham_last_gl = "glFramebufferTexture2D";
     p_glFramebufferTexture2D(target, attachment, textarget, texture, level);
 }
 
 static void (GL_APIENTRY *p_glFrontFace)(GLenum mode);
 GL_APICALL void GL_APIENTRY glFrontFace(GLenum mode)
 {
+    cham_last_gl = "glFrontFace";
     p_glFrontFace(mode);
 }
 
 static void (GL_APIENTRY *p_glGenBuffers)(GLsizei n, GLuint *buffers);
 GL_APICALL void GL_APIENTRY glGenBuffers(GLsizei n, GLuint *buffers)
 {
+    cham_last_gl = "glGenBuffers";
     p_glGenBuffers(n, buffers);
 }
 
 static void (GL_APIENTRY *p_glGenerateMipmap)(GLenum target);
 GL_APICALL void GL_APIENTRY glGenerateMipmap(GLenum target)
 {
+    cham_last_gl = "glGenerateMipmap";
     p_glGenerateMipmap(target);
 }
 
 static void (GL_APIENTRY *p_glGenFramebuffers)(GLsizei n, GLuint *framebuffers);
 GL_APICALL void GL_APIENTRY glGenFramebuffers(GLsizei n, GLuint *framebuffers)
 {
+    cham_last_gl = "glGenFramebuffers";
     p_glGenFramebuffers(n, framebuffers);
 }
 
 static void (GL_APIENTRY *p_glGenRenderbuffers)(GLsizei n, GLuint *renderbuffers);
 GL_APICALL void GL_APIENTRY glGenRenderbuffers(GLsizei n, GLuint *renderbuffers)
 {
+    cham_last_gl = "glGenRenderbuffers";
     p_glGenRenderbuffers(n, renderbuffers);
 }
 
 static void (GL_APIENTRY *p_glGenTextures)(GLsizei n, GLuint *textures);
 GL_APICALL void GL_APIENTRY glGenTextures(GLsizei n, GLuint *textures)
 {
+    cham_last_gl = "glGenTextures";
     p_glGenTextures(n, textures);
 }
 
 static void (GL_APIENTRY *p_glGetActiveAttrib)(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name);
 GL_APICALL void GL_APIENTRY glGetActiveAttrib(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name)
 {
+    cham_last_gl = "glGetActiveAttrib";
     p_glGetActiveAttrib(program, index, bufSize, length, size, type, name);
 }
 
 static void (GL_APIENTRY *p_glGetActiveUniform)(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name);
 GL_APICALL void GL_APIENTRY glGetActiveUniform(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLint *size, GLenum *type, GLchar *name)
 {
+    cham_last_gl = "glGetActiveUniform";
     p_glGetActiveUniform(program, index, bufSize, length, size, type, name);
 }
 
 static void (GL_APIENTRY *p_glGetAttachedShaders)(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders);
 GL_APICALL void GL_APIENTRY glGetAttachedShaders(GLuint program, GLsizei maxCount, GLsizei *count, GLuint *shaders)
 {
+    cham_last_gl = "glGetAttachedShaders";
     p_glGetAttachedShaders(program, maxCount, count, shaders);
 }
 
 static GLint (GL_APIENTRY *p_glGetAttribLocation)(GLuint program, const GLchar *name);
 GL_APICALL GLint GL_APIENTRY glGetAttribLocation(GLuint program, const GLchar *name)
 {
+    cham_last_gl = "glGetAttribLocation";
     return p_glGetAttribLocation(program, name);
 }
 
 static void (GL_APIENTRY *p_glGetBooleanv)(GLenum pname, GLboolean *data);
 GL_APICALL void GL_APIENTRY glGetBooleanv(GLenum pname, GLboolean *data)
 {
+    cham_last_gl = "glGetBooleanv";
     p_glGetBooleanv(pname, data);
 }
 
 static void (GL_APIENTRY *p_glGetBufferParameteriv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetBufferParameteriv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetBufferParameteriv";
     p_glGetBufferParameteriv(target, pname, params);
 }
 
 static GLenum (GL_APIENTRY *p_glGetError)(void);
 GL_APICALL GLenum GL_APIENTRY glGetError(void)
 {
+    cham_last_gl = "glGetError";
     return p_glGetError();
 }
 
 static void (GL_APIENTRY *p_glGetFloatv)(GLenum pname, GLfloat *data);
 GL_APICALL void GL_APIENTRY glGetFloatv(GLenum pname, GLfloat *data)
 {
+    cham_last_gl = "glGetFloatv";
     p_glGetFloatv(pname, data);
 }
 
 static void (GL_APIENTRY *p_glGetFramebufferAttachmentParameteriv)(GLenum target, GLenum attachment, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetFramebufferAttachmentParameteriv(GLenum target, GLenum attachment, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetFramebufferAttachmentParameteriv";
     p_glGetFramebufferAttachmentParameteriv(target, attachment, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetProgramiv)(GLuint program, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetProgramiv(GLuint program, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetProgramiv";
     p_glGetProgramiv(program, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetProgramInfoLog)(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
 GL_APICALL void GL_APIENTRY glGetProgramInfoLog(GLuint program, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
+    cham_last_gl = "glGetProgramInfoLog";
     p_glGetProgramInfoLog(program, bufSize, length, infoLog);
 }
 
 static void (GL_APIENTRY *p_glGetRenderbufferParameteriv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetRenderbufferParameteriv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetRenderbufferParameteriv";
     p_glGetRenderbufferParameteriv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetShaderiv)(GLuint shader, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetShaderiv(GLuint shader, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetShaderiv";
     p_glGetShaderiv(shader, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetShaderInfoLog)(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
 GL_APICALL void GL_APIENTRY glGetShaderInfoLog(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
+    cham_last_gl = "glGetShaderInfoLog";
     p_glGetShaderInfoLog(shader, bufSize, length, infoLog);
 }
 
 static void (GL_APIENTRY *p_glGetShaderPrecisionFormat)(GLenum shadertype, GLenum precisiontype, GLint *range, GLint *precision);
 GL_APICALL void GL_APIENTRY glGetShaderPrecisionFormat(GLenum shadertype, GLenum precisiontype, GLint *range, GLint *precision)
 {
+    cham_last_gl = "glGetShaderPrecisionFormat";
     p_glGetShaderPrecisionFormat(shadertype, precisiontype, range, precision);
 }
 
 static void (GL_APIENTRY *p_glGetShaderSource)(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source);
 GL_APICALL void GL_APIENTRY glGetShaderSource(GLuint shader, GLsizei bufSize, GLsizei *length, GLchar *source)
 {
+    cham_last_gl = "glGetShaderSource";
     p_glGetShaderSource(shader, bufSize, length, source);
 }
 
 static void (GL_APIENTRY *p_glGetTexParameterfv)(GLenum target, GLenum pname, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetTexParameterfv(GLenum target, GLenum pname, GLfloat *params)
 {
+    cham_last_gl = "glGetTexParameterfv";
     p_glGetTexParameterfv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetTexParameteriv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetTexParameteriv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetTexParameteriv";
     p_glGetTexParameteriv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetUniformfv)(GLuint program, GLint location, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetUniformfv(GLuint program, GLint location, GLfloat *params)
 {
+    cham_last_gl = "glGetUniformfv";
     p_glGetUniformfv(program, location, params);
 }
 
 static void (GL_APIENTRY *p_glGetUniformiv)(GLuint program, GLint location, GLint *params);
 GL_APICALL void GL_APIENTRY glGetUniformiv(GLuint program, GLint location, GLint *params)
 {
+    cham_last_gl = "glGetUniformiv";
     p_glGetUniformiv(program, location, params);
 }
 
 static GLint (GL_APIENTRY *p_glGetUniformLocation)(GLuint program, const GLchar *name);
 GL_APICALL GLint GL_APIENTRY glGetUniformLocation(GLuint program, const GLchar *name)
 {
+    cham_last_gl = "glGetUniformLocation";
     return p_glGetUniformLocation(program, name);
 }
 
 static void (GL_APIENTRY *p_glGetVertexAttribfv)(GLuint index, GLenum pname, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetVertexAttribfv(GLuint index, GLenum pname, GLfloat *params)
 {
+    cham_last_gl = "glGetVertexAttribfv";
     p_glGetVertexAttribfv(index, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetVertexAttribiv)(GLuint index, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetVertexAttribiv(GLuint index, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetVertexAttribiv";
     p_glGetVertexAttribiv(index, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetVertexAttribPointerv)(GLuint index, GLenum pname, void **pointer);
 GL_APICALL void GL_APIENTRY glGetVertexAttribPointerv(GLuint index, GLenum pname, void **pointer)
 {
+    cham_last_gl = "glGetVertexAttribPointerv";
     p_glGetVertexAttribPointerv(index, pname, pointer);
 }
 
 static void (GL_APIENTRY *p_glHint)(GLenum target, GLenum mode);
 GL_APICALL void GL_APIENTRY glHint(GLenum target, GLenum mode)
 {
+    cham_last_gl = "glHint";
     p_glHint(target, mode);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsBuffer)(GLuint buffer);
 GL_APICALL GLboolean GL_APIENTRY glIsBuffer(GLuint buffer)
 {
+    cham_last_gl = "glIsBuffer";
     return p_glIsBuffer(buffer);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsEnabled)(GLenum cap);
 GL_APICALL GLboolean GL_APIENTRY glIsEnabled(GLenum cap)
 {
+    cham_last_gl = "glIsEnabled";
     return p_glIsEnabled(cap);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsFramebuffer)(GLuint framebuffer);
 GL_APICALL GLboolean GL_APIENTRY glIsFramebuffer(GLuint framebuffer)
 {
+    cham_last_gl = "glIsFramebuffer";
     return p_glIsFramebuffer(framebuffer);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsProgram)(GLuint program);
 GL_APICALL GLboolean GL_APIENTRY glIsProgram(GLuint program)
 {
+    cham_last_gl = "glIsProgram";
     return p_glIsProgram(program);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsRenderbuffer)(GLuint renderbuffer);
 GL_APICALL GLboolean GL_APIENTRY glIsRenderbuffer(GLuint renderbuffer)
 {
+    cham_last_gl = "glIsRenderbuffer";
     return p_glIsRenderbuffer(renderbuffer);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsShader)(GLuint shader);
 GL_APICALL GLboolean GL_APIENTRY glIsShader(GLuint shader)
 {
+    cham_last_gl = "glIsShader";
     return p_glIsShader(shader);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsTexture)(GLuint texture);
 GL_APICALL GLboolean GL_APIENTRY glIsTexture(GLuint texture)
 {
+    cham_last_gl = "glIsTexture";
     return p_glIsTexture(texture);
 }
 
 static void (GL_APIENTRY *p_glLineWidth)(GLfloat width);
 GL_APICALL void GL_APIENTRY glLineWidth(GLfloat width)
 {
+    cham_last_gl = "glLineWidth";
     p_glLineWidth(width);
 }
 
 static void (GL_APIENTRY *p_glLinkProgram)(GLuint program);
 GL_APICALL void GL_APIENTRY glLinkProgram(GLuint program)
 {
+    cham_last_gl = "glLinkProgram";
     p_glLinkProgram(program);
 }
 
 static void (GL_APIENTRY *p_glPixelStorei)(GLenum pname, GLint param);
 GL_APICALL void GL_APIENTRY glPixelStorei(GLenum pname, GLint param)
 {
+    cham_last_gl = "glPixelStorei";
     p_glPixelStorei(pname, param);
 }
 
 static void (GL_APIENTRY *p_glPolygonOffset)(GLfloat factor, GLfloat units);
 GL_APICALL void GL_APIENTRY glPolygonOffset(GLfloat factor, GLfloat units)
 {
+    cham_last_gl = "glPolygonOffset";
     p_glPolygonOffset(factor, units);
 }
 
 static void (GL_APIENTRY *p_glReadPixels)(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels);
 GL_APICALL void GL_APIENTRY glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, void *pixels)
 {
+    cham_last_gl = "glReadPixels";
     p_glReadPixels(x, y, width, height, format, type, pixels);
 }
 
 static void (GL_APIENTRY *p_glReleaseShaderCompiler)(void);
 GL_APICALL void GL_APIENTRY glReleaseShaderCompiler(void)
 {
+    cham_last_gl = "glReleaseShaderCompiler";
     p_glReleaseShaderCompiler();
 }
 
 static void (GL_APIENTRY *p_glRenderbufferStorage)(GLenum target, GLenum internalformat, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glRenderbufferStorage(GLenum target, GLenum internalformat, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glRenderbufferStorage";
     p_glRenderbufferStorage(target, internalformat, width, height);
 }
 
 static void (GL_APIENTRY *p_glSampleCoverage)(GLfloat value, GLboolean invert);
 GL_APICALL void GL_APIENTRY glSampleCoverage(GLfloat value, GLboolean invert)
 {
+    cham_last_gl = "glSampleCoverage";
     p_glSampleCoverage(value, invert);
 }
 
 static void (GL_APIENTRY *p_glScissor)(GLint x, GLint y, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glScissor(GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glScissor";
     p_glScissor(x, y, width, height);
 }
 
 static void (GL_APIENTRY *p_glShaderBinary)(GLsizei count, const GLuint *shaders, GLenum binaryformat, const void *binary, GLsizei length);
 GL_APICALL void GL_APIENTRY glShaderBinary(GLsizei count, const GLuint *shaders, GLenum binaryformat, const void *binary, GLsizei length)
 {
+    cham_last_gl = "glShaderBinary";
     p_glShaderBinary(count, shaders, binaryformat, binary, length);
 }
 
 static void (GL_APIENTRY *p_glStencilFunc)(GLenum func, GLint ref, GLuint mask);
 GL_APICALL void GL_APIENTRY glStencilFunc(GLenum func, GLint ref, GLuint mask)
 {
+    cham_last_gl = "glStencilFunc";
     p_glStencilFunc(func, ref, mask);
 }
 
 static void (GL_APIENTRY *p_glStencilFuncSeparate)(GLenum face, GLenum func, GLint ref, GLuint mask);
 GL_APICALL void GL_APIENTRY glStencilFuncSeparate(GLenum face, GLenum func, GLint ref, GLuint mask)
 {
+    cham_last_gl = "glStencilFuncSeparate";
     p_glStencilFuncSeparate(face, func, ref, mask);
 }
 
 static void (GL_APIENTRY *p_glStencilMask)(GLuint mask);
 GL_APICALL void GL_APIENTRY glStencilMask(GLuint mask)
 {
+    cham_last_gl = "glStencilMask";
     p_glStencilMask(mask);
 }
 
 static void (GL_APIENTRY *p_glStencilMaskSeparate)(GLenum face, GLuint mask);
 GL_APICALL void GL_APIENTRY glStencilMaskSeparate(GLenum face, GLuint mask)
 {
+    cham_last_gl = "glStencilMaskSeparate";
     p_glStencilMaskSeparate(face, mask);
 }
 
 static void (GL_APIENTRY *p_glStencilOp)(GLenum fail, GLenum zfail, GLenum zpass);
 GL_APICALL void GL_APIENTRY glStencilOp(GLenum fail, GLenum zfail, GLenum zpass)
 {
+    cham_last_gl = "glStencilOp";
     p_glStencilOp(fail, zfail, zpass);
 }
 
 static void (GL_APIENTRY *p_glStencilOpSeparate)(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass);
 GL_APICALL void GL_APIENTRY glStencilOpSeparate(GLenum face, GLenum sfail, GLenum dpfail, GLenum dppass)
 {
+    cham_last_gl = "glStencilOpSeparate";
     p_glStencilOpSeparate(face, sfail, dpfail, dppass);
 }
 
 static void (GL_APIENTRY *p_glTexParameterf)(GLenum target, GLenum pname, GLfloat param);
 GL_APICALL void GL_APIENTRY glTexParameterf(GLenum target, GLenum pname, GLfloat param)
 {
+    cham_last_gl = "glTexParameterf";
     p_glTexParameterf(target, pname, param);
 }
 
 static void (GL_APIENTRY *p_glTexParameterfv)(GLenum target, GLenum pname, const GLfloat *params);
 GL_APICALL void GL_APIENTRY glTexParameterfv(GLenum target, GLenum pname, const GLfloat *params)
 {
+    cham_last_gl = "glTexParameterfv";
     p_glTexParameterfv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glTexParameteri)(GLenum target, GLenum pname, GLint param);
 GL_APICALL void GL_APIENTRY glTexParameteri(GLenum target, GLenum pname, GLint param)
 {
+    cham_last_gl = "glTexParameteri";
     p_glTexParameteri(target, pname, param);
 }
 
 static void (GL_APIENTRY *p_glTexParameteriv)(GLenum target, GLenum pname, const GLint *params);
 GL_APICALL void GL_APIENTRY glTexParameteriv(GLenum target, GLenum pname, const GLint *params)
 {
+    cham_last_gl = "glTexParameteriv";
     p_glTexParameteriv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glUniform1f)(GLint location, GLfloat v0);
 GL_APICALL void GL_APIENTRY glUniform1f(GLint location, GLfloat v0)
 {
+    cham_last_gl = "glUniform1f";
     p_glUniform1f(location, v0);
 }
 
 static void (GL_APIENTRY *p_glUniform1fv)(GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniform1fv(GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glUniform1fv";
     p_glUniform1fv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform1i)(GLint location, GLint v0);
 GL_APICALL void GL_APIENTRY glUniform1i(GLint location, GLint v0)
 {
+    cham_last_gl = "glUniform1i";
     p_glUniform1i(location, v0);
 }
 
 static void (GL_APIENTRY *p_glUniform1iv)(GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glUniform1iv(GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glUniform1iv";
     p_glUniform1iv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform2f)(GLint location, GLfloat v0, GLfloat v1);
 GL_APICALL void GL_APIENTRY glUniform2f(GLint location, GLfloat v0, GLfloat v1)
 {
+    cham_last_gl = "glUniform2f";
     p_glUniform2f(location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glUniform2fv)(GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniform2fv(GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glUniform2fv";
     p_glUniform2fv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform2i)(GLint location, GLint v0, GLint v1);
 GL_APICALL void GL_APIENTRY glUniform2i(GLint location, GLint v0, GLint v1)
 {
+    cham_last_gl = "glUniform2i";
     p_glUniform2i(location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glUniform2iv)(GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glUniform2iv(GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glUniform2iv";
     p_glUniform2iv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform3f)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 GL_APICALL void GL_APIENTRY glUniform3f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2)
 {
+    cham_last_gl = "glUniform3f";
     p_glUniform3f(location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glUniform3fv)(GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniform3fv(GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glUniform3fv";
     p_glUniform3fv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform3i)(GLint location, GLint v0, GLint v1, GLint v2);
 GL_APICALL void GL_APIENTRY glUniform3i(GLint location, GLint v0, GLint v1, GLint v2)
 {
+    cham_last_gl = "glUniform3i";
     p_glUniform3i(location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glUniform3iv)(GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glUniform3iv(GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glUniform3iv";
     p_glUniform3iv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform4f)(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
 GL_APICALL void GL_APIENTRY glUniform4f(GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 {
+    cham_last_gl = "glUniform4f";
     p_glUniform4f(location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glUniform4fv)(GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniform4fv(GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glUniform4fv";
     p_glUniform4fv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform4i)(GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
 GL_APICALL void GL_APIENTRY glUniform4i(GLint location, GLint v0, GLint v1, GLint v2, GLint v3)
 {
+    cham_last_gl = "glUniform4i";
     p_glUniform4i(location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glUniform4iv)(GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glUniform4iv(GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glUniform4iv";
     p_glUniform4iv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix2fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix2fv";
     p_glUniformMatrix2fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix3fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix3fv";
     p_glUniformMatrix3fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix4fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix4fv";
     p_glUniformMatrix4fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUseProgram)(GLuint program);
 GL_APICALL void GL_APIENTRY glUseProgram(GLuint program)
 {
+    cham_last_gl = "glUseProgram";
     p_glUseProgram(program);
 }
 
 static void (GL_APIENTRY *p_glValidateProgram)(GLuint program);
 GL_APICALL void GL_APIENTRY glValidateProgram(GLuint program)
 {
+    cham_last_gl = "glValidateProgram";
     p_glValidateProgram(program);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib1f)(GLuint index, GLfloat x);
 GL_APICALL void GL_APIENTRY glVertexAttrib1f(GLuint index, GLfloat x)
 {
+    cham_last_gl = "glVertexAttrib1f";
     p_glVertexAttrib1f(index, x);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib1fv)(GLuint index, const GLfloat *v);
 GL_APICALL void GL_APIENTRY glVertexAttrib1fv(GLuint index, const GLfloat *v)
 {
+    cham_last_gl = "glVertexAttrib1fv";
     p_glVertexAttrib1fv(index, v);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib2f)(GLuint index, GLfloat x, GLfloat y);
 GL_APICALL void GL_APIENTRY glVertexAttrib2f(GLuint index, GLfloat x, GLfloat y)
 {
+    cham_last_gl = "glVertexAttrib2f";
     p_glVertexAttrib2f(index, x, y);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib2fv)(GLuint index, const GLfloat *v);
 GL_APICALL void GL_APIENTRY glVertexAttrib2fv(GLuint index, const GLfloat *v)
 {
+    cham_last_gl = "glVertexAttrib2fv";
     p_glVertexAttrib2fv(index, v);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib3f)(GLuint index, GLfloat x, GLfloat y, GLfloat z);
 GL_APICALL void GL_APIENTRY glVertexAttrib3f(GLuint index, GLfloat x, GLfloat y, GLfloat z)
 {
+    cham_last_gl = "glVertexAttrib3f";
     p_glVertexAttrib3f(index, x, y, z);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib3fv)(GLuint index, const GLfloat *v);
 GL_APICALL void GL_APIENTRY glVertexAttrib3fv(GLuint index, const GLfloat *v)
 {
+    cham_last_gl = "glVertexAttrib3fv";
     p_glVertexAttrib3fv(index, v);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib4f)(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w);
 GL_APICALL void GL_APIENTRY glVertexAttrib4f(GLuint index, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 {
+    cham_last_gl = "glVertexAttrib4f";
     p_glVertexAttrib4f(index, x, y, z, w);
 }
 
 static void (GL_APIENTRY *p_glVertexAttrib4fv)(GLuint index, const GLfloat *v);
 GL_APICALL void GL_APIENTRY glVertexAttrib4fv(GLuint index, const GLfloat *v)
 {
+    cham_last_gl = "glVertexAttrib4fv";
     p_glVertexAttrib4fv(index, v);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribPointer)(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer);
 GL_APICALL void GL_APIENTRY glVertexAttribPointer(GLuint index, GLint size, GLenum type, GLboolean normalized, GLsizei stride, const void *pointer)
 {
+    cham_last_gl = "glVertexAttribPointer";
     p_glVertexAttribPointer(index, size, type, normalized, stride, pointer);
 }
 
 static void (GL_APIENTRY *p_glViewport)(GLint x, GLint y, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glViewport(GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glViewport";
     p_glViewport(x, y, width, height);
 }
 
 static void (GL_APIENTRY *p_glReadBuffer)(GLenum src);
 GL_APICALL void GL_APIENTRY glReadBuffer(GLenum src)
 {
+    cham_last_gl = "glReadBuffer";
     p_glReadBuffer(src);
 }
 
 static void (GL_APIENTRY *p_glDrawRangeElements)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices);
 GL_APICALL void GL_APIENTRY glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices)
 {
+    cham_last_gl = "glDrawRangeElements";
     p_glDrawRangeElements(mode, start, end, count, type, indices);
 }
 
 static void (GL_APIENTRY *p_glCopyTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glCopyTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glCopyTexSubImage3D";
     p_glCopyTexSubImage3D(target, level, xoffset, yoffset, zoffset, x, y, width, height);
 }
 
 static void (GL_APIENTRY *p_glCompressedTexImage3D)(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data);
 GL_APICALL void GL_APIENTRY glCompressedTexImage3D(GLenum target, GLint level, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLint border, GLsizei imageSize, const void *data)
 {
+    cham_last_gl = "glCompressedTexImage3D";
     p_glCompressedTexImage3D(target, level, internalformat, width, height, depth, border, imageSize, data);
 }
 
 static void (GL_APIENTRY *p_glCompressedTexSubImage3D)(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data);
 GL_APICALL void GL_APIENTRY glCompressedTexSubImage3D(GLenum target, GLint level, GLint xoffset, GLint yoffset, GLint zoffset, GLsizei width, GLsizei height, GLsizei depth, GLenum format, GLsizei imageSize, const void *data)
 {
+    cham_last_gl = "glCompressedTexSubImage3D";
     p_glCompressedTexSubImage3D(target, level, xoffset, yoffset, zoffset, width, height, depth, format, imageSize, data);
 }
 
 static void (GL_APIENTRY *p_glGenQueries)(GLsizei n, GLuint *ids);
 GL_APICALL void GL_APIENTRY glGenQueries(GLsizei n, GLuint *ids)
 {
+    cham_last_gl = "glGenQueries";
     p_glGenQueries(n, ids);
 }
 
 static void (GL_APIENTRY *p_glDeleteQueries)(GLsizei n, const GLuint *ids);
 GL_APICALL void GL_APIENTRY glDeleteQueries(GLsizei n, const GLuint *ids)
 {
+    cham_last_gl = "glDeleteQueries";
     p_glDeleteQueries(n, ids);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsQuery)(GLuint id);
 GL_APICALL GLboolean GL_APIENTRY glIsQuery(GLuint id)
 {
+    cham_last_gl = "glIsQuery";
     return p_glIsQuery(id);
 }
 
 static void (GL_APIENTRY *p_glBeginQuery)(GLenum target, GLuint id);
 GL_APICALL void GL_APIENTRY glBeginQuery(GLenum target, GLuint id)
 {
+    cham_last_gl = "glBeginQuery";
     p_glBeginQuery(target, id);
 }
 
 static void (GL_APIENTRY *p_glEndQuery)(GLenum target);
 GL_APICALL void GL_APIENTRY glEndQuery(GLenum target)
 {
+    cham_last_gl = "glEndQuery";
     p_glEndQuery(target);
 }
 
 static void (GL_APIENTRY *p_glGetQueryiv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetQueryiv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetQueryiv";
     p_glGetQueryiv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetQueryObjectuiv)(GLuint id, GLenum pname, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *params)
 {
+    cham_last_gl = "glGetQueryObjectuiv";
     p_glGetQueryObjectuiv(id, pname, params);
 }
 
 static GLboolean (GL_APIENTRY *p_glUnmapBuffer)(GLenum target);
 GL_APICALL GLboolean GL_APIENTRY glUnmapBuffer(GLenum target)
 {
+    cham_last_gl = "glUnmapBuffer";
     return p_glUnmapBuffer(target);
 }
 
 static void (GL_APIENTRY *p_glGetBufferPointerv)(GLenum target, GLenum pname, void **params);
 GL_APICALL void GL_APIENTRY glGetBufferPointerv(GLenum target, GLenum pname, void **params)
 {
+    cham_last_gl = "glGetBufferPointerv";
     p_glGetBufferPointerv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glDrawBuffers)(GLsizei n, const GLenum *bufs);
 GL_APICALL void GL_APIENTRY glDrawBuffers(GLsizei n, const GLenum *bufs)
 {
+    cham_last_gl = "glDrawBuffers";
     p_glDrawBuffers(n, bufs);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix2x3fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix2x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix2x3fv";
     p_glUniformMatrix2x3fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix3x2fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix3x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix3x2fv";
     p_glUniformMatrix3x2fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix2x4fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix2x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix2x4fv";
     p_glUniformMatrix2x4fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix4x2fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix4x2fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix4x2fv";
     p_glUniformMatrix4x2fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix3x4fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix3x4fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix3x4fv";
     p_glUniformMatrix3x4fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glUniformMatrix4x3fv)(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glUniformMatrix4x3fv(GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glUniformMatrix4x3fv";
     p_glUniformMatrix4x3fv(location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glBlitFramebuffer)(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter);
 GL_APICALL void GL_APIENTRY glBlitFramebuffer(GLint srcX0, GLint srcY0, GLint srcX1, GLint srcY1, GLint dstX0, GLint dstY0, GLint dstX1, GLint dstY1, GLbitfield mask, GLenum filter)
 {
+    cham_last_gl = "glBlitFramebuffer";
     p_glBlitFramebuffer(srcX0, srcY0, srcX1, srcY1, dstX0, dstY0, dstX1, dstY1, mask, filter);
 }
 
 static void (GL_APIENTRY *p_glRenderbufferStorageMultisample)(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glRenderbufferStorageMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glRenderbufferStorageMultisample";
     p_glRenderbufferStorageMultisample(target, samples, internalformat, width, height);
 }
 
 static void (GL_APIENTRY *p_glFramebufferTextureLayer)(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer);
 GL_APICALL void GL_APIENTRY glFramebufferTextureLayer(GLenum target, GLenum attachment, GLuint texture, GLint level, GLint layer)
 {
+    cham_last_gl = "glFramebufferTextureLayer";
     p_glFramebufferTextureLayer(target, attachment, texture, level, layer);
 }
 
 static void * (GL_APIENTRY *p_glMapBufferRange)(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access);
 GL_APICALL void * GL_APIENTRY glMapBufferRange(GLenum target, GLintptr offset, GLsizeiptr length, GLbitfield access)
 {
+    cham_last_gl = "glMapBufferRange";
     return p_glMapBufferRange(target, offset, length, access);
 }
 
 static void (GL_APIENTRY *p_glFlushMappedBufferRange)(GLenum target, GLintptr offset, GLsizeiptr length);
 GL_APICALL void GL_APIENTRY glFlushMappedBufferRange(GLenum target, GLintptr offset, GLsizeiptr length)
 {
+    cham_last_gl = "glFlushMappedBufferRange";
     p_glFlushMappedBufferRange(target, offset, length);
 }
 
 static void (GL_APIENTRY *p_glBindVertexArray)(GLuint array);
 GL_APICALL void GL_APIENTRY glBindVertexArray(GLuint array)
 {
+    cham_last_gl = "glBindVertexArray";
     p_glBindVertexArray(array);
 }
 
 static void (GL_APIENTRY *p_glDeleteVertexArrays)(GLsizei n, const GLuint *arrays);
 GL_APICALL void GL_APIENTRY glDeleteVertexArrays(GLsizei n, const GLuint *arrays)
 {
+    cham_last_gl = "glDeleteVertexArrays";
     p_glDeleteVertexArrays(n, arrays);
 }
 
 static void (GL_APIENTRY *p_glGenVertexArrays)(GLsizei n, GLuint *arrays);
 GL_APICALL void GL_APIENTRY glGenVertexArrays(GLsizei n, GLuint *arrays)
 {
+    cham_last_gl = "glGenVertexArrays";
     p_glGenVertexArrays(n, arrays);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsVertexArray)(GLuint array);
 GL_APICALL GLboolean GL_APIENTRY glIsVertexArray(GLuint array)
 {
+    cham_last_gl = "glIsVertexArray";
     return p_glIsVertexArray(array);
 }
 
 static void (GL_APIENTRY *p_glGetIntegeri_v)(GLenum target, GLuint index, GLint *data);
 GL_APICALL void GL_APIENTRY glGetIntegeri_v(GLenum target, GLuint index, GLint *data)
 {
+    cham_last_gl = "glGetIntegeri_v";
     p_glGetIntegeri_v(target, index, data);
 }
 
 static void (GL_APIENTRY *p_glBeginTransformFeedback)(GLenum primitiveMode);
 GL_APICALL void GL_APIENTRY glBeginTransformFeedback(GLenum primitiveMode)
 {
+    cham_last_gl = "glBeginTransformFeedback";
     p_glBeginTransformFeedback(primitiveMode);
 }
 
 static void (GL_APIENTRY *p_glEndTransformFeedback)(void);
 GL_APICALL void GL_APIENTRY glEndTransformFeedback(void)
 {
+    cham_last_gl = "glEndTransformFeedback";
     p_glEndTransformFeedback();
 }
 
 static void (GL_APIENTRY *p_glBindBufferRange)(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size);
 GL_APICALL void GL_APIENTRY glBindBufferRange(GLenum target, GLuint index, GLuint buffer, GLintptr offset, GLsizeiptr size)
 {
+    cham_last_gl = "glBindBufferRange";
     p_glBindBufferRange(target, index, buffer, offset, size);
 }
 
 static void (GL_APIENTRY *p_glBindBufferBase)(GLenum target, GLuint index, GLuint buffer);
 GL_APICALL void GL_APIENTRY glBindBufferBase(GLenum target, GLuint index, GLuint buffer)
 {
+    cham_last_gl = "glBindBufferBase";
     p_glBindBufferBase(target, index, buffer);
 }
 
 static void (GL_APIENTRY *p_glTransformFeedbackVaryings)(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode);
 GL_APICALL void GL_APIENTRY glTransformFeedbackVaryings(GLuint program, GLsizei count, const GLchar *const*varyings, GLenum bufferMode)
 {
+    cham_last_gl = "glTransformFeedbackVaryings";
     p_glTransformFeedbackVaryings(program, count, varyings, bufferMode);
 }
 
 static void (GL_APIENTRY *p_glGetTransformFeedbackVarying)(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name);
 GL_APICALL void GL_APIENTRY glGetTransformFeedbackVarying(GLuint program, GLuint index, GLsizei bufSize, GLsizei *length, GLsizei *size, GLenum *type, GLchar *name)
 {
+    cham_last_gl = "glGetTransformFeedbackVarying";
     p_glGetTransformFeedbackVarying(program, index, bufSize, length, size, type, name);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribIPointer)(GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer);
 GL_APICALL void GL_APIENTRY glVertexAttribIPointer(GLuint index, GLint size, GLenum type, GLsizei stride, const void *pointer)
 {
+    cham_last_gl = "glVertexAttribIPointer";
     p_glVertexAttribIPointer(index, size, type, stride, pointer);
 }
 
 static void (GL_APIENTRY *p_glGetVertexAttribIiv)(GLuint index, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetVertexAttribIiv(GLuint index, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetVertexAttribIiv";
     p_glGetVertexAttribIiv(index, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetVertexAttribIuiv)(GLuint index, GLenum pname, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetVertexAttribIuiv(GLuint index, GLenum pname, GLuint *params)
 {
+    cham_last_gl = "glGetVertexAttribIuiv";
     p_glGetVertexAttribIuiv(index, pname, params);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribI4i)(GLuint index, GLint x, GLint y, GLint z, GLint w);
 GL_APICALL void GL_APIENTRY glVertexAttribI4i(GLuint index, GLint x, GLint y, GLint z, GLint w)
 {
+    cham_last_gl = "glVertexAttribI4i";
     p_glVertexAttribI4i(index, x, y, z, w);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribI4ui)(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w);
 GL_APICALL void GL_APIENTRY glVertexAttribI4ui(GLuint index, GLuint x, GLuint y, GLuint z, GLuint w)
 {
+    cham_last_gl = "glVertexAttribI4ui";
     p_glVertexAttribI4ui(index, x, y, z, w);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribI4iv)(GLuint index, const GLint *v);
 GL_APICALL void GL_APIENTRY glVertexAttribI4iv(GLuint index, const GLint *v)
 {
+    cham_last_gl = "glVertexAttribI4iv";
     p_glVertexAttribI4iv(index, v);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribI4uiv)(GLuint index, const GLuint *v);
 GL_APICALL void GL_APIENTRY glVertexAttribI4uiv(GLuint index, const GLuint *v)
 {
+    cham_last_gl = "glVertexAttribI4uiv";
     p_glVertexAttribI4uiv(index, v);
 }
 
 static void (GL_APIENTRY *p_glGetUniformuiv)(GLuint program, GLint location, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetUniformuiv(GLuint program, GLint location, GLuint *params)
 {
+    cham_last_gl = "glGetUniformuiv";
     p_glGetUniformuiv(program, location, params);
 }
 
 static GLint (GL_APIENTRY *p_glGetFragDataLocation)(GLuint program, const GLchar *name);
 GL_APICALL GLint GL_APIENTRY glGetFragDataLocation(GLuint program, const GLchar *name)
 {
+    cham_last_gl = "glGetFragDataLocation";
     return p_glGetFragDataLocation(program, name);
 }
 
 static void (GL_APIENTRY *p_glUniform1ui)(GLint location, GLuint v0);
 GL_APICALL void GL_APIENTRY glUniform1ui(GLint location, GLuint v0)
 {
+    cham_last_gl = "glUniform1ui";
     p_glUniform1ui(location, v0);
 }
 
 static void (GL_APIENTRY *p_glUniform2ui)(GLint location, GLuint v0, GLuint v1);
 GL_APICALL void GL_APIENTRY glUniform2ui(GLint location, GLuint v0, GLuint v1)
 {
+    cham_last_gl = "glUniform2ui";
     p_glUniform2ui(location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glUniform3ui)(GLint location, GLuint v0, GLuint v1, GLuint v2);
 GL_APICALL void GL_APIENTRY glUniform3ui(GLint location, GLuint v0, GLuint v1, GLuint v2)
 {
+    cham_last_gl = "glUniform3ui";
     p_glUniform3ui(location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glUniform4ui)(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3);
 GL_APICALL void GL_APIENTRY glUniform4ui(GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
 {
+    cham_last_gl = "glUniform4ui";
     p_glUniform4ui(location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glUniform1uiv)(GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glUniform1uiv(GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glUniform1uiv";
     p_glUniform1uiv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform2uiv)(GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glUniform2uiv(GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glUniform2uiv";
     p_glUniform2uiv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform3uiv)(GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glUniform3uiv(GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glUniform3uiv";
     p_glUniform3uiv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glUniform4uiv)(GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glUniform4uiv(GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glUniform4uiv";
     p_glUniform4uiv(location, count, value);
 }
 
 static void (GL_APIENTRY *p_glClearBufferiv)(GLenum buffer, GLint drawbuffer, const GLint *value);
 GL_APICALL void GL_APIENTRY glClearBufferiv(GLenum buffer, GLint drawbuffer, const GLint *value)
 {
+    cham_last_gl = "glClearBufferiv";
     p_glClearBufferiv(buffer, drawbuffer, value);
 }
 
 static void (GL_APIENTRY *p_glClearBufferuiv)(GLenum buffer, GLint drawbuffer, const GLuint *value);
 GL_APICALL void GL_APIENTRY glClearBufferuiv(GLenum buffer, GLint drawbuffer, const GLuint *value)
 {
+    cham_last_gl = "glClearBufferuiv";
     p_glClearBufferuiv(buffer, drawbuffer, value);
 }
 
 static void (GL_APIENTRY *p_glClearBufferfv)(GLenum buffer, GLint drawbuffer, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glClearBufferfv(GLenum buffer, GLint drawbuffer, const GLfloat *value)
 {
+    cham_last_gl = "glClearBufferfv";
     p_glClearBufferfv(buffer, drawbuffer, value);
 }
 
 static void (GL_APIENTRY *p_glClearBufferfi)(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil);
 GL_APICALL void GL_APIENTRY glClearBufferfi(GLenum buffer, GLint drawbuffer, GLfloat depth, GLint stencil)
 {
+    cham_last_gl = "glClearBufferfi";
     p_glClearBufferfi(buffer, drawbuffer, depth, stencil);
 }
 
 static void (GL_APIENTRY *p_glCopyBufferSubData)(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size);
 GL_APICALL void GL_APIENTRY glCopyBufferSubData(GLenum readTarget, GLenum writeTarget, GLintptr readOffset, GLintptr writeOffset, GLsizeiptr size)
 {
+    cham_last_gl = "glCopyBufferSubData";
     p_glCopyBufferSubData(readTarget, writeTarget, readOffset, writeOffset, size);
 }
 
 static void (GL_APIENTRY *p_glGetUniformIndices)(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices);
 GL_APICALL void GL_APIENTRY glGetUniformIndices(GLuint program, GLsizei uniformCount, const GLchar *const*uniformNames, GLuint *uniformIndices)
 {
+    cham_last_gl = "glGetUniformIndices";
     p_glGetUniformIndices(program, uniformCount, uniformNames, uniformIndices);
 }
 
 static void (GL_APIENTRY *p_glGetActiveUniformsiv)(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetActiveUniformsiv(GLuint program, GLsizei uniformCount, const GLuint *uniformIndices, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetActiveUniformsiv";
     p_glGetActiveUniformsiv(program, uniformCount, uniformIndices, pname, params);
 }
 
 static GLuint (GL_APIENTRY *p_glGetUniformBlockIndex)(GLuint program, const GLchar *uniformBlockName);
 GL_APICALL GLuint GL_APIENTRY glGetUniformBlockIndex(GLuint program, const GLchar *uniformBlockName)
 {
+    cham_last_gl = "glGetUniformBlockIndex";
     return p_glGetUniformBlockIndex(program, uniformBlockName);
 }
 
 static void (GL_APIENTRY *p_glGetActiveUniformBlockiv)(GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetActiveUniformBlockiv(GLuint program, GLuint uniformBlockIndex, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetActiveUniformBlockiv";
     p_glGetActiveUniformBlockiv(program, uniformBlockIndex, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetActiveUniformBlockName)(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName);
 GL_APICALL void GL_APIENTRY glGetActiveUniformBlockName(GLuint program, GLuint uniformBlockIndex, GLsizei bufSize, GLsizei *length, GLchar *uniformBlockName)
 {
+    cham_last_gl = "glGetActiveUniformBlockName";
     p_glGetActiveUniformBlockName(program, uniformBlockIndex, bufSize, length, uniformBlockName);
 }
 
 static void (GL_APIENTRY *p_glUniformBlockBinding)(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding);
 GL_APICALL void GL_APIENTRY glUniformBlockBinding(GLuint program, GLuint uniformBlockIndex, GLuint uniformBlockBinding)
 {
+    cham_last_gl = "glUniformBlockBinding";
     p_glUniformBlockBinding(program, uniformBlockIndex, uniformBlockBinding);
 }
 
 static void (GL_APIENTRY *p_glDrawArraysInstanced)(GLenum mode, GLint first, GLsizei count, GLsizei instancecount);
 GL_APICALL void GL_APIENTRY glDrawArraysInstanced(GLenum mode, GLint first, GLsizei count, GLsizei instancecount)
 {
+    cham_last_gl = "glDrawArraysInstanced";
     p_glDrawArraysInstanced(mode, first, count, instancecount);
 }
 
 static void (GL_APIENTRY *p_glDrawElementsInstanced)(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount);
 GL_APICALL void GL_APIENTRY glDrawElementsInstanced(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount)
 {
+    cham_last_gl = "glDrawElementsInstanced";
     p_glDrawElementsInstanced(mode, count, type, indices, instancecount);
 }
 
 static GLsync (GL_APIENTRY *p_glFenceSync)(GLenum condition, GLbitfield flags);
 GL_APICALL GLsync GL_APIENTRY glFenceSync(GLenum condition, GLbitfield flags)
 {
+    cham_last_gl = "glFenceSync";
     return p_glFenceSync(condition, flags);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsSync)(GLsync sync);
 GL_APICALL GLboolean GL_APIENTRY glIsSync(GLsync sync)
 {
+    cham_last_gl = "glIsSync";
     return p_glIsSync(sync);
 }
 
 static void (GL_APIENTRY *p_glDeleteSync)(GLsync sync);
 GL_APICALL void GL_APIENTRY glDeleteSync(GLsync sync)
 {
+    cham_last_gl = "glDeleteSync";
     p_glDeleteSync(sync);
 }
 
 static GLenum (GL_APIENTRY *p_glClientWaitSync)(GLsync sync, GLbitfield flags, GLuint64 timeout);
 GL_APICALL GLenum GL_APIENTRY glClientWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
 {
+    cham_last_gl = "glClientWaitSync";
     return p_glClientWaitSync(sync, flags, timeout);
 }
 
 static void (GL_APIENTRY *p_glWaitSync)(GLsync sync, GLbitfield flags, GLuint64 timeout);
 GL_APICALL void GL_APIENTRY glWaitSync(GLsync sync, GLbitfield flags, GLuint64 timeout)
 {
+    cham_last_gl = "glWaitSync";
     p_glWaitSync(sync, flags, timeout);
 }
 
 static void (GL_APIENTRY *p_glGetInteger64v)(GLenum pname, GLint64 *data);
 GL_APICALL void GL_APIENTRY glGetInteger64v(GLenum pname, GLint64 *data)
 {
+    cham_last_gl = "glGetInteger64v";
     p_glGetInteger64v(pname, data);
 }
 
 static void (GL_APIENTRY *p_glGetSynciv)(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GLint *values);
 GL_APICALL void GL_APIENTRY glGetSynciv(GLsync sync, GLenum pname, GLsizei bufSize, GLsizei *length, GLint *values)
 {
+    cham_last_gl = "glGetSynciv";
     p_glGetSynciv(sync, pname, bufSize, length, values);
 }
 
 static void (GL_APIENTRY *p_glGetInteger64i_v)(GLenum target, GLuint index, GLint64 *data);
 GL_APICALL void GL_APIENTRY glGetInteger64i_v(GLenum target, GLuint index, GLint64 *data)
 {
+    cham_last_gl = "glGetInteger64i_v";
     p_glGetInteger64i_v(target, index, data);
 }
 
 static void (GL_APIENTRY *p_glGetBufferParameteri64v)(GLenum target, GLenum pname, GLint64 *params);
 GL_APICALL void GL_APIENTRY glGetBufferParameteri64v(GLenum target, GLenum pname, GLint64 *params)
 {
+    cham_last_gl = "glGetBufferParameteri64v";
     p_glGetBufferParameteri64v(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGenSamplers)(GLsizei count, GLuint *samplers);
 GL_APICALL void GL_APIENTRY glGenSamplers(GLsizei count, GLuint *samplers)
 {
+    cham_last_gl = "glGenSamplers";
     p_glGenSamplers(count, samplers);
 }
 
 static void (GL_APIENTRY *p_glDeleteSamplers)(GLsizei count, const GLuint *samplers);
 GL_APICALL void GL_APIENTRY glDeleteSamplers(GLsizei count, const GLuint *samplers)
 {
+    cham_last_gl = "glDeleteSamplers";
     p_glDeleteSamplers(count, samplers);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsSampler)(GLuint sampler);
 GL_APICALL GLboolean GL_APIENTRY glIsSampler(GLuint sampler)
 {
+    cham_last_gl = "glIsSampler";
     return p_glIsSampler(sampler);
 }
 
 static void (GL_APIENTRY *p_glBindSampler)(GLuint unit, GLuint sampler);
 GL_APICALL void GL_APIENTRY glBindSampler(GLuint unit, GLuint sampler)
 {
+    cham_last_gl = "glBindSampler";
     p_glBindSampler(unit, sampler);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameteri)(GLuint sampler, GLenum pname, GLint param);
 GL_APICALL void GL_APIENTRY glSamplerParameteri(GLuint sampler, GLenum pname, GLint param)
 {
+    cham_last_gl = "glSamplerParameteri";
     p_glSamplerParameteri(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameteriv)(GLuint sampler, GLenum pname, const GLint *param);
 GL_APICALL void GL_APIENTRY glSamplerParameteriv(GLuint sampler, GLenum pname, const GLint *param)
 {
+    cham_last_gl = "glSamplerParameteriv";
     p_glSamplerParameteriv(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameterf)(GLuint sampler, GLenum pname, GLfloat param);
 GL_APICALL void GL_APIENTRY glSamplerParameterf(GLuint sampler, GLenum pname, GLfloat param)
 {
+    cham_last_gl = "glSamplerParameterf";
     p_glSamplerParameterf(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameterfv)(GLuint sampler, GLenum pname, const GLfloat *param);
 GL_APICALL void GL_APIENTRY glSamplerParameterfv(GLuint sampler, GLenum pname, const GLfloat *param)
 {
+    cham_last_gl = "glSamplerParameterfv";
     p_glSamplerParameterfv(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glGetSamplerParameteriv)(GLuint sampler, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetSamplerParameteriv(GLuint sampler, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetSamplerParameteriv";
     p_glGetSamplerParameteriv(sampler, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetSamplerParameterfv)(GLuint sampler, GLenum pname, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetSamplerParameterfv(GLuint sampler, GLenum pname, GLfloat *params)
 {
+    cham_last_gl = "glGetSamplerParameterfv";
     p_glGetSamplerParameterfv(sampler, pname, params);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribDivisor)(GLuint index, GLuint divisor);
 GL_APICALL void GL_APIENTRY glVertexAttribDivisor(GLuint index, GLuint divisor)
 {
+    cham_last_gl = "glVertexAttribDivisor";
     p_glVertexAttribDivisor(index, divisor);
 }
 
 static void (GL_APIENTRY *p_glBindTransformFeedback)(GLenum target, GLuint id);
 GL_APICALL void GL_APIENTRY glBindTransformFeedback(GLenum target, GLuint id)
 {
+    cham_last_gl = "glBindTransformFeedback";
     p_glBindTransformFeedback(target, id);
 }
 
 static void (GL_APIENTRY *p_glDeleteTransformFeedbacks)(GLsizei n, const GLuint *ids);
 GL_APICALL void GL_APIENTRY glDeleteTransformFeedbacks(GLsizei n, const GLuint *ids)
 {
+    cham_last_gl = "glDeleteTransformFeedbacks";
     p_glDeleteTransformFeedbacks(n, ids);
 }
 
 static void (GL_APIENTRY *p_glGenTransformFeedbacks)(GLsizei n, GLuint *ids);
 GL_APICALL void GL_APIENTRY glGenTransformFeedbacks(GLsizei n, GLuint *ids)
 {
+    cham_last_gl = "glGenTransformFeedbacks";
     p_glGenTransformFeedbacks(n, ids);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsTransformFeedback)(GLuint id);
 GL_APICALL GLboolean GL_APIENTRY glIsTransformFeedback(GLuint id)
 {
+    cham_last_gl = "glIsTransformFeedback";
     return p_glIsTransformFeedback(id);
 }
 
 static void (GL_APIENTRY *p_glPauseTransformFeedback)(void);
 GL_APICALL void GL_APIENTRY glPauseTransformFeedback(void)
 {
+    cham_last_gl = "glPauseTransformFeedback";
     p_glPauseTransformFeedback();
 }
 
 static void (GL_APIENTRY *p_glResumeTransformFeedback)(void);
 GL_APICALL void GL_APIENTRY glResumeTransformFeedback(void)
 {
+    cham_last_gl = "glResumeTransformFeedback";
     p_glResumeTransformFeedback();
 }
 
 static void (GL_APIENTRY *p_glGetProgramBinary)(GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary);
 GL_APICALL void GL_APIENTRY glGetProgramBinary(GLuint program, GLsizei bufSize, GLsizei *length, GLenum *binaryFormat, void *binary)
 {
+    cham_last_gl = "glGetProgramBinary";
     p_glGetProgramBinary(program, bufSize, length, binaryFormat, binary);
 }
 
 static void (GL_APIENTRY *p_glProgramBinary)(GLuint program, GLenum binaryFormat, const void *binary, GLsizei length);
 GL_APICALL void GL_APIENTRY glProgramBinary(GLuint program, GLenum binaryFormat, const void *binary, GLsizei length)
 {
+    cham_last_gl = "glProgramBinary";
     p_glProgramBinary(program, binaryFormat, binary, length);
 }
 
 static void (GL_APIENTRY *p_glProgramParameteri)(GLuint program, GLenum pname, GLint value);
 GL_APICALL void GL_APIENTRY glProgramParameteri(GLuint program, GLenum pname, GLint value)
 {
+    cham_last_gl = "glProgramParameteri";
     p_glProgramParameteri(program, pname, value);
 }
 
 static void (GL_APIENTRY *p_glInvalidateFramebuffer)(GLenum target, GLsizei numAttachments, const GLenum *attachments);
 GL_APICALL void GL_APIENTRY glInvalidateFramebuffer(GLenum target, GLsizei numAttachments, const GLenum *attachments)
 {
+    cham_last_gl = "glInvalidateFramebuffer";
     p_glInvalidateFramebuffer(target, numAttachments, attachments);
 }
 
 static void (GL_APIENTRY *p_glInvalidateSubFramebuffer)(GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glInvalidateSubFramebuffer(GLenum target, GLsizei numAttachments, const GLenum *attachments, GLint x, GLint y, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glInvalidateSubFramebuffer";
     p_glInvalidateSubFramebuffer(target, numAttachments, attachments, x, y, width, height);
 }
 
 static void (GL_APIENTRY *p_glTexStorage2D)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height);
 GL_APICALL void GL_APIENTRY glTexStorage2D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height)
 {
+    cham_last_gl = "glTexStorage2D";
     p_glTexStorage2D(target, levels, internalformat, width, height);
 }
 
 static void (GL_APIENTRY *p_glTexStorage3D)(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth);
 GL_APICALL void GL_APIENTRY glTexStorage3D(GLenum target, GLsizei levels, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth)
 {
+    cham_last_gl = "glTexStorage3D";
     p_glTexStorage3D(target, levels, internalformat, width, height, depth);
 }
 
 static void (GL_APIENTRY *p_glGetInternalformativ)(GLenum target, GLenum internalformat, GLenum pname, GLsizei bufSize, GLint *params);
 GL_APICALL void GL_APIENTRY glGetInternalformativ(GLenum target, GLenum internalformat, GLenum pname, GLsizei bufSize, GLint *params)
 {
+    cham_last_gl = "glGetInternalformativ";
     p_glGetInternalformativ(target, internalformat, pname, bufSize, params);
 }
 
 static void (GL_APIENTRY *p_glDispatchCompute)(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z);
 GL_APICALL void GL_APIENTRY glDispatchCompute(GLuint num_groups_x, GLuint num_groups_y, GLuint num_groups_z)
 {
+    cham_last_gl = "glDispatchCompute";
     p_glDispatchCompute(num_groups_x, num_groups_y, num_groups_z);
 }
 
 static void (GL_APIENTRY *p_glDispatchComputeIndirect)(GLintptr indirect);
 GL_APICALL void GL_APIENTRY glDispatchComputeIndirect(GLintptr indirect)
 {
+    cham_last_gl = "glDispatchComputeIndirect";
     p_glDispatchComputeIndirect(indirect);
 }
 
 static void (GL_APIENTRY *p_glDrawArraysIndirect)(GLenum mode, const void *indirect);
 GL_APICALL void GL_APIENTRY glDrawArraysIndirect(GLenum mode, const void *indirect)
 {
+    cham_last_gl = "glDrawArraysIndirect";
     p_glDrawArraysIndirect(mode, indirect);
 }
 
 static void (GL_APIENTRY *p_glDrawElementsIndirect)(GLenum mode, GLenum type, const void *indirect);
 GL_APICALL void GL_APIENTRY glDrawElementsIndirect(GLenum mode, GLenum type, const void *indirect)
 {
+    cham_last_gl = "glDrawElementsIndirect";
     p_glDrawElementsIndirect(mode, type, indirect);
 }
 
 static void (GL_APIENTRY *p_glFramebufferParameteri)(GLenum target, GLenum pname, GLint param);
 GL_APICALL void GL_APIENTRY glFramebufferParameteri(GLenum target, GLenum pname, GLint param)
 {
+    cham_last_gl = "glFramebufferParameteri";
     p_glFramebufferParameteri(target, pname, param);
 }
 
 static void (GL_APIENTRY *p_glGetFramebufferParameteriv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetFramebufferParameteriv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetFramebufferParameteriv";
     p_glGetFramebufferParameteriv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetProgramInterfaceiv)(GLuint program, GLenum programInterface, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetProgramInterfaceiv(GLuint program, GLenum programInterface, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetProgramInterfaceiv";
     p_glGetProgramInterfaceiv(program, programInterface, pname, params);
 }
 
 static GLuint (GL_APIENTRY *p_glGetProgramResourceIndex)(GLuint program, GLenum programInterface, const GLchar *name);
 GL_APICALL GLuint GL_APIENTRY glGetProgramResourceIndex(GLuint program, GLenum programInterface, const GLchar *name)
 {
+    cham_last_gl = "glGetProgramResourceIndex";
     return p_glGetProgramResourceIndex(program, programInterface, name);
 }
 
 static void (GL_APIENTRY *p_glGetProgramResourceName)(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name);
 GL_APICALL void GL_APIENTRY glGetProgramResourceName(GLuint program, GLenum programInterface, GLuint index, GLsizei bufSize, GLsizei *length, GLchar *name)
 {
+    cham_last_gl = "glGetProgramResourceName";
     p_glGetProgramResourceName(program, programInterface, index, bufSize, length, name);
 }
 
 static void (GL_APIENTRY *p_glGetProgramResourceiv)(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum *props, GLsizei bufSize, GLsizei *length, GLint *params);
 GL_APICALL void GL_APIENTRY glGetProgramResourceiv(GLuint program, GLenum programInterface, GLuint index, GLsizei propCount, const GLenum *props, GLsizei bufSize, GLsizei *length, GLint *params)
 {
+    cham_last_gl = "glGetProgramResourceiv";
     p_glGetProgramResourceiv(program, programInterface, index, propCount, props, bufSize, length, params);
 }
 
 static GLint (GL_APIENTRY *p_glGetProgramResourceLocation)(GLuint program, GLenum programInterface, const GLchar *name);
 GL_APICALL GLint GL_APIENTRY glGetProgramResourceLocation(GLuint program, GLenum programInterface, const GLchar *name)
 {
+    cham_last_gl = "glGetProgramResourceLocation";
     return p_glGetProgramResourceLocation(program, programInterface, name);
 }
 
 static void (GL_APIENTRY *p_glUseProgramStages)(GLuint pipeline, GLbitfield stages, GLuint program);
 GL_APICALL void GL_APIENTRY glUseProgramStages(GLuint pipeline, GLbitfield stages, GLuint program)
 {
+    cham_last_gl = "glUseProgramStages";
     p_glUseProgramStages(pipeline, stages, program);
 }
 
 static void (GL_APIENTRY *p_glActiveShaderProgram)(GLuint pipeline, GLuint program);
 GL_APICALL void GL_APIENTRY glActiveShaderProgram(GLuint pipeline, GLuint program)
 {
+    cham_last_gl = "glActiveShaderProgram";
     p_glActiveShaderProgram(pipeline, program);
 }
 
 static GLuint (GL_APIENTRY *p_glCreateShaderProgramv)(GLenum type, GLsizei count, const GLchar *const*strings);
 GL_APICALL GLuint GL_APIENTRY glCreateShaderProgramv(GLenum type, GLsizei count, const GLchar *const*strings)
 {
+    cham_last_gl = "glCreateShaderProgramv";
     return p_glCreateShaderProgramv(type, count, strings);
 }
 
 static void (GL_APIENTRY *p_glBindProgramPipeline)(GLuint pipeline);
 GL_APICALL void GL_APIENTRY glBindProgramPipeline(GLuint pipeline)
 {
+    cham_last_gl = "glBindProgramPipeline";
     p_glBindProgramPipeline(pipeline);
 }
 
 static void (GL_APIENTRY *p_glDeleteProgramPipelines)(GLsizei n, const GLuint *pipelines);
 GL_APICALL void GL_APIENTRY glDeleteProgramPipelines(GLsizei n, const GLuint *pipelines)
 {
+    cham_last_gl = "glDeleteProgramPipelines";
     p_glDeleteProgramPipelines(n, pipelines);
 }
 
 static void (GL_APIENTRY *p_glGenProgramPipelines)(GLsizei n, GLuint *pipelines);
 GL_APICALL void GL_APIENTRY glGenProgramPipelines(GLsizei n, GLuint *pipelines)
 {
+    cham_last_gl = "glGenProgramPipelines";
     p_glGenProgramPipelines(n, pipelines);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsProgramPipeline)(GLuint pipeline);
 GL_APICALL GLboolean GL_APIENTRY glIsProgramPipeline(GLuint pipeline)
 {
+    cham_last_gl = "glIsProgramPipeline";
     return p_glIsProgramPipeline(pipeline);
 }
 
 static void (GL_APIENTRY *p_glGetProgramPipelineiv)(GLuint pipeline, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetProgramPipelineiv(GLuint pipeline, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetProgramPipelineiv";
     p_glGetProgramPipelineiv(pipeline, pname, params);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1i)(GLuint program, GLint location, GLint v0);
 GL_APICALL void GL_APIENTRY glProgramUniform1i(GLuint program, GLint location, GLint v0)
 {
+    cham_last_gl = "glProgramUniform1i";
     p_glProgramUniform1i(program, location, v0);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2i)(GLuint program, GLint location, GLint v0, GLint v1);
 GL_APICALL void GL_APIENTRY glProgramUniform2i(GLuint program, GLint location, GLint v0, GLint v1)
 {
+    cham_last_gl = "glProgramUniform2i";
     p_glProgramUniform2i(program, location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3i)(GLuint program, GLint location, GLint v0, GLint v1, GLint v2);
 GL_APICALL void GL_APIENTRY glProgramUniform3i(GLuint program, GLint location, GLint v0, GLint v1, GLint v2)
 {
+    cham_last_gl = "glProgramUniform3i";
     p_glProgramUniform3i(program, location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4i)(GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3);
 GL_APICALL void GL_APIENTRY glProgramUniform4i(GLuint program, GLint location, GLint v0, GLint v1, GLint v2, GLint v3)
 {
+    cham_last_gl = "glProgramUniform4i";
     p_glProgramUniform4i(program, location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1ui)(GLuint program, GLint location, GLuint v0);
 GL_APICALL void GL_APIENTRY glProgramUniform1ui(GLuint program, GLint location, GLuint v0)
 {
+    cham_last_gl = "glProgramUniform1ui";
     p_glProgramUniform1ui(program, location, v0);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2ui)(GLuint program, GLint location, GLuint v0, GLuint v1);
 GL_APICALL void GL_APIENTRY glProgramUniform2ui(GLuint program, GLint location, GLuint v0, GLuint v1)
 {
+    cham_last_gl = "glProgramUniform2ui";
     p_glProgramUniform2ui(program, location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3ui)(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2);
 GL_APICALL void GL_APIENTRY glProgramUniform3ui(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2)
 {
+    cham_last_gl = "glProgramUniform3ui";
     p_glProgramUniform3ui(program, location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4ui)(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3);
 GL_APICALL void GL_APIENTRY glProgramUniform4ui(GLuint program, GLint location, GLuint v0, GLuint v1, GLuint v2, GLuint v3)
 {
+    cham_last_gl = "glProgramUniform4ui";
     p_glProgramUniform4ui(program, location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1f)(GLuint program, GLint location, GLfloat v0);
 GL_APICALL void GL_APIENTRY glProgramUniform1f(GLuint program, GLint location, GLfloat v0)
 {
+    cham_last_gl = "glProgramUniform1f";
     p_glProgramUniform1f(program, location, v0);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2f)(GLuint program, GLint location, GLfloat v0, GLfloat v1);
 GL_APICALL void GL_APIENTRY glProgramUniform2f(GLuint program, GLint location, GLfloat v0, GLfloat v1)
 {
+    cham_last_gl = "glProgramUniform2f";
     p_glProgramUniform2f(program, location, v0, v1);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3f)(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2);
 GL_APICALL void GL_APIENTRY glProgramUniform3f(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2)
 {
+    cham_last_gl = "glProgramUniform3f";
     p_glProgramUniform3f(program, location, v0, v1, v2);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4f)(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3);
 GL_APICALL void GL_APIENTRY glProgramUniform4f(GLuint program, GLint location, GLfloat v0, GLfloat v1, GLfloat v2, GLfloat v3)
 {
+    cham_last_gl = "glProgramUniform4f";
     p_glProgramUniform4f(program, location, v0, v1, v2, v3);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1iv)(GLuint program, GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform1iv(GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glProgramUniform1iv";
     p_glProgramUniform1iv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2iv)(GLuint program, GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform2iv(GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glProgramUniform2iv";
     p_glProgramUniform2iv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3iv)(GLuint program, GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform3iv(GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glProgramUniform3iv";
     p_glProgramUniform3iv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4iv)(GLuint program, GLint location, GLsizei count, const GLint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform4iv(GLuint program, GLint location, GLsizei count, const GLint *value)
 {
+    cham_last_gl = "glProgramUniform4iv";
     p_glProgramUniform4iv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1uiv)(GLuint program, GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform1uiv(GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glProgramUniform1uiv";
     p_glProgramUniform1uiv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2uiv)(GLuint program, GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform2uiv(GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glProgramUniform2uiv";
     p_glProgramUniform2uiv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3uiv)(GLuint program, GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform3uiv(GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glProgramUniform3uiv";
     p_glProgramUniform3uiv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4uiv)(GLuint program, GLint location, GLsizei count, const GLuint *value);
 GL_APICALL void GL_APIENTRY glProgramUniform4uiv(GLuint program, GLint location, GLsizei count, const GLuint *value)
 {
+    cham_last_gl = "glProgramUniform4uiv";
     p_glProgramUniform4uiv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform1fv)(GLuint program, GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniform1fv(GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniform1fv";
     p_glProgramUniform1fv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform2fv)(GLuint program, GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniform2fv(GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniform2fv";
     p_glProgramUniform2fv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform3fv)(GLuint program, GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniform3fv(GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniform3fv";
     p_glProgramUniform3fv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniform4fv)(GLuint program, GLint location, GLsizei count, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniform4fv(GLuint program, GLint location, GLsizei count, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniform4fv";
     p_glProgramUniform4fv(program, location, count, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix2fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix2fv";
     p_glProgramUniformMatrix2fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix3fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix3fv";
     p_glProgramUniformMatrix3fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix4fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix4fv";
     p_glProgramUniformMatrix4fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix2x3fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix2x3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix2x3fv";
     p_glProgramUniformMatrix2x3fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix3x2fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix3x2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix3x2fv";
     p_glProgramUniformMatrix3x2fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix2x4fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix2x4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix2x4fv";
     p_glProgramUniformMatrix2x4fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix4x2fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix4x2fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix4x2fv";
     p_glProgramUniformMatrix4x2fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix3x4fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix3x4fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix3x4fv";
     p_glProgramUniformMatrix3x4fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glProgramUniformMatrix4x3fv)(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value);
 GL_APICALL void GL_APIENTRY glProgramUniformMatrix4x3fv(GLuint program, GLint location, GLsizei count, GLboolean transpose, const GLfloat *value)
 {
+    cham_last_gl = "glProgramUniformMatrix4x3fv";
     p_glProgramUniformMatrix4x3fv(program, location, count, transpose, value);
 }
 
 static void (GL_APIENTRY *p_glValidateProgramPipeline)(GLuint pipeline);
 GL_APICALL void GL_APIENTRY glValidateProgramPipeline(GLuint pipeline)
 {
+    cham_last_gl = "glValidateProgramPipeline";
     p_glValidateProgramPipeline(pipeline);
 }
 
 static void (GL_APIENTRY *p_glGetProgramPipelineInfoLog)(GLuint pipeline, GLsizei bufSize, GLsizei *length, GLchar *infoLog);
 GL_APICALL void GL_APIENTRY glGetProgramPipelineInfoLog(GLuint pipeline, GLsizei bufSize, GLsizei *length, GLchar *infoLog)
 {
+    cham_last_gl = "glGetProgramPipelineInfoLog";
     p_glGetProgramPipelineInfoLog(pipeline, bufSize, length, infoLog);
 }
 
 static void (GL_APIENTRY *p_glBindImageTexture)(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format);
 GL_APICALL void GL_APIENTRY glBindImageTexture(GLuint unit, GLuint texture, GLint level, GLboolean layered, GLint layer, GLenum access, GLenum format)
 {
+    cham_last_gl = "glBindImageTexture";
     p_glBindImageTexture(unit, texture, level, layered, layer, access, format);
 }
 
 static void (GL_APIENTRY *p_glGetBooleani_v)(GLenum target, GLuint index, GLboolean *data);
 GL_APICALL void GL_APIENTRY glGetBooleani_v(GLenum target, GLuint index, GLboolean *data)
 {
+    cham_last_gl = "glGetBooleani_v";
     p_glGetBooleani_v(target, index, data);
 }
 
 static void (GL_APIENTRY *p_glMemoryBarrier)(GLbitfield barriers);
 GL_APICALL void GL_APIENTRY glMemoryBarrier(GLbitfield barriers)
 {
+    cham_last_gl = "glMemoryBarrier";
     p_glMemoryBarrier(barriers);
 }
 
 static void (GL_APIENTRY *p_glMemoryBarrierByRegion)(GLbitfield barriers);
 GL_APICALL void GL_APIENTRY glMemoryBarrierByRegion(GLbitfield barriers)
 {
+    cham_last_gl = "glMemoryBarrierByRegion";
     p_glMemoryBarrierByRegion(barriers);
 }
 
 static void (GL_APIENTRY *p_glTexStorage2DMultisample)(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations);
 GL_APICALL void GL_APIENTRY glTexStorage2DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLboolean fixedsamplelocations)
 {
+    cham_last_gl = "glTexStorage2DMultisample";
     p_glTexStorage2DMultisample(target, samples, internalformat, width, height, fixedsamplelocations);
 }
 
 static void (GL_APIENTRY *p_glGetMultisamplefv)(GLenum pname, GLuint index, GLfloat *val);
 GL_APICALL void GL_APIENTRY glGetMultisamplefv(GLenum pname, GLuint index, GLfloat *val)
 {
+    cham_last_gl = "glGetMultisamplefv";
     p_glGetMultisamplefv(pname, index, val);
 }
 
 static void (GL_APIENTRY *p_glSampleMaski)(GLuint maskNumber, GLbitfield mask);
 GL_APICALL void GL_APIENTRY glSampleMaski(GLuint maskNumber, GLbitfield mask)
 {
+    cham_last_gl = "glSampleMaski";
     p_glSampleMaski(maskNumber, mask);
 }
 
 static void (GL_APIENTRY *p_glGetTexLevelParameteriv)(GLenum target, GLint level, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetTexLevelParameteriv(GLenum target, GLint level, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetTexLevelParameteriv";
     p_glGetTexLevelParameteriv(target, level, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetTexLevelParameterfv)(GLenum target, GLint level, GLenum pname, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetTexLevelParameterfv(GLenum target, GLint level, GLenum pname, GLfloat *params)
 {
+    cham_last_gl = "glGetTexLevelParameterfv";
     p_glGetTexLevelParameterfv(target, level, pname, params);
 }
 
 static void (GL_APIENTRY *p_glBindVertexBuffer)(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride);
 GL_APICALL void GL_APIENTRY glBindVertexBuffer(GLuint bindingindex, GLuint buffer, GLintptr offset, GLsizei stride)
 {
+    cham_last_gl = "glBindVertexBuffer";
     p_glBindVertexBuffer(bindingindex, buffer, offset, stride);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribFormat)(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset);
 GL_APICALL void GL_APIENTRY glVertexAttribFormat(GLuint attribindex, GLint size, GLenum type, GLboolean normalized, GLuint relativeoffset)
 {
+    cham_last_gl = "glVertexAttribFormat";
     p_glVertexAttribFormat(attribindex, size, type, normalized, relativeoffset);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribIFormat)(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset);
 GL_APICALL void GL_APIENTRY glVertexAttribIFormat(GLuint attribindex, GLint size, GLenum type, GLuint relativeoffset)
 {
+    cham_last_gl = "glVertexAttribIFormat";
     p_glVertexAttribIFormat(attribindex, size, type, relativeoffset);
 }
 
 static void (GL_APIENTRY *p_glVertexAttribBinding)(GLuint attribindex, GLuint bindingindex);
 GL_APICALL void GL_APIENTRY glVertexAttribBinding(GLuint attribindex, GLuint bindingindex)
 {
+    cham_last_gl = "glVertexAttribBinding";
     p_glVertexAttribBinding(attribindex, bindingindex);
 }
 
 static void (GL_APIENTRY *p_glVertexBindingDivisor)(GLuint bindingindex, GLuint divisor);
 GL_APICALL void GL_APIENTRY glVertexBindingDivisor(GLuint bindingindex, GLuint divisor)
 {
+    cham_last_gl = "glVertexBindingDivisor";
     p_glVertexBindingDivisor(bindingindex, divisor);
 }
 
 static void (GL_APIENTRY *p_glBlendBarrier)(void);
 GL_APICALL void GL_APIENTRY glBlendBarrier(void)
 {
+    cham_last_gl = "glBlendBarrier";
     p_glBlendBarrier();
 }
 
 static void (GL_APIENTRY *p_glCopyImageSubData)(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth);
 GL_APICALL void GL_APIENTRY glCopyImageSubData(GLuint srcName, GLenum srcTarget, GLint srcLevel, GLint srcX, GLint srcY, GLint srcZ, GLuint dstName, GLenum dstTarget, GLint dstLevel, GLint dstX, GLint dstY, GLint dstZ, GLsizei srcWidth, GLsizei srcHeight, GLsizei srcDepth)
 {
+    cham_last_gl = "glCopyImageSubData";
     p_glCopyImageSubData(srcName, srcTarget, srcLevel, srcX, srcY, srcZ, dstName, dstTarget, dstLevel, dstX, dstY, dstZ, srcWidth, srcHeight, srcDepth);
 }
 
 static void (GL_APIENTRY *p_glDebugMessageControl)(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint *ids, GLboolean enabled);
 GL_APICALL void GL_APIENTRY glDebugMessageControl(GLenum source, GLenum type, GLenum severity, GLsizei count, const GLuint *ids, GLboolean enabled)
 {
+    cham_last_gl = "glDebugMessageControl";
     p_glDebugMessageControl(source, type, severity, count, ids, enabled);
 }
 
 static void (GL_APIENTRY *p_glDebugMessageInsert)(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *buf);
 GL_APICALL void GL_APIENTRY glDebugMessageInsert(GLenum source, GLenum type, GLuint id, GLenum severity, GLsizei length, const GLchar *buf)
 {
+    cham_last_gl = "glDebugMessageInsert";
     p_glDebugMessageInsert(source, type, id, severity, length, buf);
 }
 
 static void (GL_APIENTRY *p_glDebugMessageCallback)(GLDEBUGPROC callback, const void *userParam);
 GL_APICALL void GL_APIENTRY glDebugMessageCallback(GLDEBUGPROC callback, const void *userParam)
 {
+    cham_last_gl = "glDebugMessageCallback";
     p_glDebugMessageCallback(callback, userParam);
 }
 
 static GLuint (GL_APIENTRY *p_glGetDebugMessageLog)(GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog);
 GL_APICALL GLuint GL_APIENTRY glGetDebugMessageLog(GLuint count, GLsizei bufSize, GLenum *sources, GLenum *types, GLuint *ids, GLenum *severities, GLsizei *lengths, GLchar *messageLog)
 {
+    cham_last_gl = "glGetDebugMessageLog";
     return p_glGetDebugMessageLog(count, bufSize, sources, types, ids, severities, lengths, messageLog);
 }
 
 static void (GL_APIENTRY *p_glPushDebugGroup)(GLenum source, GLuint id, GLsizei length, const GLchar *message);
 GL_APICALL void GL_APIENTRY glPushDebugGroup(GLenum source, GLuint id, GLsizei length, const GLchar *message)
 {
+    cham_last_gl = "glPushDebugGroup";
     p_glPushDebugGroup(source, id, length, message);
 }
 
 static void (GL_APIENTRY *p_glPopDebugGroup)(void);
 GL_APICALL void GL_APIENTRY glPopDebugGroup(void)
 {
+    cham_last_gl = "glPopDebugGroup";
     p_glPopDebugGroup();
 }
 
 static void (GL_APIENTRY *p_glObjectLabel)(GLenum identifier, GLuint name, GLsizei length, const GLchar *label);
 GL_APICALL void GL_APIENTRY glObjectLabel(GLenum identifier, GLuint name, GLsizei length, const GLchar *label)
 {
+    cham_last_gl = "glObjectLabel";
     p_glObjectLabel(identifier, name, length, label);
 }
 
 static void (GL_APIENTRY *p_glGetObjectLabel)(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label);
 GL_APICALL void GL_APIENTRY glGetObjectLabel(GLenum identifier, GLuint name, GLsizei bufSize, GLsizei *length, GLchar *label)
 {
+    cham_last_gl = "glGetObjectLabel";
     p_glGetObjectLabel(identifier, name, bufSize, length, label);
 }
 
 static void (GL_APIENTRY *p_glObjectPtrLabel)(const void *ptr, GLsizei length, const GLchar *label);
 GL_APICALL void GL_APIENTRY glObjectPtrLabel(const void *ptr, GLsizei length, const GLchar *label)
 {
+    cham_last_gl = "glObjectPtrLabel";
     p_glObjectPtrLabel(ptr, length, label);
 }
 
 static void (GL_APIENTRY *p_glGetObjectPtrLabel)(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label);
 GL_APICALL void GL_APIENTRY glGetObjectPtrLabel(const void *ptr, GLsizei bufSize, GLsizei *length, GLchar *label)
 {
+    cham_last_gl = "glGetObjectPtrLabel";
     p_glGetObjectPtrLabel(ptr, bufSize, length, label);
 }
 
 static void (GL_APIENTRY *p_glGetPointerv)(GLenum pname, void **params);
 GL_APICALL void GL_APIENTRY glGetPointerv(GLenum pname, void **params)
 {
+    cham_last_gl = "glGetPointerv";
     p_glGetPointerv(pname, params);
 }
 
 static void (GL_APIENTRY *p_glEnablei)(GLenum target, GLuint index);
 GL_APICALL void GL_APIENTRY glEnablei(GLenum target, GLuint index)
 {
+    cham_last_gl = "glEnablei";
     p_glEnablei(target, index);
 }
 
 static void (GL_APIENTRY *p_glDisablei)(GLenum target, GLuint index);
 GL_APICALL void GL_APIENTRY glDisablei(GLenum target, GLuint index)
 {
+    cham_last_gl = "glDisablei";
     p_glDisablei(target, index);
 }
 
 static void (GL_APIENTRY *p_glBlendEquationi)(GLuint buf, GLenum mode);
 GL_APICALL void GL_APIENTRY glBlendEquationi(GLuint buf, GLenum mode)
 {
+    cham_last_gl = "glBlendEquationi";
     p_glBlendEquationi(buf, mode);
 }
 
 static void (GL_APIENTRY *p_glBlendEquationSeparatei)(GLuint buf, GLenum modeRGB, GLenum modeAlpha);
 GL_APICALL void GL_APIENTRY glBlendEquationSeparatei(GLuint buf, GLenum modeRGB, GLenum modeAlpha)
 {
+    cham_last_gl = "glBlendEquationSeparatei";
     p_glBlendEquationSeparatei(buf, modeRGB, modeAlpha);
 }
 
 static void (GL_APIENTRY *p_glBlendFunci)(GLuint buf, GLenum src, GLenum dst);
 GL_APICALL void GL_APIENTRY glBlendFunci(GLuint buf, GLenum src, GLenum dst)
 {
+    cham_last_gl = "glBlendFunci";
     p_glBlendFunci(buf, src, dst);
 }
 
 static void (GL_APIENTRY *p_glBlendFuncSeparatei)(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha);
 GL_APICALL void GL_APIENTRY glBlendFuncSeparatei(GLuint buf, GLenum srcRGB, GLenum dstRGB, GLenum srcAlpha, GLenum dstAlpha)
 {
+    cham_last_gl = "glBlendFuncSeparatei";
     p_glBlendFuncSeparatei(buf, srcRGB, dstRGB, srcAlpha, dstAlpha);
 }
 
 static void (GL_APIENTRY *p_glColorMaski)(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a);
 GL_APICALL void GL_APIENTRY glColorMaski(GLuint index, GLboolean r, GLboolean g, GLboolean b, GLboolean a)
 {
+    cham_last_gl = "glColorMaski";
     p_glColorMaski(index, r, g, b, a);
 }
 
 static GLboolean (GL_APIENTRY *p_glIsEnabledi)(GLenum target, GLuint index);
 GL_APICALL GLboolean GL_APIENTRY glIsEnabledi(GLenum target, GLuint index)
 {
+    cham_last_gl = "glIsEnabledi";
     return p_glIsEnabledi(target, index);
 }
 
 static void (GL_APIENTRY *p_glDrawElementsBaseVertex)(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex);
 GL_APICALL void GL_APIENTRY glDrawElementsBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLint basevertex)
 {
+    cham_last_gl = "glDrawElementsBaseVertex";
     p_glDrawElementsBaseVertex(mode, count, type, indices, basevertex);
 }
 
 static void (GL_APIENTRY *p_glDrawRangeElementsBaseVertex)(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex);
 GL_APICALL void GL_APIENTRY glDrawRangeElementsBaseVertex(GLenum mode, GLuint start, GLuint end, GLsizei count, GLenum type, const void *indices, GLint basevertex)
 {
+    cham_last_gl = "glDrawRangeElementsBaseVertex";
     p_glDrawRangeElementsBaseVertex(mode, start, end, count, type, indices, basevertex);
 }
 
 static void (GL_APIENTRY *p_glDrawElementsInstancedBaseVertex)(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex);
 GL_APICALL void GL_APIENTRY glDrawElementsInstancedBaseVertex(GLenum mode, GLsizei count, GLenum type, const void *indices, GLsizei instancecount, GLint basevertex)
 {
+    cham_last_gl = "glDrawElementsInstancedBaseVertex";
     p_glDrawElementsInstancedBaseVertex(mode, count, type, indices, instancecount, basevertex);
 }
 
 static void (GL_APIENTRY *p_glFramebufferTexture)(GLenum target, GLenum attachment, GLuint texture, GLint level);
 GL_APICALL void GL_APIENTRY glFramebufferTexture(GLenum target, GLenum attachment, GLuint texture, GLint level)
 {
+    cham_last_gl = "glFramebufferTexture";
     p_glFramebufferTexture(target, attachment, texture, level);
 }
 
 static void (GL_APIENTRY *p_glPrimitiveBoundingBox)(GLfloat minX, GLfloat minY, GLfloat minZ, GLfloat minW, GLfloat maxX, GLfloat maxY, GLfloat maxZ, GLfloat maxW);
 GL_APICALL void GL_APIENTRY glPrimitiveBoundingBox(GLfloat minX, GLfloat minY, GLfloat minZ, GLfloat minW, GLfloat maxX, GLfloat maxY, GLfloat maxZ, GLfloat maxW)
 {
+    cham_last_gl = "glPrimitiveBoundingBox";
     p_glPrimitiveBoundingBox(minX, minY, minZ, minW, maxX, maxY, maxZ, maxW);
 }
 
 static GLenum (GL_APIENTRY *p_glGetGraphicsResetStatus)(void);
 GL_APICALL GLenum GL_APIENTRY glGetGraphicsResetStatus(void)
 {
+    cham_last_gl = "glGetGraphicsResetStatus";
     return p_glGetGraphicsResetStatus();
 }
 
 static void (GL_APIENTRY *p_glReadnPixels)(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data);
 GL_APICALL void GL_APIENTRY glReadnPixels(GLint x, GLint y, GLsizei width, GLsizei height, GLenum format, GLenum type, GLsizei bufSize, void *data)
 {
+    cham_last_gl = "glReadnPixels";
     p_glReadnPixels(x, y, width, height, format, type, bufSize, data);
 }
 
 static void (GL_APIENTRY *p_glGetnUniformfv)(GLuint program, GLint location, GLsizei bufSize, GLfloat *params);
 GL_APICALL void GL_APIENTRY glGetnUniformfv(GLuint program, GLint location, GLsizei bufSize, GLfloat *params)
 {
+    cham_last_gl = "glGetnUniformfv";
     p_glGetnUniformfv(program, location, bufSize, params);
 }
 
 static void (GL_APIENTRY *p_glGetnUniformiv)(GLuint program, GLint location, GLsizei bufSize, GLint *params);
 GL_APICALL void GL_APIENTRY glGetnUniformiv(GLuint program, GLint location, GLsizei bufSize, GLint *params)
 {
+    cham_last_gl = "glGetnUniformiv";
     p_glGetnUniformiv(program, location, bufSize, params);
 }
 
 static void (GL_APIENTRY *p_glGetnUniformuiv)(GLuint program, GLint location, GLsizei bufSize, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetnUniformuiv(GLuint program, GLint location, GLsizei bufSize, GLuint *params)
 {
+    cham_last_gl = "glGetnUniformuiv";
     p_glGetnUniformuiv(program, location, bufSize, params);
 }
 
 static void (GL_APIENTRY *p_glMinSampleShading)(GLfloat value);
 GL_APICALL void GL_APIENTRY glMinSampleShading(GLfloat value)
 {
+    cham_last_gl = "glMinSampleShading";
     p_glMinSampleShading(value);
 }
 
 static void (GL_APIENTRY *p_glPatchParameteri)(GLenum pname, GLint value);
 GL_APICALL void GL_APIENTRY glPatchParameteri(GLenum pname, GLint value)
 {
+    cham_last_gl = "glPatchParameteri";
     p_glPatchParameteri(pname, value);
 }
 
 static void (GL_APIENTRY *p_glTexParameterIiv)(GLenum target, GLenum pname, const GLint *params);
 GL_APICALL void GL_APIENTRY glTexParameterIiv(GLenum target, GLenum pname, const GLint *params)
 {
+    cham_last_gl = "glTexParameterIiv";
     p_glTexParameterIiv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glTexParameterIuiv)(GLenum target, GLenum pname, const GLuint *params);
 GL_APICALL void GL_APIENTRY glTexParameterIuiv(GLenum target, GLenum pname, const GLuint *params)
 {
+    cham_last_gl = "glTexParameterIuiv";
     p_glTexParameterIuiv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetTexParameterIiv)(GLenum target, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetTexParameterIiv(GLenum target, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetTexParameterIiv";
     p_glGetTexParameterIiv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetTexParameterIuiv)(GLenum target, GLenum pname, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetTexParameterIuiv(GLenum target, GLenum pname, GLuint *params)
 {
+    cham_last_gl = "glGetTexParameterIuiv";
     p_glGetTexParameterIuiv(target, pname, params);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameterIiv)(GLuint sampler, GLenum pname, const GLint *param);
 GL_APICALL void GL_APIENTRY glSamplerParameterIiv(GLuint sampler, GLenum pname, const GLint *param)
 {
+    cham_last_gl = "glSamplerParameterIiv";
     p_glSamplerParameterIiv(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glSamplerParameterIuiv)(GLuint sampler, GLenum pname, const GLuint *param);
 GL_APICALL void GL_APIENTRY glSamplerParameterIuiv(GLuint sampler, GLenum pname, const GLuint *param)
 {
+    cham_last_gl = "glSamplerParameterIuiv";
     p_glSamplerParameterIuiv(sampler, pname, param);
 }
 
 static void (GL_APIENTRY *p_glGetSamplerParameterIiv)(GLuint sampler, GLenum pname, GLint *params);
 GL_APICALL void GL_APIENTRY glGetSamplerParameterIiv(GLuint sampler, GLenum pname, GLint *params)
 {
+    cham_last_gl = "glGetSamplerParameterIiv";
     p_glGetSamplerParameterIiv(sampler, pname, params);
 }
 
 static void (GL_APIENTRY *p_glGetSamplerParameterIuiv)(GLuint sampler, GLenum pname, GLuint *params);
 GL_APICALL void GL_APIENTRY glGetSamplerParameterIuiv(GLuint sampler, GLenum pname, GLuint *params)
 {
+    cham_last_gl = "glGetSamplerParameterIuiv";
     p_glGetSamplerParameterIuiv(sampler, pname, params);
 }
 
 static void (GL_APIENTRY *p_glTexBuffer)(GLenum target, GLenum internalformat, GLuint buffer);
 GL_APICALL void GL_APIENTRY glTexBuffer(GLenum target, GLenum internalformat, GLuint buffer)
 {
+    cham_last_gl = "glTexBuffer";
     p_glTexBuffer(target, internalformat, buffer);
 }
 
 static void (GL_APIENTRY *p_glTexBufferRange)(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size);
 GL_APICALL void GL_APIENTRY glTexBufferRange(GLenum target, GLenum internalformat, GLuint buffer, GLintptr offset, GLsizeiptr size)
 {
+    cham_last_gl = "glTexBufferRange";
     p_glTexBufferRange(target, internalformat, buffer, offset, size);
 }
 
 static void (GL_APIENTRY *p_glTexStorage3DMultisample)(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations);
 GL_APICALL void GL_APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei samples, GLenum internalformat, GLsizei width, GLsizei height, GLsizei depth, GLboolean fixedsamplelocations)
 {
+    cham_last_gl = "glTexStorage3DMultisample";
     p_glTexStorage3DMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations);
 }
 
