@@ -224,11 +224,59 @@ flowchart LR
 No `--drm` flag or plasma-workspace change is needed: with neither
 `WAYLAND_DISPLAY` nor `DISPLAY` set, KWin picks its DRM backend by itself.
 
+## What a phone needs
+
+Chameleon uses only public Android APIs and the phone's own GPU driver
+(through `/system/lib64/libEGL.so` / `libGLESv2.so`); no root, no access to
+`/dev/dri`, no Vulkan and no desktop OpenGL. What the driver must offer:
+
+**System**
+
+| | Needed for |
+|---|---|
+| arm64 (aarch64), **Android 10** (API 29) or newer | the app (`ASurfaceControl`) and Termux |
+| [Termux from GitHub releases](https://github.com/termux/termux-app/releases) | the app shares its signing key to run as the Termux user |
+| `AHardwareBuffer` (API 26) that can be allocated as RGBA8888 / RGBX8888 with `GPU_SAMPLED_IMAGE \| GPU_COLOR_OUTPUT`, and sent over a Unix socket | every frame: KWin's output and app buffers |
+| a dmabuf inside the gralloc handle (`AHardwareBuffer_getNativeHandle`) | buffers are matched across processes by it |
+| `AImageReader` from `libmediandk` (API 26) | GPU rendering for Wayland apps; without it apps fall back to Mesa |
+| Android sync fences (sync_file) | acquire/release fences between KWin, apps and the app |
+
+**EGL** (1.4 or newer)
+
+| Extension | | Needed for |
+|---|---|---|
+| `EGL_KHR_image_base`, `EGL_ANDROID_image_native_buffer` | required | `AHardwareBuffer` → `EGLImage` (KWin's buffers, app buffers) |
+| `EGL_ANDROID_get_native_client_buffer` | required | the same, from an `AHardwareBuffer` handle |
+| `EGL_KHR_no_config_context` | required | KWin refuses to start without it |
+| `EGL_KHR_surfaceless_context` | required | KWin refuses to start without it |
+| `EGL_ANDROID_native_fence_sync` + `EGL_KHR_wait_sync` | recommended | fences for KWin's commits; without them KWin falls back to `glFinish()` |
+| `EGL_KHR_fence_sync` | recommended | sync objects |
+
+**OpenGL ES** (what KWin checks, `EglContext::checkSupported`)
+
+| Requirement | | Needed for |
+|---|---|---|
+| **OpenGL ES 3.0** or newer (or 2.0 + `GL_OES_texture_3D`) | required | KWin's renderer; 3.2 recommended |
+| `GL_OES_EGL_image` (`glEGLImageTargetTexture2DOES`) | required | textures from `EGLImage`s |
+| `GL_EXT_unpack_subimage` | required | KWin's texture uploads |
+| `GL_EXT_read_format_bgra` | required | KWin's screenshots / read-backs |
+| `GL_OES_EGL_image_external` | optional | external-only buffer formats |
+
+Qt, GTK and other apps need nothing beyond this: Qt built for desktop OpenGL
+is steered onto OpenGL ES automatically.
+
+Run `chameleon-probe` on the phone to check all of it. It lists every
+extension above as PASS / FAIL / WARN, allocates and renders into an
+`AHardwareBuffer`, passes it across a socket, and renders an `AImageReader`
+frame. Driver quirks found along the way (a GLSL construct the driver
+rejects, an extension that misbehaves) are worked around in the EGL vendor
+rather than required of the phone.
+
 ## Getting started
 
-**Requirements:** an arm64 Android 10+ device, and
+**Requirements:** see [What a phone needs](#what-a-phone-needs), plus
 [Termux from GitHub releases](https://github.com/termux/termux-app/releases)
-(the app shares its signing key) with KWin installed.
+with KWin installed.
 
 1. Download the `chameleon-<commit>` artifact from the latest
    [Actions run](../../actions/workflows/build.yml) and unzip it.

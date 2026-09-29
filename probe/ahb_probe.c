@@ -331,8 +331,9 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     report_ext(exts, "EGL_ANDROID_image_native_buffer", 1, "AHB -> EGLImage");
     report_ext(exts, "EGL_ANDROID_get_native_client_buffer", 1, "AHB -> EGLClientBuffer");
     report_ext(exts, "EGL_KHR_surfaceless_context", 1, "required by KWin");
-    report_ext(exts, "EGL_KHR_no_config_context", 0, "required by KWin; shim can emulate");
-    report_ext(exts, "EGL_ANDROID_native_fence_sync", 0, "sync_file fences for IN_FENCE_FD");
+    report_ext(exts, "EGL_KHR_no_config_context", 1, "required by KWin");
+    report_ext(exts, "EGL_ANDROID_native_fence_sync", 0, "sync_file fences for KWin's commits (else glFinish)");
+    report_ext(exts, "EGL_KHR_wait_sync", 0, "with native_fence_sync: KWin's fences");
     report_ext(exts, "EGL_KHR_fence_sync", 0, "fences");
     report_ext(exts, "EGL_EXT_image_dma_buf_import", 0, "native dmabuf import; shim fakes it if absent");
     report_ext(exts, "EGL_EXT_image_dma_buf_import_modifiers", 0, "shim fakes it if absent");
@@ -400,7 +401,15 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
              gl.GetString(GL_RENDERER), gl.GetString(GL_VERSION));
     result(1, 1, "GL strings", msg);
     const char *glexts = (const char *)gl.GetString(GL_EXTENSIONS);
+    const char *version = (const char *)gl.GetString(GL_VERSION);
+    int gl_major = 0, gl_minor = 0;
+    if (version)
+        sscanf(version, "OpenGL ES %d.%d", &gl_major, &gl_minor);
+    snprintf(msg, sizeof msg, "OpenGL ES %d.%d (KWin: 3.0, or 2.0 + GL_OES_texture_3D)", gl_major, gl_minor);
+    result(gl_major >= 3 || (gl_major == 2 && has_ext(glexts, "GL_OES_texture_3D")), 1, "OpenGL ES version", msg);
     report_ext(glexts, "GL_OES_EGL_image", 1, "EGLImage -> texture");
+    report_ext(glexts, "GL_EXT_unpack_subimage", 1, "required by KWin (texture uploads)");
+    report_ext(glexts, "GL_EXT_read_format_bgra", 1, "required by KWin (read-backs)");
     report_ext(glexts, "GL_OES_EGL_image_external", 0, "external textures");
     report_ext(glexts, "GL_EXT_EGL_image_storage", 0, "immutable EGLImage storage");
     result(egl.GetNativeClientBufferANDROID && egl.CreateImageKHR && gl.EGLImageTargetTexture2DOES, 1,
