@@ -46,6 +46,26 @@ static struct {
 } g_flip;
 static uint32_t g_sequence;
 
+/* Activity counters, logged every 5 s while something happens. */
+static struct {
+    unsigned commits, presented, not_shown, flips, simulated;
+    uint64_t since;
+} g_stats;
+
+static void stats_maybe_log_locked(void)
+{
+    uint64_t now = now_ns();
+    if (!g_stats.since)
+        g_stats.since = now;
+    if (now - g_stats.since < 5000000000ull)
+        return;
+    if (g_stats.commits || g_stats.flips)
+        cham_log("last 5 s: %u commits, %u presented, %u not shown (no app surface), %u flips (%u simulated)",
+                 g_stats.commits, g_stats.presented, g_stats.not_shown, g_stats.flips, g_stats.simulated);
+    memset(&g_stats, 0, sizeof g_stats);
+    g_stats.since = now;
+}
+
 static int (*send_ahb)(const AHardwareBuffer *, int);
 
 static const char *socket_path(void)
@@ -79,6 +99,8 @@ static void emit_flip_locked(uint64_t ts_ns)
     if (write(g_flip.event_fd, &ev, sizeof ev) != (ssize_t)sizeof ev)
         cham_log("cannot deliver page-flip event: %s", strerror(errno));
     g_flip.active = 0;
+    g_stats.flips++;
+    g_stats.simulated += g_flip.simulated;
     pthread_cond_broadcast(&g_cond);
 }
 
@@ -108,8 +130,11 @@ static void *vblank_main(void *arg)
     (void)arg;
     pthread_mutex_lock(&g_lock);
     for (;;) {
+        stats_maybe_log_locked();
         if (!g_flip.active) {
-            pthread_cond_wait(&g_cond, &g_lock);
+            struct timespec idle;
+            timespec_at(&idle, now_ns() + 1000000000ull);
+            pthread_cond_timedwait(&g_cond, &g_lock, &idle);
             continue;
         }
         uint64_t now = now_ns();
@@ -137,8 +162,11 @@ static int send_msg_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, i
 
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
 {
-    if (g_sock < 0 || !g_cfg_w || !g_cfg_h)
+    g_stats.commits++;
+    if (g_sock < 0 || !g_cfg_w || !g_cfg_h) {
+        g_stats.not_shown++;
         return 0;
+    }
     if (bo->slot < 0 || bo->slot_gen != g_gen) {
         int slot = -1;
         for (int i = 0; i < MAX_SLOTS; i++) {
@@ -159,7 +187,9 @@ int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
         bo->slot = slot;
         bo->slot_gen = g_gen;
     }
-    return send_msg_locked(CHAM_PRESENT, (uint32_t)bo->slot, frame, now_ns(), in_fence) == 0;
+    int ok = send_msg_locked(CHAM_PRESENT, (uint32_t)bo->slot, frame, now_ns(), in_fence) == 0;
+    g_stats.presented += ok;
+    return ok;
 }
 
 void link_forget_bo_locked(struct cham_bo *bo)

@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 
 #include <atomic>
 #include <mutex>
@@ -202,6 +203,32 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
     unref(ctx);
 }
 
+// Activity counters, logged every 5 s (logcat -s Chameleon).
+struct {
+    unsigned presents, shown, copied, skipped;
+    int64_t since;
+} g_stats;
+
+int64_t mono_ns()
+{
+    timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+void stats_log_locked()
+{
+    int64_t now = mono_ns();
+    if (!g_stats.since)
+        g_stats.since = now;
+    if (now - g_stats.since < 5000000000)
+        return;
+    LOGI("last 5 s: %u presents, %u shown (%u via copy), %u skipped (no surface/buffer or copy failed); surface %dx%d",
+         g_stats.presents, g_stats.shown, g_stats.copied, g_stats.skipped, g_width, g_height);
+    g_stats = {};
+    g_stats.since = now;
+}
+
 // ---- copy mode (runs on the server thread, which owns the GL context) ----
 
 EGLDisplay g_dpy = EGL_NO_DISPLAY;
@@ -349,6 +376,7 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     int pi = gl_init() ? pool_acquire_locked() : -1;
     if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
         // Can't copy: skip the frame but keep the producer's clock running.
+        g_stats.skipped++;
         if (fence >= 0)
             close(fence);
         send_locked(CHAM_RELEASE, id, 0, 0);
@@ -356,6 +384,8 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
         return;
     }
     PoolBuf &p = g_pool[pi];
+    g_stats.shown++;
+    g_stats.copied++;
     gpu_wait(p.release_fence);  // SurfaceFlinger finished scanning it out
     p.release_fence = -1;
     gpu_wait(fence);            // the producer finished rendering
@@ -397,9 +427,12 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
 void present(uint32_t id, uint64_t frame, int fence)
 {
     std::lock_guard<std::mutex> lock(g_lock);
+    g_stats.presents++;
+    stats_log_locked();
     Buffer *buf = id < kMaxBuffers ? &g_buffers[id] : nullptr;
     if (!g_sc || !buf || !buf->ahb) {
         // Nothing to show on: hand the buffer straight back.
+        g_stats.skipped++;
         if (fence >= 0)
             close(fence);
         send_locked(CHAM_RELEASE, id, 0, 0);
@@ -410,6 +443,7 @@ void present(uint32_t id, uint64_t frame, int fence)
         present_copy_locked(id, frame, fence, buf);
         return;
     }
+    g_stats.shown++;
 
     ASurfaceTransaction *txn = ASurfaceTransaction_create();
     // Takes ownership of the fence; SurfaceFlinger waits on it, not us.
