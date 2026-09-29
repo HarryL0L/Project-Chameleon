@@ -507,8 +507,6 @@ TRACED_VOID(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES", (unsigne
             (target, image))
 TRACED_VOID(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES",
             (unsigned target, void *image), (target, image))
-TRACED(unsigned, GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT", (void), ())
-TRACED(unsigned, GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR", (void), ())
 TRACED(EGLSyncKHR, CreateSyncKHR, "eglCreateSyncKHR", (EGLDisplay d, EGLenum t, const EGLint *a), (d, t, a))
 TRACED(EGLBoolean, DestroySyncKHR, "eglDestroySyncKHR", (EGLDisplay d, EGLSyncKHR s), (d, s))
 TRACED(EGLint, ClientWaitSyncKHR, "eglClientWaitSyncKHR", (EGLDisplay d, EGLSyncKHR s, EGLint f, EGLTimeKHR t),
@@ -529,8 +527,6 @@ static const struct {
     TR(EndQueryEXT, "glEndQueryEXT"),
     TR(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES"),
     TR(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES"),
-    TR(GetGraphicsResetStatusEXT, "glGetGraphicsResetStatusEXT"),
-    TR(GetGraphicsResetStatusKHR, "glGetGraphicsResetStatusKHR"),
     TR(CreateSyncKHR, "eglCreateSyncKHR"),
     TR(DestroySyncKHR, "eglDestroySyncKHR"),
     TR(ClientWaitSyncKHR, "eglClientWaitSyncKHR"),
@@ -573,11 +569,56 @@ static const struct {
 };
 
 /* Our function for `name`, or Android's; NULL if neither has it. */
+/* glGetGraphicsResetStatus under any of its names. Apps with robustness
+ * (Qt asks for it; the context attributes are dropped, see eglCreateContext)
+ * call it on every make-current and treat anything but GL_NO_ERROR as a
+ * lost context, so the ES entry point is used and a reset is logged. */
+static unsigned reset_status(void)
+{
+    static unsigned (*fn)(void);
+    static int resolved;
+    if (!resolved) {
+        *(void **)&fn = cham_gl_get_proc("glGetGraphicsResetStatus");
+        if (!fn)
+            *(void **)&fn = real("glGetGraphicsResetStatusEXT");
+        if (!fn)
+            *(void **)&fn = real("glGetGraphicsResetStatusKHR");
+        resolved = 1;
+    }
+    unsigned status = fn ? fn() : 0;
+    static int logged;
+    if (status && logged++ < 4)
+        cham_log("the GPU driver reports a context reset (0x%x)", status);
+    return status;
+}
+
+/* Desktop-GL extension names (glFooARB) have no OpenGL ES entry points.
+ * Android's loader may still hand out a forwarder for any gl* name, so they
+ * are answered here: the ES core function of the same name, or nothing. */
+static void *desktop_gl_proc(const char *name)
+{
+    size_t n = strlen(name);
+    if (n < 5 || name[0] != 'g' || name[1] != 'l' || strcmp(name + n - 3, "ARB") != 0)
+        return NULL;
+    char core[128];
+    if (n - 3 >= sizeof core)
+        return (void *)-1;
+    memcpy(core, name, n - 3);
+    core[n - 3] = 0;
+    void *fn = cham_gl_get_proc(core);
+    return fn ? fn : (void *)-1;
+}
+
 void *cham_egl_get_proc(const char *name)
 {
     for (size_t i = 0; i < sizeof k_own / sizeof k_own[0]; i++)
         if (strcmp(name, k_own[i].name) == 0)
             return k_own[i].fn;
+    if (strncmp(name, "glGetGraphicsResetStatus", 24) == 0)
+        return (void *)reset_status;
+    void *desktop = desktop_gl_proc(name);
+    if (desktop)
+        return desktop == (void *)-1 ? NULL : desktop;
     void *fn = real(name);
     for (size_t i = 0; fn && i < sizeof k_traced / sizeof k_traced[0]; i++) {
         if (strcmp(name, k_traced[i].name) == 0) {

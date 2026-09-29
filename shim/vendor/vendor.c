@@ -177,7 +177,7 @@ static const char *get_vendor_string(int name)
 
 static void *get_proc_address(const char *name)
 {
-    if (name[0] == 'g' && name[1] == 'l') {
+    if (name[0] == 'g' && name[1] == 'l' && strncmp(name, "glGetGraphicsResetStatus", 24) != 0) {
         void *fn = cham_gl_get_proc(name);
         if (fn)
             return fn;

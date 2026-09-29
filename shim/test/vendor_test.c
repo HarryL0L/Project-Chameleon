@@ -103,6 +103,9 @@ int main(void)
         query_counter(1, 0x8E28 /* GL_TIMESTAMP_EXT */);
     CHECK(st->query_counter_calls == 1, "GL extension function through glvnd's GL dispatch");
 
+    GLenum (*reset_arb)(void) = (GLenum(*)(void))eglGetProcAddress("glGetGraphicsResetStatusARB");
+    CHECK(reset_arb && reset_arb() == GL_NO_ERROR, "glGetGraphicsResetStatusARB (Qt) answers GL_NO_ERROR");
+
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures != 0;
