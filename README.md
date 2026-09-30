@@ -312,7 +312,7 @@ Chameleon uses only public Android APIs and the phone's own GPU driver
 |---|---|---|
 | **OpenGL ES 3.0** or newer (or 2.0 + `GL_OES_texture_3D`) | required | KWin's renderer; 3.2 recommended |
 | `GL_OES_EGL_image` (`glEGLImageTargetTexture2DOES`) | required | textures from `EGLImage`s |
-| `GL_EXT_unpack_subimage` | required | KWin's texture uploads |
+| `GL_EXT_unpack_subimage` | required, or OpenGL ES 3.0 | KWin's texture uploads; core in ES 3.0, where Chameleon adds the name KWin asks for (Adreno, PowerVR and newer Mali drivers don't list it) |
 | `GL_EXT_read_format_bgra` | required | KWin's screenshots / read-backs |
 | `GL_OES_EGL_image_external` | optional | external-only buffer formats |
 

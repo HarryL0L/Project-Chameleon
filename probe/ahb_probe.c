@@ -408,7 +408,11 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     snprintf(msg, sizeof msg, "OpenGL ES %d.%d (KWin: 3.0, or 2.0 + GL_OES_texture_3D)", gl_major, gl_minor);
     result(gl_major >= 3 || (gl_major == 2 && has_ext(glexts, "GL_OES_texture_3D")), 1, "OpenGL ES version", msg);
     report_ext(glexts, "GL_OES_EGL_image", 1, "EGLImage -> texture");
-    report_ext(glexts, "GL_EXT_unpack_subimage", 1, "required by KWin (texture uploads)");
+    if (gl_major >= 3 && !has_ext(glexts, "GL_EXT_unpack_subimage"))
+        result(1, 1, "extension",
+               "GL_EXT_unpack_subimage (core in OpenGL ES 3.0; Chameleon adds the name KWin asks for)");
+    else
+        report_ext(glexts, "GL_EXT_unpack_subimage", 1, "required by KWin (texture uploads)");
     report_ext(glexts, "GL_EXT_read_format_bgra", 1, "required by KWin (read-backs)");
     report_ext(glexts, "GL_OES_EGL_image_external", 0, "external textures");
     report_ext(glexts, "GL_EXT_EGL_image_storage", 0, "optional: not used");
