@@ -5,8 +5,8 @@
 <h1 align="center">Project Chameleon</h1>
 
 <p align="center">
-  <b>Linux Wayland desktops from Termux, shown in an Android app and drawn by the phone's own GPU.</b><br>
-  Unmodified compositors (KWin and Plasma today) · vendor GLES driver · <code>AHardwareBuffer</code>s, no CPU copies · no root
+  <b>Experimental display for Termux Wayland compositors, aiming to be universal.</b><br>
+  The Android app is the compositor's screen, drawn by the phone's own GPU · works with KWin, including full Plasma · <code>AHardwareBuffer</code>s, no CPU copies · no root
 </p>
 
 <p align="center">
