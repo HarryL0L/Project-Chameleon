@@ -1,6 +1,6 @@
 # Chameleon for Termux (the shim)
 
-Runs the Termux `kwin_wayland` (6.7.5, unmodified) and a Plasma session on
+Runs the Termux `kwin_wayland` (6.7.5, no Chameleon-specific patches) and a Plasma session on
 the Chameleon app's screen, rendering with Android's GPU driver.
 
 | file | replaces | does |
@@ -31,7 +31,7 @@ chameleon startplasma-wayland        # a Plasma session
 none). Every `kwin_wayland` started inside - directly, by
 `kwin_wayland_wrapper` or by `startplasma-wayland` - is then
 `bin/kwin_wayland`, which attaches the shim to that one process and runs the
-real, unmodified KWin. No `--drm` is needed anywhere: with neither
+real KWin. No `--drm` is needed anywhere: with neither
 `WAYLAND_DISPLAY` nor `DISPLAY` set KWin picks the DRM backend by itself (the
 script adds `--drm` anyway unless another backend is asked for), so
 plasma-workspace needs no change either.

@@ -17,11 +17,11 @@
 
 Chameleon gives Linux graphics software in Termux what it expects from a PC
 with a real graphics card, backed by Android: a display, GPU buffers and a GPU
-driver. The first target is the stock Termux build of **KWin**, with a whole
+driver. The first target is the Termux build of **KWin**, with a whole
 Plasma session on top of it:
 
 - KWin runs with its normal **DRM backend**, not nested inside another
-  compositor, and without a single patch.
+  compositor, and with no Chameleon-specific patches.
 - Rendering goes through Android's **vendor GPU driver** (Mali, Adreno, …)
   via EGL/GLES. It doesn't use a software rasteriser.
 - Finished frames travel to an Android app as **`AHardwareBuffer`s plus
@@ -45,15 +45,15 @@ flowchart TB
         direction TB
         CMD(["chameleon startplasma-wayland"])
         APPS["Wayland apps<br/>Konsole, Dolphin, Firefox …"]
-        subgraph K["kwin_wayland process: unmodified KWin, DRM backend"]
+        subgraph K["kwin_wayland process: Termux's KWin, no Chameleon patches, DRM backend"]
             direction TB
             CORE["KWin compositor<br/>scene · windows · DRM backend"]
-            GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
-            VEND["libEGL_chameleon.so<br/>glvnd EGL vendor"]
             GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
-            KMS["libchameleon.so<br/>fake KMS device"]
+            KMS["libchameleon.so<br/>fake KMS device · app buffers"]
             INP["input thread<br/>fake-input client"]
         end
+        GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
+        VEND["libEGL_chameleon.so<br/>glvnd EGL vendor (KWin and apps)"]
     end
 
     subgraph A["Android"]
@@ -66,11 +66,13 @@ flowchart TB
 
     CMD --> CORE
     APPS <-->|Wayland| CORE
+    APPS -->|EGL / GLES| GLVND
+    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| KMS
     CORE -->|EGL / GLES| GLVND --> VEND --> DRV
     CORE -->|buffers| GBM
     GBM -.->|gralloc| DRV
     CORE -->|atomic commit| KMS
-    KMS <==>|"Unix socket<br/>frames + fences ⇄ page flips, input"| APP
+    KMS <==>|"Unix socket<br/>frames + fences ⇄ page flips, window size, input"| APP
     APP --> SF
     TOUCH --> APP
     KMS -->|CHAM_INPUT| INP
@@ -271,7 +273,7 @@ flowchart LR
     SP --> W["kwin_wayland_wrapper --xwayland"]
     W -->|"starts kwin_wayland by name"| B["lib/chameleon/bin/kwin_wayland<br/>attaches the shim to this process only"]
     B --> R["real kwin_wayland --drm"]
-    SP --> PS["plasmashell, apps …<br/>(untouched)"]
+    SP --> PS["plasmashell, apps …<br/>(Chameleon EGL vendor, no shim)"]
 ```
 
 Nothing in plasma-workspace changes, and you never pass `--drm` yourself:
@@ -409,7 +411,7 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 ## Roadmap
 
 - [x] Zero-copy presenter app with display-accurate frame pacing
-- [x] Unmodified KWin on a fake KMS device, rendering on the vendor GPU driver
+- [x] KWin without Chameleon patches on a fake KMS device, rendering on the vendor GPU driver
 - [x] Touch, trackpad, mouse and keyboard input
 - [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
 - [x] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
