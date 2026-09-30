@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Touch, pointer and keyboard input from the Chameleon app into KWin.
  *

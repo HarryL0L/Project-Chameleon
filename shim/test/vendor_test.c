@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Host test of libEGL_chameleon.so as a real glvnd vendor: this program uses
  * the system's glvnd libEGL/libGLESv2 exactly as a Termux app would, with

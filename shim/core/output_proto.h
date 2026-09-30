@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Protocol tables for kde_output_management_v2 and kde_output_device_v2
  * (plasma-wayland-protocols kde-output-management-v2.xml and

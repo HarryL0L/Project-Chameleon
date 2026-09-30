@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # kwin_wayland as started inside `chameleon ...`: this directory is first in
 # PATH, so KWin started directly, by kwin_wayland_wrapper or by
 # startplasma-wayland comes here. It runs the real (unmodified) kwin_wayland

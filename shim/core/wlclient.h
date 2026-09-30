@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The slice of libwayland-client's ABI used by the shim's own Wayland client
  * connection to KWin (input.c owns the connection and its thread, output.c

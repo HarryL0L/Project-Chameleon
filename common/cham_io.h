@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Send/receive one cham_msg packet with an optional fd (SCM_RIGHTS). */
 #ifndef CHAMELEON_IO_H
 #define CHAMELEON_IO_H

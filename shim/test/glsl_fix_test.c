@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Unit test for shim/gles/glsl_fix.c, using lines from KWin 6.7's shaders. */
 #include <stdio.h>
 #include <stdlib.h>

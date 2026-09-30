@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * ahb_probe - check whether a plain Termux process can drive the Android
  * vendor GPU driver (e.g. /vendor/lib64/egl/libGLES_mali.so) the way the

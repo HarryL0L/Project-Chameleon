@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * KWin's screen follows the Chameleon app's window.
  *

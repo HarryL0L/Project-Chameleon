@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* The host tests' check-and-report macro. */
 #ifndef CHAM_TEST_CHECK_H
 #define CHAM_TEST_CHECK_H

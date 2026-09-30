@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Renders icon-preview.png: the launcher icon under circle, squircle and
 rounded-square masks, plus a themed (monochrome) rendition. Needs
 rsvg-convert and Pillow. Run after make_logo.py."""

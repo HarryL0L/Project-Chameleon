@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * GLES side of the Chameleon glvnd vendor (libEGL_chameleon.so). glvnd's
  * libGLESv2.so.2 dispatches every GL call to the function cham_gl_get_proc()

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * chameleon_demo - Termux-side producer that renders with the vendor GPU
  * (through /system/lib64/libEGL.so) into AHardwareBuffers and streams them to

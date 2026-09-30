@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Host test of output.c: a stub presenter reports window sizes, and
  * libchameleon.so (LD_PRELOADed) must switch "KWin's" screen to match over

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * GLSL source fix-ups for strict (non-Mesa) drivers.
  *

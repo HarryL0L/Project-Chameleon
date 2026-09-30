@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Builds the Termux package (aarch64 .deb) from a built shim directory:
 #
 #   packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo 0.1.0 out/
@@ -35,7 +36,18 @@ ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vend
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"
 install -m 755 "$DEMO" "$ROOT$PREFIX/bin/chameleon-demo"
 install -m 644 README.md "$ROOT$PREFIX/share/doc/chameleon/README.md"
-install -m 644 LICENSE "$ROOT$PREFIX/share/doc/chameleon/copyright"
+{
+    cat <<'NOTICE'
+Project Chameleon <https://github.com/HarryL0L/Project-Chameleon>
+
+This program is free software; you can redistribute it and/or modify it
+under the terms of the GNU General Public License as published by the Free
+Software Foundation; either version 2 of the License, or (at your option)
+any later version. The GPL version 2 follows.
+
+NOTICE
+    cat LICENSE
+} > "$ROOT$PREFIX/share/doc/chameleon/copyright"
 
 SIZE=$(du -sk "$ROOT$PREFIX" | cut -f1)
 cat > "$ROOT/DEBIAN/control" <<CONTROL

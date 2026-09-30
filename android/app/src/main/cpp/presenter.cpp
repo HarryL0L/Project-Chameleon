@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 // Chameleon presenter: receives AHardwareBuffers + acquire fences from one
 // Termux producer over a SOCK_SEQPACKET socket and shows them on an
 // ASurfaceControl child of the activity's SurfaceView. In direct mode nothing

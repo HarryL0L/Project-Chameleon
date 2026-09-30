@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Build the probe inside Termux: pkg install clang
 # It links nothing GPU-related; system libraries are dlopen()ed at runtime.
 set -e

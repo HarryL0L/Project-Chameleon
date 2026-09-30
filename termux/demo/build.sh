@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Build the demo producer inside Termux: pkg install clang
 set -e
 cd "$(dirname "$0")"

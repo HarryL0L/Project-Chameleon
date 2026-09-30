@@ -5,8 +5,8 @@
 <h1 align="center">Project Chameleon</h1>
 
 <p align="center">
-  <b>Linux Wayland desktops from Termux, shown in an Android app and drawn by the phone's own GPU.</b><br>
-  Unmodified compositors (KWin and Plasma today) · vendor GLES driver · <code>AHardwareBuffer</code>s, no CPU copies · no root
+  <b>Experimental display for Termux Wayland compositors, aiming to be universal.</b><br>
+  The Android app is the compositor's screen, drawn by the phone's own GPU · works with KWin, including full Plasma · <code>AHardwareBuffer</code>s, no CPU copies · no root
 </p>
 
 <p align="center">
@@ -420,6 +420,9 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 
 - Not affiliated with KDE, Termux or Google. The "W" disc in the logo is a
   stylised nod to Wayland, not the official Wayland logo.
-- Licence: [GPL-2.0-or-later](LICENSE), like KWin, whose process
-  `libchameleon.so` runs in. `shim/include/` vendors MIT-licensed headers
-  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences.
+- Licence: GPL-2.0-or-later, like KWin, whose process `libchameleon.so`
+  runs in: each source file says so (`SPDX-License-Identifier`), and
+  [LICENSE](LICENSE) holds the GPL version 2 text, which GitHub labels
+  "GPL-2.0" (it reads only that text, the same for both). `shim/include/` vendors MIT-licensed headers
+  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences
+  ([sources and versions](shim/include/README.md)).

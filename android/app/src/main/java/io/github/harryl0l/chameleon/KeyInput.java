@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
 package io.github.harryl0l.chameleon;
 
 import android.view.KeyCharacterMap;

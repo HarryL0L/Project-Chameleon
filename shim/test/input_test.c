@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Host test of the input path: a stub presenter sends CHAM_INPUT messages,
  * libchameleon.so (LD_PRELOADed) must turn them into org_kde_kwin_fake_input

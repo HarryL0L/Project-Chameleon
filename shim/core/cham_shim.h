@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Internal interface of libchameleon.so, shared by the fake libgbm.so and
  * EGL vendor (which finds it at run time). Not a public ABI.

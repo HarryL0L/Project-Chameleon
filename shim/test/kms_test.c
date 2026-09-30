@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Desktop test for the fake KMS device, using the *real* libdrm the way
  * KWin 6.7's DRM backend does. Run through shim/test/run-host-test.sh, which
