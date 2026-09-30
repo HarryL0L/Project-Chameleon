@@ -60,9 +60,10 @@ Depends: libglvnd, libwayland, dbus
 Recommends: kwin
 Homepage: https://github.com/HarryL0L/Project-Chameleon
 Description: KWin and Plasma on Android's GPU, shown by the Chameleon app
- Runs the unmodified Termux kwin_wayland (and a Plasma session) on a fake
- KMS device whose frames are shown by the Chameleon Android app, rendering
- with the phone's GPU driver through a glvnd EGL vendor. Wayland apps using
+ Runs the Termux kwin_wayland (no Chameleon-specific patches) and a Plasma
+ session on a fake KMS device whose frames are shown by the Chameleon
+ Android app, rendering with the phone's GPU driver through a glvnd EGL
+ vendor. Wayland apps using
  OpenGL ES render on the GPU too. Needs the Chameleon app (chameleon.apk).
  .
  Usage: chameleon kwin_wayland [app] | chameleon startplasma-wayland
