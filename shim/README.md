@@ -86,7 +86,8 @@ libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
   stub presenter, simulated vblank without one;
 - the input path against a real libwayland-server fake-input global;
 - the screen following the app's window and refresh rate, against a
-  stand-in for KWin's output management (`output_test`);
+  stand-in for KWin's output management (`output_test`), as KWin 6.7
+  (version 21) and as KWin 6.8 (version 22);
 - the GLSL fix-ups (`glsl_fix_test`);
 - the EGL vendor through the system's real glvnd, with a stand-in for
   Android's driver, both as any program and as KWin;
@@ -95,3 +96,13 @@ libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
   releases, frame pacing and resizing.
 
 CI runs it on every push.
+
+`shim/test/run-kwin-test.sh` runs the real, installed `kwin_wayland` on the
+shim: the Android driver is played by Mesa's llvmpipe
+(`mesa_android_gl.c`) and the app by `stub_presenter.py`, which rotates the
+window and changes the refresh rate. It checks KWin's log: the fake device
+chosen as the GPU, OpenGL compositing, frames reaching the app, and the
+screen following each size. It is for trying new KWin releases before they
+reach Termux, e.g. in an Arch container with `kde-unstable` (see the
+script's header; Arch's `kwin_wayland` carries a file capability that makes
+the loader ignore `LD_PRELOAD`).
