@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The vendor library's link to libchameleon.so, resolved at run time.
  *

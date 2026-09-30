@@ -3,3 +3,4 @@
 /probe/ahb_probe
 /termux/demo/chameleon_demo
 *.deb
+__pycache__/

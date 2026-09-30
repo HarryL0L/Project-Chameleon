@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 #ifndef CHAM_GLES_INTERNAL_H
 #define CHAM_GLES_INTERNAL_H
 

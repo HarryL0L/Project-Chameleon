@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * EGL side of the Chameleon glvnd vendor (libEGL_chameleon.so): forwards to
  * Android's EGL (/system/lib64/libEGL.so -> the vendor driver, e.g.

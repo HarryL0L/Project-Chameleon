@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Registers the Chameleon EGL vendor with glvnd for every Termux program:
 # EGL/GLES on Android's GPU driver for the displays it handles: Wayland
 # windows under a Chameleon KWin, and off-screen rendering

@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Stand-in for Android's libEGL.so, libGLESv2.so, libnativewindow.so and
  * libmediandk.so in the host tests of the glvnd vendor: just enough EGL,

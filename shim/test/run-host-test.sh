@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Builds libchameleon.so + libgbm.so for the desktop (memfd instead of
 # AHardwareBuffer) and runs kms_test.c against the fake device with the
 # system's real libdrm, and the input and output paths against a real Wayland

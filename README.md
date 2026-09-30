@@ -420,7 +420,9 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 
 - Not affiliated with KDE, Termux or Google. The "W" disc in the logo is a
   stylised nod to Wayland, not the official Wayland logo.
-- Licence: [GPL-2.0-or-later](LICENSE), like KWin, whose process
-  `libchameleon.so` runs in. `shim/include/` vendors MIT-licensed headers
+- Licence: GPL-2.0-or-later, like KWin, whose process `libchameleon.so`
+  runs in: each source file says so (`SPDX-License-Identifier`), and
+  [LICENSE](LICENSE) holds the GPL version 2 text, which GitHub labels
+  "GPL-2.0" (it reads only that text, the same for both). `shim/include/` vendors MIT-licensed headers
   from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences
   ([sources and versions](shim/include/README.md)).

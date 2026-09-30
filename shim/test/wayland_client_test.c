@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Host test of GPU rendering for Wayland apps (vendor/wayland.c + the
  * buffer registry in core/clients.c), end to end in one process:

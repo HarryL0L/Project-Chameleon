@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Connection from KWin's process to the Chameleon presenter app.
  *

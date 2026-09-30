@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
 """Generates logo.svg: a minimalist chameleon wrapped around a Wayland-style
 "W" disc. The body is one tapered shape: an arc around the disc that flows
 into a spiral tail, so there are no seams."""

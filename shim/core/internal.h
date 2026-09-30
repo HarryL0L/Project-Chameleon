@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /* Private to libchameleon.so. */
 #ifndef CHAM_INTERNAL_H
 #define CHAM_INTERNAL_H

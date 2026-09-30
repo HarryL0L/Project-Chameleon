@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * libgbm.so replacement: every gbm_bo is an AHardwareBuffer from
  * libchameleon.so, with the gralloc handle's dmabuf as its fd. Termux's Mesa

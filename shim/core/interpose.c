@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * libc / libdrm entry points libchameleon.so overrides when LD_PRELOADed
  * into kwin_wayland.

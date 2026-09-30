@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * EGL_PLATFORM_WAYLAND_KHR for apps: Wayland windows rendered by Android's
  * GPU driver and handed to KWin without copies.

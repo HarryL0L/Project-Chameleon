@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Crash reporter for kwin_wayland under the shim. On SIGSEGV/SIGBUS it writes
  * the fault, the last GL entry point the EGL vendor forwarded, the last

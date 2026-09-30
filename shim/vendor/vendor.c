@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * libEGL_chameleon.so: a libglvnd EGL vendor library for Android's GPU.
  *

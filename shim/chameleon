@@ -1,4 +1,5 @@
 #!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
 # Runs a KWin or Plasma session on the Chameleon app's screen, rendering with
 # Android's GPU. Open the Chameleon app first (or within CHAMELEON_WAIT s).
 #

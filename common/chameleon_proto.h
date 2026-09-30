@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Wire protocol between a Termux-side producer (the KWin shim, or the demo)
  * and the presenter app.

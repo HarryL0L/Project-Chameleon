@@ -1,3 +1,4 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Buffers of Wayland apps that render through the Chameleon EGL vendor.
  *
