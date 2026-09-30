@@ -422,4 +422,5 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
   stylised nod to Wayland, not the official Wayland logo.
 - Licence: [GPL-2.0-or-later](LICENSE), like KWin, whose process
   `libchameleon.so` runs in. `shim/include/` vendors MIT-licensed headers
-  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences.
+  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences
+  ([sources and versions](shim/include/README.md)).
