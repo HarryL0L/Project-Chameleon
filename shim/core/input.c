@@ -4,8 +4,9 @@
  *
  * KWin has no input devices of its own here (no libinput), but it always
  * runs its fake-input backend: org_kde_kwin_fake_input, which it offers to
- * any client in its own process (allowInterface() allows pid == getpid(),
- * and authenticate is accepted unconditionally). So a helper thread in this
+ * clients in its own process (KWin 6.7: allowInterface() allows pid ==
+ * getpid(); 6.8: refused only to sandboxed Flatpak/Snap clients), and
+ * authenticate is accepted unconditionally. So a helper thread in this
  * process connects to KWin's Wayland socket as an ordinary client, binds
  * fake input plus xdg_output (for the screen's logical geometry), and turns
  * the app's CHAM_INPUT messages into fake-input requests. The same

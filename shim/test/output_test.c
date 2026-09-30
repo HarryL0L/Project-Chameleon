@@ -6,6 +6,10 @@
  * plays KWin: fake input (so the shim connects), one output device with a
  * native 1000x500 mode, and custom modes generated like KWin's CVT modes
  * (width rounded down to a multiple of 8).
+ *
+ * OUTPUT_TEST_KWIN=6.8 plays KWin 6.8: output management version 22, and
+ * set_custom_modes refused from clients bound below 22. Default: KWin 6.7
+ * (version 21).
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -68,6 +72,8 @@ static struct {
     struct wl_client *client;
     /* what the shim asked for */
     int configs, applied, custom_sets, mode_sets;
+    uint32_t manager_version, bound_version; /* offered / bound by the shim */
+    int custom_refused;
     int custom_w, custom_h, custom_mhz;
     /* pending, per configuration */
     struct smode *pending_mode;
@@ -181,6 +187,10 @@ static void oc_set_custom_modes(struct wl_client *c, struct wl_resource *r, stru
     (void)r;
     (void)dev;
     (void)list;
+    if (g.manager_version >= 22 && wl_resource_get_version(r) < 22) {
+        g.custom_refused = 1; /* like KWin 6.8: fails at apply */
+        return;
+    }
     g.custom_sets++;
     g.custom_w = g.pending_w;
     g.custom_h = g.pending_h;
@@ -190,6 +200,14 @@ static void oc_apply(struct wl_client *c, struct wl_resource *r)
 {
     (void)c;
     g.applied++;
+    if (g.custom_refused) {
+        wl_resource_post_event(r, OC_EV_FAILURE_REASON, "Setting custom modes with too old protocol versions");
+        wl_resource_post_event(r, OC_EV_FAILED);
+        g.custom_refused = 0;
+        g.pending_mode = NULL;
+        g.pending_custom = 0;
+        return;
+    }
     if (g.pending_custom) {
         /* Like KWin: the old custom modes go, the current one stays until
          * replaced; CVT widths are multiples of 8. */
@@ -242,6 +260,7 @@ static void bind_management(struct wl_client *client, void *data, uint32_t versi
     (void)data;
     struct wl_resource *r = wl_resource_create(client, &k_om_iface, (int)version, id);
     wl_resource_set_implementation(r, &k_om_impl, NULL, NULL);
+    g.bound_version = version;
 }
 
 /* ---- test driver ---- */
@@ -288,7 +307,9 @@ int main(void)
     g_display = wl_display_create();
     CHECK(wl_display_add_socket(g_display, "wayland-chameleon-out") == 0, "Wayland socket");
     wl_global_create(g_display, &k_fake_input, 6, NULL, bind_fake_input);
-    wl_global_create(g_display, &k_om_iface, 21, NULL, bind_management);
+    const char *kwin = getenv("OUTPUT_TEST_KWIN");
+    g.manager_version = kwin && strcmp(kwin, "6.8") == 0 ? 22 : 21;
+    wl_global_create(g_display, &k_om_iface, (int)g.manager_version, NULL, bind_management);
     wl_global_create(g_display, &k_od_registry_iface, 21, NULL, bind_device_registry);
     g.current = add_mode(1000, 500, 120000, 0);
 
@@ -309,6 +330,8 @@ int main(void)
     send_size(c, 1000, 500);
     run_for(800);
     CHECK(g.configs == 0, "same size as KWin's screen: nothing to do (%d configurations)", g.configs);
+    CHECK(g.bound_version == g.manager_version, "output management bound at version %u (KWin offers %u)",
+          g.bound_version, g.manager_version);
 
     send_size(c, 500, 1000); /* rotated */
     run_for(800);

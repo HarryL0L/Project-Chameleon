@@ -339,6 +339,24 @@ int drmGetDevice(int fd, drmDevicePtr *device)
     return REAL(drmGetDevice) ? REAL(drmGetDevice)(fd, device) : -ENOSYS;
 }
 
+/* KWin 6.8 finds render devices by scanning all of them (GpuManager's
+ * compatibility map); the fake device is the only one KWin should see. */
+int drmGetDevices2(uint32_t flags, drmDevicePtr devices[], int max_devices)
+{
+    (void)flags;
+    if (!devices)
+        return 1;
+    if (max_devices < 1)
+        return 0;
+    devices[0] = make_device();
+    return devices[0] ? 1 : -ENOMEM;
+}
+
+int drmGetDevices(drmDevicePtr devices[], int max_devices)
+{
+    return drmGetDevices2(0, devices, max_devices);
+}
+
 char *drmGetDeviceNameFromFd2(int fd)
 {
     if (fake_fd_lookup(fd))

@@ -93,7 +93,7 @@ static const struct wl_message k_om_requests[] = {
     {"create_mode_list", "n", k_om_create_mode_list_types}, /* 1 */
 };
 static const struct wl_interface k_om_iface = {
-    "kde_output_management_v2", 21, 2, k_om_requests, 0, NULL,
+    "kde_output_management_v2", 22, 2, k_om_requests, 0, NULL,
 };
 static const struct wl_interface *k_oc_mode_types[] = {&k_od_iface, &k_od_mode_iface};
 static const struct wl_interface *k_oc_set_custom_modes_types[] = {&k_od_iface, &k_mode_list_iface};
@@ -138,7 +138,7 @@ static const struct wl_message k_oc_events[] = {
     {"failure_reason", "12s", k_null}, /* 2 */
 };
 static const struct wl_interface k_oc_iface = {
-    "kde_output_configuration_v2", 21, 33, k_oc_requests, 3, k_oc_events,
+    "kde_output_configuration_v2", 22, 33, k_oc_requests, 3, k_oc_events,
 };
 static const struct wl_message k_mode_list_requests[] = {
     {"destroy", "", k_null}, /* 0 */
@@ -148,7 +148,7 @@ static const struct wl_message k_mode_list_requests[] = {
     {"set_reduced_blanking", "u", k_null}, /* 4 */
 };
 static const struct wl_interface k_mode_list_iface = {
-    "kde_mode_list_v2", 21, 5, k_mode_list_requests, 0, NULL,
+    "kde_mode_list_v2", 22, 5, k_mode_list_requests, 0, NULL,
 };
 
 enum { OD_REGISTRY_EV_FINISHED, OD_REGISTRY_EV_OUTPUT };
@@ -164,6 +164,9 @@ enum { OC_EV_APPLIED, OC_EV_FAILED, OC_EV_FAILURE_REASON };
 enum { ML_REQ_DESTROY, ML_REQ_ADD_MODE, ML_REQ_SET_RESOLUTION, ML_REQ_SET_REFRESH_RATE, ML_REQ_SET_REDUCED_BLANKING };
 #define OD_CAPABILITY_CUSTOM_MODES 0x2000u
 #define OUTPUT_PROTO_VERSION 21u
+/* KWin 6.8 takes set_custom_modes only from clients of version 22 (which
+ * added mode_list.add_cvt); older KWin offers 21. */
+#define OUTPUT_MANAGEMENT_VERSION 22u
 #define OC_SET_CUSTOM_MODES_SINCE 18u
 
 #endif

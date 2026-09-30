@@ -8,6 +8,7 @@
  * Any dup of that dmabuf identifies the buffer through (st_dev, st_ino).
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -250,8 +251,11 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
     return 0;
 }
 
+static void reap_orphans(void);
+
 struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)
 {
+    reap_orphans();
     uint32_t afmt = ahb_format(format);
     if (!afmt || !width || !height || !ahb_load()) {
         errno = EINVAL;
@@ -307,12 +311,73 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
 void bo_ref_locked(struct cham_bo *bo)
 {
     bo->refs++;
+    bo->orphan = 0;
+}
+
+/* Is the buffer's dmabuf open anywhere in this process besides our own fd?
+ * KWin 6.8 destroys a gbm_bo right after exporting it and keeps only the fd. */
+static int exported_fd_open(const struct cham_bo *bo)
+{
+    DIR *d = opendir("/proc/self/fd");
+    if (!d)
+        return 0;
+    const native_handle *nh = ahb.get_native_handle(bo->ahb);
+    int dir_fd = dirfd(d), found = 0;
+    struct dirent *e;
+    while (!found && (e = readdir(d))) {
+        int fd = atoi(e->d_name), own = fd == dir_fd || fd == bo->dmabuf_fd;
+        for (int i = 0; nh && !own && i < nh->numFds; i++)
+            own = fd == nh->data[i]; /* the buffer's own handle */
+        struct stat st;
+        if (e->d_name[0] == '.' || own || real_fstat(fd, &st) != 0)
+            continue;
+        found = st.st_dev == bo->dmabuf_dev && st.st_ino == bo->dmabuf_ino;
+    }
+    closedir(d);
+    return found;
+}
+
+static void bo_free(struct cham_bo *bo)
+{
+    if (bo->release_fence >= 0)
+        close(bo->release_fence);
+    close(bo->dmabuf_fd);
+    ahb.release(bo->ahb);
+    free(bo);
+}
+
+/* Frees orphans whose exported fds are all closed (called without g_lock). */
+static void reap_orphans(void)
+{
+    struct cham_bo *dead = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (struct cham_bo **p = &g_bos; *p;) {
+        struct cham_bo *bo = *p;
+        if (bo->orphan && bo->refs == 0 && !exported_fd_open(bo)) {
+            link_forget_bo_locked(bo);
+            *p = bo->next;
+            bo->next = dead;
+            dead = bo;
+        } else {
+            p = &bo->next;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    while (dead) {
+        struct cham_bo *next = dead->next;
+        bo_free(dead);
+        dead = next;
+    }
 }
 
 void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
+    if (bo->exported && exported_fd_open(bo)) {
+        bo->orphan = 1; /* still findable by cham_bo_from_fd */
+        return;
+    }
     link_forget_bo_locked(bo);
     for (struct cham_bo **p = &g_bos; *p; p = &(*p)->next) {
         if (*p == bo) {
@@ -320,11 +385,7 @@ void bo_unref_locked(struct cham_bo *bo)
             break;
         }
     }
-    if (bo->release_fence >= 0)
-        close(bo->release_fence);
-    close(bo->dmabuf_fd);
-    ahb.release(bo->ahb);
-    free(bo);
+    bo_free(bo);
 }
 
 void cham_bo_unref(struct cham_bo *bo)
@@ -334,6 +395,7 @@ void cham_bo_unref(struct cham_bo *bo)
     pthread_mutex_lock(&g_lock);
     bo_unref_locked(bo);
     pthread_mutex_unlock(&g_lock);
+    reap_orphans();
 }
 
 struct cham_bo *bo_by_handle_locked(uint32_t handle)
@@ -363,6 +425,7 @@ struct cham_bo *cham_bo_from_fd(int fd)
 
 int cham_bo_export_fd(struct cham_bo *bo)
 {
+    bo->exported = 1;
     return fcntl(bo->dmabuf_fd, F_DUPFD_CLOEXEC, 0);
 }
 

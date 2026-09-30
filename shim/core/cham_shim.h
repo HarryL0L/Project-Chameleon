@@ -33,6 +33,8 @@ struct cham_bo {
     int slot;          /* presenter buffer id, -1 if not registered */
     uint64_t slot_gen; /* presenter connection the slot belongs to */
     int release_fence; /* last RELEASE fence from the presenter */
+    int exported;      /* an fd was handed out (gbm_bo_get_fd) */
+    int orphan;        /* destroyed by KWin, kept while exported fds are open */
     struct cham_bo *next;
 };
 

@@ -138,6 +138,18 @@ static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, u
     return id;
 }
 
+/* Open fds in this process on the same file as `st` (the buffer's memory). */
+static int fds_on(const struct stat *st)
+{
+    int n = 0;
+    for (int fd = 0; fd < 1024; fd++) {
+        struct stat o;
+        if (fstat(fd, &o) == 0 && o.st_dev == st->st_dev && o.st_ino == st->st_ino)
+            n++;
+    }
+    return n;
+}
+
 static int g_flips;
 static uint64_t g_last_flip_ns, g_max_gap_ns;
 static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned crtc, void *data)
@@ -192,6 +204,12 @@ int main(void)
               strcmp(dev->nodes[DRM_NODE_PRIMARY], dev_path) == 0,
           "drmGetDevice2: platform device at the fake path");
     drmFreeDevice(&dev);
+    drmDevicePtr all[4] = {0};
+    int count = drmGetDevices2(0, NULL, 0);
+    CHECK(count == 1 && drmGetDevices2(0, all, 4) == 1 && all[0] &&
+              strcmp(all[0]->nodes[DRM_NODE_PRIMARY], dev_path) == 0,
+          "drmGetDevices2 lists only the fake device (KWin 6.8 finds its render device there)");
+    drmFreeDevices(all, count > 0 ? count : 0);
     drm_magic_t magic;
     CHECK(drmGetMagic(fd, &magic) == 0 && drmAuthMagic(fd, magic) == 0, "magic / auth (RenderDevice::open)");
     CHECK(drmIsMaster(fd), "drmIsMaster");
@@ -266,6 +284,25 @@ int main(void)
     uint32_t h;
     CHECK(drmPrimeFDToHandle(fd, foreign, &h) != 0, "foreign dmabuf rejected (no direct scanout)");
     close(foreign);
+
+    /* KWin 6.8 (GbmGraphicsAllocator) destroys the gbm_bo right after
+     * exporting it and keeps only the dmabuf fd. */
+    struct gbm_bo *gone = gbm_bo_create(gbm, 640, 480, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING);
+    int kept = gbm_bo_get_fd(gone);
+    gbm_bo_destroy(gone);
+    struct stat kept_st;
+    fstat(kept, &kept_st);
+    uint32_t kept_handle = 0, kept_fb = 0;
+    int kept_ok = drmPrimeFDToHandle(fd, kept, &kept_handle) == 0;
+    uint32_t kh[4] = {kept_handle}, kp[4] = {640 * 4}, ko[4] = {0};
+    kept_ok = kept_ok && drmModeAddFB2(fd, 640, 480, DRM_FORMAT_XBGR8888, kh, kp, ko, &kept_fb, 0) == 0;
+    CHECK(kept_ok, "gbm_bo destroyed after export: its dmabuf still makes an fb");
+    drmModeRmFB(fd, kept_fb);
+    drmCloseBufferHandle(fd, kept_handle);
+    close(kept);
+    gbm_bo_destroy(gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING)); /* frees orphans */
+    CHECK(fds_on(&kept_st) == 0, "...and is freed once the last exported fd is closed (%d fds left)",
+          fds_on(&kept_st));
 
     printf("modeset\n");
     uint32_t blob = 0;

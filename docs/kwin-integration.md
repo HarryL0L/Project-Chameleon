@@ -24,9 +24,11 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
   DRM backend has no input devices of its own.
 - `org_kde_kwin_fake_input` supports pointer (relative + absolute), buttons,
   axis, touch down/motion/up/frame and keyboard key/keysym.
-- It is on KWin's interface blacklist, but `allowInterface()` returns true
-  for any client whose pid == KWin's pid, and `authenticate` is accepted
-  unconditionally (`// TODO: make secure`).
+- In 6.7 it is on KWin's interface blacklist, but `allowInterface()` returns
+  true for any client whose pid == KWin's pid. In 6.8 it is a restricted
+  interface, refused only to sandboxed clients (Flatpak/Snap, detected
+  through systemd). `authenticate` is accepted unconditionally in both
+  (`// TODO: make secure`).
 - So the shim, already loaded inside KWin, opens a Wayland client connection
   to KWin's own socket on a helper thread, binds fake input, and feeds it
   touch/keys that the presenter app sends over the chameleon socket.
@@ -68,8 +70,13 @@ Implemented in `shim/core/input.c`:
 - `kde_output_device_registry_v2` must be bound at v21+ (older binds are a
   protocol error), so the device and its modes are v21 objects: the event
   tables in `shim/core/output_proto.h` go up to v21.
+- KWin 6.8 offers management version 22 and refuses `set_custom_modes` from
+  clients bound below 22 ("Setting custom modes with too old
+  kde-output-management-v2 protocol versions is unsupported"), so the
+  management interfaces are bound at up to 22 (`OUTPUT_MANAGEMENT_VERSION`);
+  the device registry stays at 21.
 - `shim/test/output_test.c` plays KWin's side (device, modes, management,
-  CVT-like widths) against the real shim.
+  CVT-like widths) against the real shim, as 6.7 and as 6.8.
 
 ## Mali-G77: no GPU timer queries
 
@@ -80,3 +87,30 @@ r32p1) the next write into texture memory after that dies with SIGBUS
 a PBO or `glTexSubImage2D`. The launcher sets `KWIN_NO_TIMER_QUERY=1` and the
 GLES shim hides the extension by default; KWin then falls back to CPU-side
 render time estimates.
+
+## KWin 6.8
+
+Checked against the 6.8 beta (6.7.91) with `shim/test/run-kwin-test.sh`,
+which runs the real KWin on the shim with Mesa standing in for Android's
+driver:
+
+- **Render device:** 6.8 finds the device to render with only through
+  `GpuManager`'s map, built from `drmGetDevices2()`; the old fallback to the
+  KMS node itself is gone ("Found no render device!", then exit). The shim
+  answers `drmGetDevices2`/`drmGetDevices` with the fake device alone.
+- **Buffers:** `GbmGraphicsBufferAllocator` destroys each `gbm_bo` right after
+  exporting its dmabuf and keeps only the fd. An exported buffer therefore
+  outlives `gbm_bo_destroy` while any fd on it is open in the process (other
+  than the AHardwareBuffer's own handle and the shim's); `/proc/self/fd` is
+  checked when buffers are created and destroyed.
+- **Output management:** version 22 for custom modes (above).
+- **Shaders:** every shader now starts with `#version 300 es` and
+  `#extension GL_OES_EGL_image_external : require`, the ES 2 name of that
+  extension. Mesa accepts it; whether Mali/Adreno/PowerVR compilers do still
+  needs a device test.
+- **Build:** 6.8 requires libcap and runs `setcap CAP_SYS_NICE=+ep` on
+  `kwin_wayland` at install. A binary with file capabilities runs in secure
+  mode, where the loader ignores `LD_PRELOAD`, so a Termux build must not
+  apply it (e.g. `-DSETCAP_EXECUTABLE=true`).
+- Seen in the beta, not caused by the shim: KWin's DRM commit thread can
+  crash in `DrmFramebuffer::isReadable()` while KWin exits.

@@ -365,7 +365,7 @@ void output_config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
 void output_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version)
 {
     if (strcmp(iface, "kde_output_management_v2") == 0 && !g_manager) {
-        g_manager_version = version < OUTPUT_PROTO_VERSION ? version : OUTPUT_PROTO_VERSION;
+        g_manager_version = version < OUTPUT_MANAGEMENT_VERSION ? version : OUTPUT_MANAGEMENT_VERSION;
         g_manager = wl_bind(registry, name, &k_om_iface, g_manager_version);
     } else if (strcmp(iface, "kde_output_device_registry_v2") == 0 && !g_device_registry) {
         if (version < OUTPUT_PROTO_VERSION) /* the registry exists from version 21 on */

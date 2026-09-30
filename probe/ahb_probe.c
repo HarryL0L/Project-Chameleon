@@ -43,6 +43,7 @@ typedef unsigned int GLenum, GLuint, GLbitfield;
 typedef int GLint, GLsizei;
 typedef float GLfloat;
 typedef unsigned char GLubyte;
+typedef char GLchar;
 
 #define EGL_DEFAULT_DISPLAY ((void *)0)
 #define EGL_NO_CONTEXT ((EGLContext)0)
@@ -73,6 +74,8 @@ typedef unsigned char GLubyte;
 #define EGL_NO_NATIVE_FENCE_FD_ANDROID (-1)
 
 #define GL_NO_ERROR 0
+#define GL_FRAGMENT_SHADER 0x8B30
+#define GL_COMPILE_STATUS 0x8B81
 #define GL_UNSIGNED_BYTE 0x1401
 #define GL_RGBA 0x1908
 #define GL_VENDOR 0x1F00
@@ -157,6 +160,12 @@ static struct {
     void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
     void (*TexSubImage2D)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
     void (*EGLImageTargetTexture2DOES)(GLenum, void *);
+    GLuint (*CreateShader)(GLenum);
+    void (*ShaderSource)(GLuint, GLsizei, const GLchar *const *, const GLint *);
+    void (*CompileShader)(GLuint);
+    void (*GetShaderiv)(GLuint, GLenum, GLint *);
+    void (*GetShaderInfoLog)(GLuint, GLsizei, GLsizei *, GLchar *);
+    void (*DeleteShader)(GLuint);
 } gl;
 
 static struct {
@@ -290,6 +299,12 @@ static int load_libs(void)
     SYM(gl, PixelStorei, lgles, "libGLESv2", "glPixelStorei");
     SYM(gl, TexImage2D, lgles, "libGLESv2", "glTexImage2D");
     SYM(gl, TexSubImage2D, lgles, "libGLESv2", "glTexSubImage2D");
+    SYM(gl, CreateShader, lgles, "libGLESv2", "glCreateShader");
+    SYM(gl, ShaderSource, lgles, "libGLESv2", "glShaderSource");
+    SYM(gl, CompileShader, lgles, "libGLESv2", "glCompileShader");
+    SYM(gl, GetShaderiv, lgles, "libGLESv2", "glGetShaderiv");
+    SYM(gl, GetShaderInfoLog, lgles, "libGLESv2", "glGetShaderInfoLog");
+    SYM(gl, DeleteShader, lgles, "libGLESv2", "glDeleteShader");
 
     SYM(ahb, allocate, lnw, "libnativewindow", "AHardwareBuffer_allocate");
     SYM(ahb, release, lnw, "libnativewindow", "AHardwareBuffer_release");
@@ -310,6 +325,8 @@ static void report_ext(const char *list, const char *name, int critical, const c
     snprintf(msg, sizeof msg, "%s (%s)", name, why);
     result(has_ext(list, name), critical, "extension", msg);
 }
+
+static void check_kwin68_shaders(void);
 
 static EGLDisplay init_egl(EGLContext *ctx_out)
 {
@@ -417,11 +434,54 @@ static EGLDisplay init_egl(EGLContext *ctx_out)
     report_ext(glexts, "GL_EXT_read_format_bgra", 1, "required by KWin (read-backs)");
     report_ext(glexts, "GL_OES_EGL_image_external", 0, "external textures");
     report_ext(glexts, "GL_EXT_EGL_image_storage", 0, "optional: not used");
+    if (gl_major >= 3)
+        check_kwin68_shaders();
     result(egl.GetNativeClientBufferANDROID && egl.CreateImageKHR && gl.EGLImageTargetTexture2DOES, 1,
            "EGLImage entry points resolved", "");
 
     *ctx_out = ctx;
     return dpy;
+}
+
+/* Compiles a fragment shader; on failure `log` holds the driver's message. */
+static int compiles(const char *src, char *log, size_t size)
+{
+    GLuint sh = gl.CreateShader(GL_FRAGMENT_SHADER);
+    gl.ShaderSource(sh, 1, &src, NULL);
+    gl.CompileShader(sh);
+    GLint ok = 0;
+    gl.GetShaderiv(sh, GL_COMPILE_STATUS, &ok);
+    log[0] = 0;
+    if (!ok) {
+        gl.GetShaderInfoLog(sh, (GLsizei)size, NULL, log);
+        for (char *c = log; *c; c++)
+            if (*c == '\n')
+                *c = ' ';
+    }
+    gl.DeleteShader(sh);
+    return ok;
+}
+
+/* KWin 6.8 starts every shader with this (glshader.cpp), naming the ES 2
+ * extension under "#version 300 es"; it compiles a test shader at startup
+ * and refuses to run if that fails. Mesa accepts it; not every driver may. */
+static void check_kwin68_shaders(void)
+{
+    static const char body[] = "precision highp float;\nprecision highp sampler2D;\nprecision highp sampler3D;\n"
+                               "uniform sampler2D tex;\nin vec2 uv;\nout vec4 color;\n"
+                               "void main() { color = texture(tex, uv); }\n";
+    char src[512], log[256], msg[400];
+    snprintf(src, sizeof src, "#version 300 es\n#extension GL_OES_EGL_image_external : require\n%s", body);
+    int ok = compiles(src, log, sizeof log);
+    snprintf(msg, sizeof msg, "#version 300 es + GL_OES_EGL_image_external : require%s%s", ok ? "" : ": ", log);
+    result(ok, 0, "KWin 6.8 shader header", msg);
+    if (ok)
+        return;
+    snprintf(src, sizeof src, "#version 300 es\n#extension GL_OES_EGL_image_external_essl3 : require\n%s", body);
+    ok = compiles(src, log, sizeof log);
+    snprintf(msg, sizeof msg, "with the _essl3 name instead%s%s (Chameleon could rewrite the line)", ok ? "" : ": ",
+             log);
+    result(ok, 0, "KWin 6.8 shader header", msg);
 }
 
 static AHardwareBuffer *alloc_ahb(uint32_t w, uint32_t h, uint64_t usage, const char *label)

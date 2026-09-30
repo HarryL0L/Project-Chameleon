@@ -32,6 +32,9 @@ cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/output_test" sh
     $(pkg-config --cflags --libs wayland-server)
 CHAMELEON_DRM_PATH="$OUT/card6" CHAMELEON_SOCKET="$OUT/presenter-output" XDG_RUNTIME_DIR="$OUT/runtime" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/output_test"
+# ...and with KWin 6.8's output management (version 22).
+CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-output68" XDG_RUNTIME_DIR="$OUT/runtime" \
+    OUTPUT_TEST_KWIN=6.8 LD_PRELOAD="$OUT/libchameleon.so" "$OUT/output_test"
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
 # with a stand-in for Android's EGL/GLES driver.
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c
