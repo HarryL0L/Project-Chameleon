@@ -86,7 +86,7 @@ check() { # check <description> <grep -E pattern> [absent]
     fi
 }
 echo "KWin $("$KWIN" --version 2>/dev/null | cut -d' ' -f2) on the shim"
-check "the fake device is KWin's GPU" "Chose .*card0 as the primary GPU"
+check "the fake device is KWin's GPU (atomic modesetting)" "Using Atomic Mode Setting on gpu \".*card0\""
 check "OpenGL compositing (KWin's shaders compiled)" "OpenGL compositing has been successfully initialized"
 check "KWin set the app's size" "chameleon: KWin set mode 1280x720"
 check "frames reach the app" "chameleon: last 5 s: [1-9][0-9]* commits, [1-9][0-9]* presented"
