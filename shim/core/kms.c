@@ -121,6 +121,7 @@ struct blob {
 
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
+static int g_plane_shown;           /* ...and it fills the active CRTC */
 static struct fb *g_fbs;
 static struct blob *g_blobs;
 static uint32_t g_next_object_id = 1000;
@@ -568,6 +569,11 @@ void kms_mode_size(uint32_t *width, uint32_t *height)
     pthread_mutex_unlock(&g_lock);
 }
 
+struct cham_bo *kms_screen_bo_locked(void)
+{
+    return g_plane_shown ? g_plane_bo : NULL;
+}
+
 static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (a->flags & ~(uint32_t)DRM_MODE_ATOMIC_FLAGS)
@@ -654,7 +660,8 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
     uint64_t frame = ++g_frame;
     int presented = 0;
-    if (bo && on && s.dpms == 0 && !partial)
+    g_plane_shown = bo && on && s.dpms == 0 && !partial;
+    if (g_plane_shown)
         presented = link_present_locked(bo, in_fence, frame);
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
         link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, mode_mhz(mode));

@@ -216,7 +216,8 @@ static int connect_presenter(void)
 static void handle_msg_locked(const struct cham_msg *m, int *fd)
 {
     switch (m->type) {
-    case CHAM_CONFIG:
+    case CHAM_CONFIG: {
+        int had_surface = g_cfg_w && g_cfg_h;
         g_cfg_w = CHAM_CONFIG_WIDTH(m);
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
         if (g_cfg_w && g_cfg_h && !g_cfg_seen) {
@@ -228,7 +229,15 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         pthread_cond_broadcast(&g_cond);
         if (g_cfg_w && g_cfg_h)
             input_post(m); /* output.c: KWin's screen follows the window */
+        /* The app's window is back: show it KWin's current frame. KWin may
+         * have drawn its last frames while there was no window (e.g. the
+         * screen size changed as the app went to the background) and draws
+         * nothing new if nothing changes. Frame 0 completes no page flip. */
+        struct cham_bo *shown = !had_surface && g_cfg_w && g_cfg_h ? kms_screen_bo_locked() : NULL;
+        if (shown)
+            link_present_locked(shown, -1, 0);
         break;
+    }
     case CHAM_RELEASE:
         if (m->id < MAX_SLOTS && g_slots[m->id]) {
             struct cham_bo *bo = g_slots[m->id];
