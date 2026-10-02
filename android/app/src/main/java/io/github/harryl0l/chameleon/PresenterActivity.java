@@ -62,6 +62,7 @@ public class PresenterActivity extends Activity
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    private static native boolean nativeScreenOff();
 
     private static final String PREFS = "chameleon";
     private static final String PREF_MODE = "input_mode";
@@ -75,6 +76,7 @@ public class PresenterActivity extends Activity
     private static boolean sStarted;
     private int mWidth, mHeight;
     private TextView mStatus;
+    private TextView mWakeHint;
     private SurfaceView mSurface;
     private int mImeBottom;
     private SharedPreferences mPrefs;
@@ -92,10 +94,12 @@ public class PresenterActivity extends Activity
         @Override
         public void run() {
             String status = nativeStatus();
-            boolean showing = "showing frames".equals(status);
+            boolean off = nativeScreenOff();
+            boolean showing = off || "showing frames".equals(status);
             mStatus.setVisibility(showing ? View.GONE : View.VISIBLE);
             if (!showing)
                 mStatus.setText("Chameleon: " + status);
+            mWakeHint.setVisibility(off ? View.VISIBLE : View.GONE);
             mHandler.postDelayed(this, 500);
         }
     };
@@ -137,12 +141,28 @@ public class PresenterActivity extends Activity
         mStatus.setTextColor(Color.LTGRAY);
         mStatus.setTextSize(12);
         mStatus.setPadding(32, 96, 32, 32);
+        // KWin turned its screen off (idle): a tap wakes it. The tap is ours,
+        // so it can't click whatever is under the finger.
+        mWakeHint = new TextView(this);
+        mWakeHint.setText(R.string.screen_off);
+        mWakeHint.setTextColor(Color.LTGRAY);
+        mWakeHint.setTextSize(16);
+        mWakeHint.setGravity(Gravity.CENTER);
+        mWakeHint.setBackgroundColor(Color.BLACK);
+        mWakeHint.setVisibility(View.GONE);
+        mWakeHint.setOnClickListener(v -> wakeScreen());
+        mWakeHint.setOnGenericMotionListener((v, e) -> { // a mouse
+            wakeScreen();
+            return true;
+        });
         mImeView = new ImeView(this, mKeys);
         FrameLayout root = new FrameLayout(this);
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mStatus, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
+        root.addView(mWakeHint, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mImeView, new FrameLayout.LayoutParams(1, 1));
         root.addView(buildToolbar(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
@@ -341,6 +361,14 @@ public class PresenterActivity extends Activity
                 return true;
         }
         return mKeys.onKeyEvent(event) || super.dispatchKeyEvent(event);
+    }
+
+    /** Wakes KWin's screen like a mouse would: the pointer a pixel right and back. */
+    private void wakeScreen() {
+        int w = mSurface.getWidth(), h = mSurface.getHeight();
+        InputSender.motion(InputSender.delta(1, 0, w, h));
+        InputSender.motion(InputSender.delta(-1, 0, w, h));
+        mWakeHint.setVisibility(View.GONE); // back if the screen stays off
     }
 
     // ---- settings ----
