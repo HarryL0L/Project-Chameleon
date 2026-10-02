@@ -122,6 +122,8 @@ struct blob {
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
 static int g_plane_shown;           /* ...and it fills the active CRTC */
+static int g_screen_off;            /* KWin turned its screen off (idle, DPMS) */
+static int g_screen_was_on;         /* ...after it had been on */
 static struct fb *g_fbs;
 static struct blob *g_blobs;
 static uint32_t g_next_object_id = 1000;
@@ -574,6 +576,11 @@ struct cham_bo *kms_screen_bo_locked(void)
     return g_plane_shown ? g_plane_bo : NULL;
 }
 
+int kms_screen_off_locked(void)
+{
+    return g_screen_off;
+}
+
 static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (a->flags & ~(uint32_t)DRM_MODE_ATOMIC_FLAGS)
@@ -657,6 +664,17 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
                             mode->vdisplay != old_mode->vdisplay))
         cham_log("KWin set mode %ux%u", mode->hdisplay, mode->vdisplay);
+    /* Off after having been on: KWin's DPMS off (CRTC inactive, mode
+     * cleared) or the DPMS property; e.g. Plasma's power management after a
+     * while without input. */
+    if (on && s.dpms == 0)
+        g_screen_was_on = 1;
+    int screen_off = g_screen_was_on && !(on && s.dpms == 0);
+    if (screen_off != g_screen_off) {
+        cham_log("KWin turned its screen %s", screen_off ? "off" : "on");
+        link_screen_off_locked(screen_off);
+    }
+    g_screen_off = screen_off;
 
     uint64_t frame = ++g_frame;
     int presented = 0;

@@ -30,6 +30,8 @@ enum cham_msg_type {
     CHAM_BUFFER_REMOVE = 3, /* id */
     CHAM_PRESENT = 4,       /* id, a = frame number, b = producer CLOCK_MONOTONIC ns;
                                fd = acquire fence (optional) */
+    CHAM_SCREEN = 5,        /* a = 1: the compositor turned its screen off (idle, DPMS),
+                               0: on again. Input wakes it. */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),

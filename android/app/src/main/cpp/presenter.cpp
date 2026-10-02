@@ -83,6 +83,7 @@ int64_t g_displayed = -1;   // buffer id currently latched on g_sc
 float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
 bool g_vote_dirty = false;
 bool g_copy_mode = false;    // negotiated per connection via HELLO
+bool g_screen_off = false;   // the producer turned its screen off (CHAM_SCREEN)
 PoolBuf g_pool[kPoolSize];
 int64_t g_pool_displayed = -1;
 // The pool buffer on screen when the surface went away (app in the
@@ -674,6 +675,21 @@ bool serve(int client, int listener)
             present(msg.id, msg.a, fd);
             fd = -1;
             break;
+        case CHAM_SCREEN: {
+            // KWin's screen went off (idle): show black, not its last frame,
+            // and let the activity offer "tap to wake". Its next frame shows
+            // the layer again.
+            std::lock_guard<std::mutex> lock(g_lock);
+            g_screen_off = msg.a != 0;
+            LOGI("producer turned its screen %s", g_screen_off ? "off" : "on");
+            if (g_screen_off && g_sc) {
+                ASurfaceTransaction *txn = ASurfaceTransaction_create();
+                ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+                ASurfaceTransaction_apply(txn);
+                ASurfaceTransaction_delete(txn);
+            }
+            break;
+        }
         default:
             LOGE("unknown message %u", msg.type);
             break;
@@ -687,6 +703,7 @@ done:
         g_client = -1;
         g_client_gen++;
         g_displayed = -1;
+        g_screen_off = false;
         for (uint32_t i = 0; i < kMaxBuffers; i++)
             remove_buffer_locked(i);
         // Don't leave the producer's last frame up (e.g. Plasma's logout
@@ -838,6 +855,13 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
     g_displayed = -1;
     g_width = g_height = 0;
     send_config_locked();  // 0x0: producer pauses
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeScreenOff(JNIEnv *, jclass)
+{
+    std::lock_guard<std::mutex> lock(g_lock);
+    return g_client >= 0 && g_screen_off;
 }
 
 JNIEXPORT jstring JNICALL
