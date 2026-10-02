@@ -74,6 +74,8 @@ struct fake_fd {
 void kms_init_once(void);
 /* Size of the mode KWin has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
+/* The buffer on KWin's screen, or NULL if the screen shows none. */
+struct cham_bo *kms_screen_bo_locked(void);
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or -errno */
 
 /* ---- interpose.c ---- */
