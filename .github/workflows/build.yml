@@ -2,8 +2,15 @@ name: Build
 
 on:
   push:
+    branches: ["**"] # not tags: release.yml builds those
   pull_request:
   workflow_dispatch:
+  workflow_call: # release.yml
+    inputs:
+      version:
+        description: "Release version (v0.1.0); empty for a dev build"
+        type: string
+        default: ""
 
 jobs:
   android:
@@ -38,10 +45,15 @@ jobs:
           CC="$NDK_CC" shim/build-android.sh out/chameleon
 
       - name: Termux package (.deb)
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           # Commit time first, so newer builds always sort higher for apt (the
           # hash alone compares at random: 4d83f62 < d7f4a01).
           VERSION="0.1.0~git$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
+          if [ -n "$RELEASE_VERSION" ]; then
+            VERSION="${RELEASE_VERSION#v}"
+          fi
           packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo "$VERSION" out/
           dpkg-deb --info out/chameleon_*_aarch64.deb
           dpkg-deb --contents out/chameleon_*_aarch64.deb
