@@ -1,6 +1,7 @@
 # KWin integration notes
 
-Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
+Target: KWin 6.7.5 as packaged in
+[BullyMaguire-lol/termux-packages `dev/kwin-wayland`](https://github.com/BullyMaguire-lol/termux-packages/tree/dev/kwin-wayland)
 (`x11-packages/kwin`), which makes udev and libinput optional.
 
 ## Output: `--drm` with a fake device (no KWin changes)
