@@ -50,7 +50,6 @@ static struct {
     unsigned serial;      /* bumped when the size changes */
 } g_want;
 static unsigned g_handled; /* g_want.serial is done (or given up) */
-static uint64_t g_due_ns;  /* debounce: act once the size settles */
 static int g_steps;        /* requests sent for g_want.serial */
 static int g_disabled = -1;
 
@@ -358,8 +357,9 @@ void output_config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
     g_want.refresh_mhz = refresh_mhz;
     g_want.serial++;
     g_steps = 0;
-    /* Keyboards and rotations can report a few sizes in a row. */
-    g_due_ns = now_ns() + 250000000ull;
+    /* Acted on at once (output_tick). A size that arrives while KWin is
+     * still switching to the previous one replaces it: only the latest is
+     * applied next. */
 }
 
 void output_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version)
@@ -401,8 +401,7 @@ int output_timeout_ms(void)
 {
     if (!output_pending() || !ready())
         return -1; /* KWin's events (or a new size) wake the thread */
-    uint64_t now = now_ns();
-    return now >= g_due_ns ? 0 : (int)((g_due_ns - now) / 1000000ull) + 1;
+    return 0;
 }
 
 void output_tick(void)
@@ -413,7 +412,7 @@ void output_tick(void)
         g_handled = g_want.serial; /* nothing we can do */
         return;
     }
-    if (ready() && now_ns() >= g_due_ns)
+    if (ready())
         decide();
 }
 
