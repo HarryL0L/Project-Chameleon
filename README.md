@@ -228,7 +228,7 @@ sequenceDiagram
     participant S as libchameleon.so (in KWin)
     participant K as KWin
     A->>S: CONFIG 2340x1080 (rotated)
-    Note over S: waits 250 ms for the size to settle
+    Note over S: acts at once
     S->>K: set_custom_modes(2344x1080), apply
     K-->>S: new mode listed, applied
     S->>K: mode(2344x1080), apply

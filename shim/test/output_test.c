@@ -323,16 +323,21 @@ int main(void)
     CHECK(current_is(1000, 500) && g.custom_sets == 1 && g.mode_sets == 2,
           "rotating back picks the existing native mode (%d custom mode lists)", g.custom_sets);
 
-    send_size(c, 700, 400); /* keyboard animating: only the last size counts */
+    send_size(c, 700, 400); /* a new size goes to KWin at once... */
     run_for(50);
+    CHECK(current_is(704, 400), "a new size goes to KWin at once (screen %dx%d)", g.current ? g.current->w : 0,
+          g.current ? g.current->h : 0);
+    send_size(c, 750, 400); /* ...and of several in quick succession, the latest wins */
     send_size(c, 800, 400);
     run_for(800);
-    CHECK(g.custom_sets == 2 && g.custom_w == 800 && current_is(800, 400),
-          "sizes in quick succession: only the last one is applied (%dx%d)", g.custom_w, g.custom_h);
+    CHECK(g.custom_w == 800 && current_is(800, 400), "sizes in quick succession: the latest wins (%dx%d)",
+          g.custom_w, g.custom_h);
+    /* KWin keeps a replaced custom mode while it's on screen (the real one
+     * does too), so an earlier size can stay listed. */
     int custom_left = 0;
     for (int i = 0; i < g.count; i++)
         custom_left += g.modes[i].custom && !g.modes[i].removed;
-    CHECK(custom_left == 1, "the previous custom mode was replaced (%d left)", custom_left);
+    CHECK(custom_left <= 2, "older custom modes were replaced (%d left)", custom_left);
 
     send_config(c, 800, 400, 60000); /* battery saver: 60 Hz */
     run_for(800);
