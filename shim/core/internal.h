@@ -35,6 +35,8 @@ int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, i
  * will answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
 void link_forget_bo_locked(struct cham_bo *bo);
+/* Tells the presenter KWin turned its screen off (1) or on (0). */
+void link_screen_off_locked(int off);
 /* Page-flip event bookkeeping (one pending flip, like KMS). */
 int link_flip_pending_locked(void);
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
@@ -76,6 +78,8 @@ void kms_init_once(void);
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The buffer on KWin's screen, or NULL if the screen shows none. */
 struct cham_bo *kms_screen_bo_locked(void);
+/* KWin turned its screen off (it wakes on input). */
+int kms_screen_off_locked(void);
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or -errno */
 
 /* ---- interpose.c ---- */

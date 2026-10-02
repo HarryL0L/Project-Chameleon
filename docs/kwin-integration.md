@@ -17,6 +17,10 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
   `libEGL_chameleon.so` vendor, which forwards to Android's libEGL.
 - Atomic commit → `CHAM_PRESENT`; `CHAM_FRAME_DONE` → page-flip event on the
   fake fd. One pending flip, exactly like the demo's default pacing.
+- KWin's DPMS off (idle, Plasma's power management) is an atomic commit
+  with CRTC `ACTIVE` 0 and no mode; the shim sends `CHAM_SCREEN` (off, and on
+  again), and the app shows "tap to wake", which sends a pointer nudge: any
+  input wakes KWin's screen.
 
 ## Input: fake input from inside KWin's own process
 

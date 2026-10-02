@@ -190,6 +190,11 @@ int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
     return ok;
 }
 
+void link_screen_off_locked(int off)
+{
+    send_msg_locked(CHAM_SCREEN, 0, off ? 1 : 0, 0, -1);
+}
+
 void link_forget_bo_locked(struct cham_bo *bo)
 {
     if (bo->slot >= 0 && bo->slot_gen == g_gen) {
@@ -280,6 +285,8 @@ static void *reader_main(void *arg)
         pthread_mutex_lock(&g_lock);
         g_sock = s;
         g_gen++;
+        if (kms_screen_off_locked())
+            link_screen_off_locked(1); /* the app shows "tap to wake" */
         memset(g_slots, 0, sizeof g_slots);
         pthread_mutex_unlock(&g_lock);
         cham_log("connected to the presenter (pid %d)", (int)getpid());
