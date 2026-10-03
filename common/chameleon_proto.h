@@ -3,9 +3,9 @@
  * Wire protocol between a Termux-side producer (the KWin shim, or the demo)
  * and the presenter app.
  *
- * Transport: AF_UNIX SOCK_SEQPACKET. The presenter app is installed with
- * sharedUserId="com.termux" (signed with Termux's public GitHub test key), so
- * it runs as the Termux user and simply listens on CHAM_SOCKET_PATH.
+ * Transport: AF_UNIX SOCK_SEQPACKET. Producers connect to CHAM_SOCKET_PATH,
+ * where a broker in Termux (Broker.java, run from the app's APK as the Termux
+ * user) accepts and passes each connection to the presenter app over Binder.
  * Every message is one struct cham_msg packet, optionally carrying one fd via
  * SCM_RIGHTS. BUFFER_ADD is immediately followed by one packet written by
  * AHardwareBuffer_sendHandleToUnixSocket().
@@ -109,8 +109,8 @@ enum cham_client_msg_type {
 };
 #define CHAM_CLIENT_SOCKET_SUFFIX ".chameleon"
 
-/* Filesystem socket the presenter app listens on; override with
- * $CHAMELEON_SOCKET on the producer side. */
+/* Filesystem socket the broker listens on for the presenter app; override
+ * with $CHAMELEON_SOCKET. */
 #define CHAM_SOCKET_PATH "/data/data/com.termux/files/usr/tmp/chameleon-0"
 
 #endif

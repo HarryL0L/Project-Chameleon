@@ -1,12 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  sharedUserId="com.termux" makes this app run as the Termux user, so it can
-  listen on a socket in $PREFIX/tmp that Termux processes connect to. This only
-  installs next to a Termux build signed with the same key (GitHub releases).
+  An ordinary app, so it installs next to any Termux build (GitHub, F-Droid).
+  KWin's shim reaches it through a small broker that runs in Termux
+  (Broker.java, started by the `chameleon` launcher from this APK).
 -->
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:sharedUserId="com.termux"
-    android:sharedUserLabel="@string/shared_user_label">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- To check that connections come from Termux's user (BrokerLink). -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
 
     <application
         android:label="@string/app_name"

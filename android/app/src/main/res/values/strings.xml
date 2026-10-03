@@ -1,8 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Chameleon</string>
-    <!-- Must match the label Termux and its plugins use for the shared user. -->
-    <string name="shared_user_label">Termux user</string>
     <string name="keyboard">Keyboard</string>
     <string name="settings">Settings</string>
     <string name="settings_title">Chameleon settings</string>

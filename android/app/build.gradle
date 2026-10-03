@@ -20,8 +20,8 @@ android {
     }
 
     // Termux's *public* GitHub-release test key (from termux-app's
-    // testkey_untrusted.jks). Signing with it is what lets
-    // sharedUserId="com.termux" install next to a GitHub build of Termux.
+    // testkey_untrusted.jks). The app no longer shares Termux's user, so any
+    // stable key would do; this one is kept so updates keep installing.
     signingConfigs {
         termux {
             storeFile = rootProject.file("termux-testkey.jks")
