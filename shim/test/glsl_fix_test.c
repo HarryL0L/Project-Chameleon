@@ -34,6 +34,16 @@ int main(void)
     check("#if __VERSION__ >= 130\n", "#if __VERSION__ >= 130\n");
     check("uniform float GL_like_name; // #if GL_X\n", "uniform float GL_like_name; // #if GL_X\n");
     check("#version 300 es\n#if GL_A\nx\n#endif\n", "#version 300 es\n#if defined(GL_A)\nx\n#endif\n");
+    /* KWin 6.7's blur downsample.frag, as KWin hands it over on GLES 3 */
+    check("#version 300 es\n    vec4 sum = texture2D(texUnit, uv) * 4.0;\n    sum += texture2D (texUnit, uv);\n",
+          "#version 300 es\n    vec4 sum = texture(texUnit, uv) * 4.0;\n    sum += texture (texUnit, uv);\n");
+    check("#version 300 es\nvec4 my_texture2D(int a);\nfloat texture2DLod;\nx = texture2D;\n",
+          "#version 300 es\nvec4 my_texture2D(int a);\nfloat texture2DLod;\nx = texture2D;\n");
+    check("#version 300 es\nuniform samplerExternalOES sampler;\nr = texture2D(sampler, c);\n",
+          "#version 300 es\nuniform samplerExternalOES sampler;\nr = texture2D(sampler, c);\n");
+    check("#version 140\nr = texture2D(sampler, c);\n", "#version 140\nr = texture2D(sampler, c);\n");
+    check("vec4 texture(in sampler2D s, in vec2 c) {\n    return texture2D(s, c);\n",
+          "vec4 texture(in sampler2D s, in vec2 c) {\n    return texture2D(s, c);\n");
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures != 0;
 }
