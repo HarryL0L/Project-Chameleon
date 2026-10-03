@@ -27,8 +27,9 @@ chameleon startplasma-wayland        # a Plasma session
 ```
 
 `chameleon` puts its `bin/` directory first in `PATH`, clears `DISPLAY` /
-`WAYLAND_DISPLAY` and runs the command (in a new D-Bus session if there is
-none). Every `kwin_wayland` started inside - directly, by
+`WAYLAND_DISPLAY`, starts the app's broker (which hands KWin's connection to
+the app; log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and runs the command
+(in a new D-Bus session if there is none). Every `kwin_wayland` started inside - directly, by
 `kwin_wayland_wrapper` or by `startplasma-wayland` - is then
 `bin/kwin_wayland`, which attaches the shim to that one process and runs the
 real KWin. No `--drm` is needed anywhere: with neither

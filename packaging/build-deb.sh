@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Builds the Termux package (aarch64 .deb) from a built shim directory:
 #
-#   packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo 0.1.0 out/
+#   packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
 #   lib/chameleon/          libchameleon.so, libEGL_chameleon.so, the launch
@@ -10,15 +10,14 @@
 #                           libgbm.so, which must stay out of $PREFIX/lib where
 #                           it would replace Mesa's for every program
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
-#   bin/chameleon-probe, bin/chameleon-demo
+#   bin/chameleon-probe
 #   share/doc/chameleon/README.md, copyright (GPL-2.0-or-later)
 # Install on the phone: apt install ./chameleon_<version>_aarch64.deb
 set -e
 SHIM=${1:?built shim directory}
 PROBE=${2:?ahb_probe}
-DEMO=${3:?chameleon_demo}
-VERSION=${4:?version}
-OUTDIR=${5:-.}
+VERSION=${3:?version}
+OUTDIR=${4:-.}
 cd "$(dirname "$0")/.."
 
 PREFIX=/data/data/com.termux/files/usr
@@ -34,7 +33,6 @@ install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"
-install -m 755 "$DEMO" "$ROOT$PREFIX/bin/chameleon-demo"
 install -m 644 README.md "$ROOT$PREFIX/share/doc/chameleon/README.md"
 {
     cat <<'NOTICE'

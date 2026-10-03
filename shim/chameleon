@@ -59,4 +59,20 @@ else
     done
 fi
 export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDORS"
+
+# The app can't open the socket in $PREFIX/tmp that KWin's shim connects to.
+# A broker from the app's APK does, running here as the Termux user, and hands
+# each connection to the app. It exits with this process ($$, the session
+# after the exec below).
+APP=io.github.harryl0l.chameleon
+APK=$(env -u LD_PRELOAD -u LD_LIBRARY_PATH /system/bin/pm path "$APP" 2>/dev/null | sed -n 's/^package://p' | head -n 1)
+if [ -z "$APK" ]; then
+    echo "chameleon: the Chameleon app isn't installed (or Termux can't see it)" >&2
+    exit 1
+fi
+export CHAMELEON_SOCKET=${CHAMELEON_SOCKET:-$PREFIX/tmp/chameleon-0}
+CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
+    /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET" \
+    >"$XDG_RUNTIME_DIR/chameleon-broker.log" 2>&1 &
+
 exec "$@"

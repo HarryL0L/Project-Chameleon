@@ -87,8 +87,9 @@ flowchart TB
 ```
 
 Purple is KDE/Termux software as shipped, blue is Chameleon's shim, and green
-is Android. KWin and the app talk over one Unix socket,
-`$PREFIX/tmp/chameleon-0`.
+is Android. KWin and the app talk over one Unix socket. KWin's shim connects
+to `$PREFIX/tmp/chameleon-0`, where a small broker from the app's APK, running
+in Termux, hands the connection to the app.
 
 <details>
 <summary><b>🦎 The Chameleon app</b>: Android side, shows frames and collects input</summary>
@@ -110,9 +111,12 @@ is Android. KWin and the app talk over one Unix socket,
   choice in settings). Mouse and hardware keys are forwarded, and the
   on-screen keyboard comes with an extra row (Esc, Tab, sticky Ctrl/Alt,
   arrows, Home/End, PgUp/PgDn).
-- **Same user as Termux:** the APK is signed with Termux's public GitHub test
-  key and declares `sharedUserId="com.termux"`. That's why it can listen on
-  `$PREFIX/tmp/chameleon-0`, and why it needs Termux from GitHub releases.
+- **Works with any Termux:** the app is an ordinary app, so it installs next
+  to Termux from GitHub or F-Droid. It can't open files in Termux, so the
+  `chameleon` launcher starts a small broker from the app's own APK
+  (`app_process`, as the Termux user). The broker listens on
+  `$PREFIX/tmp/chameleon-0` and passes each connection from KWin to the app
+  over Binder; the app accepts them only from Termux's user.
 
 Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/chameleon_proto.h)
 </details>
@@ -291,7 +295,7 @@ Chameleon uses only public Android APIs and the phone's own GPU driver
 | | Needed for |
 |---|---|
 | arm64 (aarch64), **Android 10** (API 29) or newer | the app (`ASurfaceControl`) and Termux |
-| [Termux from GitHub releases](https://github.com/termux/termux-app/releases) | the app shares its signing key to run as the Termux user |
+| Termux from [GitHub](https://github.com/termux/termux-app/releases) or [F-Droid](https://f-droid.org/packages/com.termux/) | KWin, Plasma and the shim run in it |
 | `AHardwareBuffer` (API 26) that can be allocated as RGBA8888 / RGBX8888 with `GPU_SAMPLED_IMAGE \| GPU_COLOR_OUTPUT`, and sent over a Unix socket | every frame: KWin's output and app buffers |
 | a dmabuf inside the gralloc handle (`AHardwareBuffer_getNativeHandle`) | buffers are matched across processes by it |
 | `AImageReader` from `libmediandk` (API 26) | GPU rendering for Wayland apps; without it apps fall back to Mesa |
@@ -330,13 +334,15 @@ rather than required of the phone.
 
 ## Getting started
 
-**Requirements:** see [What a phone needs](#what-a-phone-needs), plus
-[Termux from GitHub releases](https://github.com/termux/termux-app/releases)
-with KWin installed.
+**Requirements:** see [What a phone needs](#what-a-phone-needs), plus Termux
+(from [GitHub](https://github.com/termux/termux-app/releases) or
+[F-Droid](https://f-droid.org/packages/com.termux/)) with KWin installed.
 
 1. Download the `chameleon-<commit>` artifact from the latest
    [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml) and unzip it.
-2. Install `chameleon.apk` and open **Chameleon**.
+2. Install `chameleon.apk` and open **Chameleon**. If a Chameleon app from
+   v0.1.0 or older is installed, uninstall it first: it shared Termux's user,
+   and Android can't update it to this version.
 3. In Termux, install the package, then start a session (run
    `termux-setup-storage` once first, so Termux can read `/sdcard`):
 
@@ -370,8 +376,7 @@ with KWin installed.
 for all Termux programs (`--remove` undoes it; removing the package does too).
 
 The package also installs `chameleon-probe`, which checks a device's EGL,
-AHardwareBuffer and AImageReader support, and `chameleon-demo`, a minimal
-zero-copy producer for the app.
+AHardwareBuffer and AImageReader support.
 
 ## Repository layout
 
@@ -385,7 +390,6 @@ zero-copy producer for the app.
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
 | [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
-| [`termux/demo/`](termux/demo/) | `chameleon_demo`: minimal zero-copy producer |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |
 | [`branding/`](branding/) | Logo and launcher-icon generator |
@@ -396,7 +400,7 @@ Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml))
 Each push produces one artifact: the APK, the Termux package
 (`chameleon_<version>_aarch64.deb`, built by
 [`packaging/build-deb.sh`](packaging/build-deb.sh)), the same files as a
-plain `chameleon/` folder, and the probe and demo. It also runs the host tests.
+plain `chameleon/` folder, and the probe. It also runs the host tests.
 
 Locally:
 
@@ -404,7 +408,7 @@ Locally:
 gradle -p android assembleDebug                                       # the app
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
-packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo 0.1.0 out/
+packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
 shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev
 ```
 

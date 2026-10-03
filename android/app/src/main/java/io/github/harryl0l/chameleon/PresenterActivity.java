@@ -39,8 +39,9 @@ import android.widget.TextView;
 
 /**
  * Full-screen SurfaceView. The native presenter attaches an ASurfaceControl to
- * it and shows AHardwareBuffers sent by a Termux process over
- * $PREFIX/tmp/chameleon-0 (for KWin, after one GPU copy; see presenter.cpp).
+ * it and shows AHardwareBuffers from a Termux process (for KWin, after one GPU
+ * copy; see presenter.cpp), over a socket the Termux broker hands over
+ * (BrokerLink).
  *
  * Input goes back over the same socket: touches (direct or as a trackpad),
  * mouse, hardware keys and the Android keyboard. A small toolbar in the top
@@ -62,6 +63,8 @@ public class PresenterActivity extends Activity
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
+    static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
 
     private static final String PREFS = "chameleon";
@@ -183,7 +186,8 @@ public class PresenterActivity extends Activity
         });
 
         if (!sStarted) {
-            nativeStart(); // listens on CHAM_SOCKET_PATH; we run as the Termux user
+            nativeStart(); // serves the connections the Termux broker passes on
+            BrokerLink.listen(this);
             sStarted = true;
         }
     }

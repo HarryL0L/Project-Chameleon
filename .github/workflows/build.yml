@@ -35,10 +35,9 @@ jobs:
           # The NDK the app build uses (android/app/build.gradle ndkVersion).
           echo "NDK_CC=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" >> "$GITHUB_ENV"
 
-      - name: Build Termux tools (probe, demo) with the NDK
+      - name: Build the probe with the NDK
         run: |
           "$NDK_CC" -O2 -Wall -Wextra -o out/ahb_probe probe/ahb_probe.c -ldl
-          "$NDK_CC" -O2 -Wall -Wextra -Icommon -o out/chameleon_demo termux/demo/chameleon_demo.c -ldl -lm
 
       - name: Build the shim (chameleon/) with the NDK
         run: |
@@ -54,7 +53,7 @@ jobs:
           if [ -n "$RELEASE_VERSION" ]; then
             VERSION="${RELEASE_VERSION#v}"
           fi
-          packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo "$VERSION" out/
+          packaging/build-deb.sh out/chameleon out/ahb_probe "$VERSION" out/
           dpkg-deb --info out/chameleon_*_aarch64.deb
           dpkg-deb --contents out/chameleon_*_aarch64.deb
 

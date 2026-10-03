@@ -1,6 +1,6 @@
 Chameleon runs Termux's KWin, or a full Plasma session, on your phone's screen, drawn by the phone's own GPU. No root needed.
 
-> ⚠️ Experimental. Needs an **arm64 phone on Android 10+** and **[Termux from GitHub releases](https://github.com/termux/termux-app/releases)** (not the Play Store version). See [What a phone needs](https://github.com/HarryL0L/Project-Chameleon#what-a-phone-needs).
+> ⚠️ Experimental. Needs an **arm64 phone on Android 10+** and Termux from **[GitHub](https://github.com/termux/termux-app/releases)** or **[F-Droid](https://f-droid.org/packages/com.termux/)** (not the Play Store version). See [What a phone needs](https://github.com/HarryL0L/Project-Chameleon#what-a-phone-needs).
 
 ## Downloads
 
@@ -18,13 +18,14 @@ The KDE packages are built from [BullyMaguire-lol/termux-packages `dev/kwin-wayl
 
 ## Install
 
-1. Install **Termux** from its GitHub releases. If you have the Play Store version, uninstall it first.
-2. Download every file above. Install `chameleon.apk` and open **Chameleon** once.
+1. Install **Termux** from GitHub or F-Droid. If you have the Play Store version, uninstall it first.
+2. Download every file above. Install `chameleon.apk` and open **Chameleon** once. If a Chameleon app from v0.1.0 or older is installed, uninstall it first: Android can't update it to this version.
 3. In Termux:
 
    ```sh
    termux-setup-storage          # once, so Termux can read Downloads
    pkg install x11-repo          # Termux's repository with the KDE packages
+   pkg install plasma            # Plasma, if it isn't installed yet
    cd /sdcard/Download
    apt install ./{{DEB}} ./kwin_6.7.5_aarch64.deb \
        ./plasma-workspace_6.7.5-1_aarch64.deb ./layer-shell-qt_6.7.5-1_aarch64.deb \
@@ -43,7 +44,6 @@ The KDE packages are built from [BullyMaguire-lol/termux-packages `dev/kwin-wayl
    or a full Plasma desktop:
 
    ```sh
-   pkg install plasma-desktop
    chameleon startplasma-wayland
    ```
 
