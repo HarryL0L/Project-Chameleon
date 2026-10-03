@@ -376,8 +376,7 @@ rather than required of the phone.
 for all Termux programs (`--remove` undoes it; removing the package does too).
 
 The package also installs `chameleon-probe`, which checks a device's EGL,
-AHardwareBuffer and AImageReader support, and `chameleon-demo`, a minimal
-zero-copy producer for the app.
+AHardwareBuffer and AImageReader support.
 
 ## Repository layout
 
@@ -391,7 +390,6 @@ zero-copy producer for the app.
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
 | [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
-| [`termux/demo/`](termux/demo/) | `chameleon_demo`: minimal zero-copy producer |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |
 | [`branding/`](branding/) | Logo and launcher-icon generator |
@@ -402,7 +400,7 @@ Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml))
 Each push produces one artifact: the APK, the Termux package
 (`chameleon_<version>_aarch64.deb`, built by
 [`packaging/build-deb.sh`](packaging/build-deb.sh)), the same files as a
-plain `chameleon/` folder, and the probe and demo. It also runs the host tests.
+plain `chameleon/` folder, and the probe. It also runs the host tests.
 
 Locally:
 
@@ -410,7 +408,7 @@ Locally:
 gradle -p android assembleDebug                                       # the app
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
-packaging/build-deb.sh out/chameleon out/ahb_probe out/chameleon_demo 0.1.0 out/
+packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
 shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev
 ```
 

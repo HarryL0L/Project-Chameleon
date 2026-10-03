@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Wire protocol between a Termux-side producer (the KWin shim, or the demo)
+ * Wire protocol between a Termux-side producer (the KWin shim)
  * and the presenter app.
  *
  * Transport: AF_UNIX SOCK_SEQPACKET. Producers connect to CHAM_SOCKET_PATH,
@@ -81,7 +81,7 @@ enum cham_input_kind {
  * RELEASE arrives. SurfaceFlinger still scans that buffer out for one more
  * vsync, so the presenter blits each frame into its own buffer pool and
  * sends RELEASE (with the blit fence) right after the copy is queued. KWin
- * via the shim uses this; the demo stays zero-copy. */
+ * via the shim uses this. */
 #define CHAM_HELLO_COPY 1u
 
 struct cham_msg {
