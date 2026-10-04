@@ -406,7 +406,7 @@ plain `chameleon/` folder, and the probe. It also runs the host tests.
 Locally:
 
 ```sh
-gradle -p android assembleDebug                                       # the app
+gradle -p android assembleRelease                                     # the app (assembleDebug: debuggable)
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
 packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/

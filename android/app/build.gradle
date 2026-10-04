@@ -39,7 +39,9 @@ android {
             signingConfig = signingConfigs.findByName("chameleon") ?: signingConfigs.debug
         }
         release {
-            signingConfig = signingConfigs.findByName("chameleon")
+            signingConfig = signingConfigs.findByName("chameleon") ?: signingConfigs.debug
+            minifyEnabled = true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 

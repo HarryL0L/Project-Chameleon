@@ -42,10 +42,12 @@ jobs:
             echo "::error::a release needs the signing secrets"
             exit 1
           fi
-          gradle --no-daemon -p android assembleDebug
+          gradle --no-daemon -p android assembleRelease assembleDebug
           rm -f "$RUNNER_TEMP/chameleon.jks"
           mkdir -p out
-          cp android/app/build/outputs/apk/debug/app-debug.apk out/chameleon.apk
+          cp android/app/build/outputs/apk/release/app-release.apk out/chameleon.apk
+          # Debuggable, for development; releases ship chameleon.apk only.
+          cp android/app/build/outputs/apk/debug/app-debug.apk out/chameleon-debug.apk
           # The NDK the app build uses (android/app/build.gradle ndkVersion).
           echo "NDK_CC=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" >> "$GITHUB_ENV"
 
