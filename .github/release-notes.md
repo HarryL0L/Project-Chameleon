@@ -19,7 +19,7 @@ The KDE packages are built from [BullyMaguire-lol/termux-packages `dev/kwin-wayl
 ## Install
 
 1. Install **Termux** from GitHub or F-Droid. If you have the Play Store version, uninstall it first.
-2. Download every file above. Install `chameleon.apk` and open **Chameleon** once. If a Chameleon app from v0.1.0 or older is installed, uninstall it first: Android can't update it to this version.
+2. Download every file above. Install `chameleon.apk` and open **Chameleon** once. If a Chameleon app from v0.1.0 or an earlier development build is installed, uninstall it first: those were signed with Termux's public test key, so Android can't update them to this version.
 3. In Termux:
 
    ```sh

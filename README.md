@@ -341,8 +341,9 @@ rather than required of the phone.
 1. Download the `chameleon-<commit>` artifact from the latest
    [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml) and unzip it.
 2. Install `chameleon.apk` and open **Chameleon**. If a Chameleon app from
-   v0.1.0 or older is installed, uninstall it first: it shared Termux's user,
-   and Android can't update it to this version.
+   v0.1.0 or an earlier development build is installed, uninstall it first:
+   those were signed with Termux's public test key, and Android can't update
+   them to this version.
 3. In Termux, install the package, then start a session (run
    `termux-setup-storage` once first, so Termux can read `/sdcard`):
 
