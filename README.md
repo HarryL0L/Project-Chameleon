@@ -368,8 +368,8 @@ rather than required of the phone.
    `chmod +x chameleon/chameleon* chameleon/bin/*`, then
    `chameleon/chameleon --install` to put `chameleon` in `$PATH`.
 
-4. Switch to the app. The ⌨️ button opens the keyboard, and ⚙️ opens the
-   settings: **direct touch** or **trackpad** (tap to click, two-finger tap for right
+4. Switch to the app. Tap the Chameleon icon (drag it anywhere) for its
+   buttons: ⌨️ opens the keyboard, and ⚙️ opens the settings: **direct touch** or **trackpad** (tap to click, two-finger tap for right
    click, two-finger drag to scroll, long-press or tap-and-drag to hold, e.g. to
    move a window).
 
