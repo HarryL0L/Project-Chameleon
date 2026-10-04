@@ -19,6 +19,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
+#include <drm_fourcc.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -80,7 +81,6 @@ FWD(EGLSurface, eglCreatePixmapSurface, (EGLDisplay d, EGLConfig c, EGLNativePix
 FWD(EGLSurface, eglCreatePlatformPixmapSurface, (EGLDisplay d, EGLConfig c, void *p, const EGLAttrib *a), (d, c, p, a), EGL_NO_SURFACE)
 FWD(EGLSync, eglCreateSync, (EGLDisplay d, EGLenum t, const EGLAttrib *a), (d, t, a), EGL_NO_SYNC)
 FWD(EGLBoolean, eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c), EGL_FALSE)
-FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
@@ -333,6 +333,12 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
         return cham_core_present() ? k_client_extensions_kms : k_client_extensions;
     if (name == EGL_VENDOR && cham_wl_vendor_string())
         return cham_wl_vendor_string();
+    /* Xwayland trusts implicit sync unless the vendor is NVIDIA's. A dmabuf
+     * handed to KWin carries no fences here, so ask for its other path: it
+     * waits for the GPU (glamor_finish) before presenting a window. */
+    const char *xwl = getenv("CHAMELEON_XWAYLAND");
+    if (name == EGL_VENDOR && xwl && strcmp(xwl, "1") == 0)
+        return "Chameleon (Android OpenGL ES; no implicit sync, like NVIDIA)";
     const char *s = p_eglQueryString ? p_eglQueryString(dpy, name) : NULL;
     if (name != EGL_EXTENSIONS || !s)
         return s;
@@ -362,15 +368,26 @@ static EGLBoolean EGLAPIENTRY shim_eglQueryDisplayAttribEXT(EGLDisplay dpy, EGLi
 
 /* ---- dmabuf import ---- */
 
+/* What KWin offers its clients: the formats it scans out, plus the ones
+ * Xwayland's windows use (gralloc's BGRA), which it can import but not scan
+ * out (kms.c offers only cham_formats() on the plane). */
 static EGLBoolean EGLAPIENTRY shim_eglQueryDmaBufFormatsEXT(EGLDisplay dpy, EGLint max, EGLint *formats, EGLint *num)
 {
     (void)dpy;
     int n;
     const uint32_t *ours = cham_formats(&n);
+    uint32_t all[8];
+    int count = 0;
+    for (int i = 0; i < n && count < 6; i++)
+        all[count++] = ours[i];
+    if (n > 0) {
+        all[count++] = DRM_FORMAT_ARGB8888;
+        all[count++] = DRM_FORMAT_XRGB8888;
+    }
     if (max > 0 && formats)
-        for (int i = 0; i < n && i < max; i++)
-            formats[i] = (EGLint)ours[i];
-    *num = max > 0 && formats ? (n < max ? n : max) : n;
+        for (int i = 0; i < count && i < max; i++)
+            formats[i] = (EGLint)all[i];
+    *num = max > 0 && formats ? (count < max ? count : max) : count;
     return EGL_TRUE;
 }
 
@@ -384,12 +401,50 @@ static EGLBoolean EGLAPIENTRY shim_eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EG
     return EGL_TRUE;
 }
 
+/* Images of dmabufs declared without alpha (XRGB/XBGR). The driver only
+ * sees the AHardwareBuffer, whose format may have alpha all the same:
+ * Xwayland's glamor stores opaque windows as ARGB (GLES can't render to
+ * XRGB) and GL apps leave alpha at 0 there. Textures made from these images
+ * read alpha as 1, as a driver importing the dmabuf as XRGB would. */
+#define MAX_OPAQUE 256
+static pthread_mutex_t g_opaque_lock = PTHREAD_MUTEX_INITIALIZER;
+static EGLImageKHR g_opaque[MAX_OPAQUE];
+static int g_opaque_count;
+
+static void opaque_add(EGLImageKHR image)
+{
+    pthread_mutex_lock(&g_opaque_lock);
+    if (g_opaque_count < MAX_OPAQUE)
+        g_opaque[g_opaque_count++] = image;
+    pthread_mutex_unlock(&g_opaque_lock);
+}
+
+static int opaque_find(EGLImageKHR image, int remove)
+{
+    int found = 0;
+    pthread_mutex_lock(&g_opaque_lock);
+    for (int i = 0; i < g_opaque_count; i++) {
+        if (g_opaque[i] == image) {
+            found = 1;
+            if (remove)
+                g_opaque[i] = g_opaque[--g_opaque_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_opaque_lock);
+    return found;
+}
+
 static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
 {
     int fd = -1;
-    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
+    EGLint fourcc = 0;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2) {
         if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
             fd = a[1];
+        else if (a[0] == EGL_LINUX_DRM_FOURCC_EXT)
+            fourcc = a[1];
+    }
     /* KWin's own gbm buffers, or apps' buffers registered in clients.c;
      * any other dmabuf has no AHardwareBuffer we could hand the driver. */
     struct cham_bo *bo = cham_bo_from_fd(fd);
@@ -409,8 +464,26 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
         return EGL_NO_IMAGE_KHR;
     }
     const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb),
-                        image_attribs);
+    EGLImageKHR image =
+        create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb), image_attribs);
+    if (image != EGL_NO_IMAGE_KHR &&
+        ((uint32_t)fourcc == DRM_FORMAT_XRGB8888 || (uint32_t)fourcc == DRM_FORMAT_XBGR8888))
+        opaque_add(image);
+    return image;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
+{
+    opaque_find(image, 1);
+    REAL(EGLBoolean, eglDestroyImageKHR, (EGLDisplay, EGLImageKHR))
+    return p_eglDestroyImageKHR ? p_eglDestroyImageKHR(dpy, image) : EGL_FALSE;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglDestroyImage(EGLDisplay dpy, EGLImage image)
+{
+    opaque_find(image, 1);
+    REAL(EGLBoolean, eglDestroyImage, (EGLDisplay, EGLImage))
+    return p_eglDestroyImage ? p_eglDestroyImage(dpy, image) : EGL_FALSE;
 }
 
 static EGLImageKHR EGLAPIENTRY shim_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
@@ -462,8 +535,19 @@ TRACED_VOID(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT", (unsigned id, un
             (id, pname, v))
 TRACED_VOID(BeginQueryEXT, "glBeginQueryEXT", (unsigned target, unsigned id), (target, id))
 TRACED_VOID(EndQueryEXT, "glEndQueryEXT", (unsigned target), (target))
-TRACED_VOID(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES", (unsigned target, void *image),
-            (target, image))
+static void (*p_tr_EGLImageTargetTexture2DOES)(unsigned target, void *image);
+static void tr_EGLImageTargetTexture2DOES(unsigned target, void *image)
+{
+    CHAM_NOTE_CALL("glEGLImageTargetTexture2DOES");
+    p_tr_EGLImageTargetTexture2DOES(target, image);
+    if (target == 0x0DE1 /* GL_TEXTURE_2D */ && opaque_find(image, 0)) {
+        static void (*tex_parameteri)(unsigned, unsigned, int);
+        if (!tex_parameteri)
+            *(void **)&tex_parameteri = real("glTexParameteri");
+        if (tex_parameteri)
+            tex_parameteri(target, 0x8E45 /* GL_TEXTURE_SWIZZLE_A */, 1 /* GL_ONE */);
+    }
+}
 TRACED_VOID(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES",
             (unsigned target, void *image), (target, image))
 TRACED(EGLSyncKHR, CreateSyncKHR, "eglCreateSyncKHR", (EGLDisplay d, EGLenum t, const EGLint *a), (d, t, a))
@@ -505,6 +589,7 @@ static const struct {
     OWN(eglQueryString),
     OWN(eglCreateImage),
     {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
+    {"eglDestroyImageKHR", (void *)shim_eglDestroyImageKHR},
     {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
     {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
     {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},

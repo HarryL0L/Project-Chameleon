@@ -46,10 +46,13 @@ int gbm_device_get_fd(struct gbm_device *gbm)
     return gbm->fd;
 }
 
+/* Mesa's own name. Xwayland announces any other one as the glvnd GLX
+ * vendor of its screen, and X11 GL apps would then look for a
+ * libGLX_chameleon that doesn't exist. */
 const char *gbm_device_get_backend_name(struct gbm_device *gbm)
 {
     (void)gbm;
-    return "chameleon";
+    return "drm";
 }
 
 int gbm_device_is_format_supported(struct gbm_device *gbm, uint32_t format, uint32_t flags)

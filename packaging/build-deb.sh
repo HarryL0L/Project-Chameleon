@@ -6,7 +6,7 @@
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
 #   lib/chameleon/          libchameleon.so, libEGL_chameleon.so, the launch
-#                           scripts and bin/kwin_wayland - and the fake
+#                           scripts and bin/kwin_wayland, bin/Xwayland - and the fake
 #                           libgbm.so, which must stay out of $PREFIX/lib where
 #                           it would replace Mesa's for every program
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
@@ -29,7 +29,7 @@ mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT
 
 install -m 644 "$SHIM/libchameleon.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$LIB/"
-install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
+install -m 755 "$SHIM/bin/kwin_wayland" "$SHIM/bin/Xwayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"

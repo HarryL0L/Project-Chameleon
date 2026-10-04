@@ -1,0 +1,45 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Xwayland as started by a Chameleon KWin (this directory is first in PATH).
+# It runs the real Xwayland with glamor on Android's GPU: libchameleon.so
+# lets it find KWin's (fake) DRM device and gives it the same gbm buffers -
+# AHardwareBuffers - and EGL vendor as KWin, so X11 windows are drawn on the
+# GPU and reach KWin without copies. CHAMELEON_XWAYLAND_GLAMOR=0 runs it as
+# before (software rendering).
+set -e
+
+SELF_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd -P)
+SHIM_DIR=${CHAMELEON_SHIM_DIR:-$(cd "$SELF_DIR/.." && pwd -P)}
+
+# The real Xwayland: the next one in PATH after this directory.
+REAL=
+IFS_SAVED=$IFS
+IFS=:
+for dir in $PATH; do
+    [ "$(cd "$dir" 2>/dev/null && pwd -P)" = "$SELF_DIR" ] && continue
+    if [ -x "$dir/Xwayland" ]; then
+        REAL="$dir/Xwayland"
+        break
+    fi
+done
+IFS=$IFS_SAVED
+if [ -z "$REAL" ]; then
+    echo "chameleon: Xwayland is not installed (pkg install xwayland)" >&2
+    exit 1
+fi
+
+if [ "${CHAMELEON_XWAYLAND_GLAMOR:-1}" = 0 ] || [ ! -f "$SHIM_DIR/libchameleon.so" ]; then
+    exec "$REAL" "$@"
+fi
+
+export CHAMELEON_XWAYLAND=1
+# glamor on OpenGL ES needs GL_EXT_texture_format_BGRA8888, which the vendor
+# hides from KWin by default; keep hiding only the timer queries.
+export CHAMELEON_GL_HIDE=${CHAMELEON_GL_HIDE-GL_EXT_disjoint_timer_query}
+
+# libchameleon.so gives Xwayland's children (xkbcomp) these back.
+export CHAMELEON_ORIG_LD_PRELOAD=${LD_PRELOAD:-}
+export CHAMELEON_ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
+export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"  # the fake libgbm.so
+export LD_PRELOAD="$SHIM_DIR/libchameleon.so${LD_PRELOAD:+:$LD_PRELOAD}"
+exec "$REAL" "$@"

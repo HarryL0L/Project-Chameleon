@@ -82,7 +82,15 @@ struct cham_bo *kms_screen_bo_locked(void);
 int kms_screen_off_locked(void);
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or -errno */
 
+/* ---- clients.c: Xwayland's side (role_xwayland()) ---- */
+/* Registers an Xwayland window buffer with KWin, as apps do theirs. */
+void clients_share(struct cham_bo *bo);
+void clients_unshare(uint32_t handle);
+
 /* ---- interpose.c ---- */
 int real_fstat(int fd, struct stat *st);
+/* Loaded into Xwayland for glamor (bin/Xwayland), not into KWin: no KMS
+ * device, presenter link or app registry of its own. */
+int role_xwayland(void);
 
 #endif

@@ -73,6 +73,13 @@ screen keeps its first size instead of following the app's window).
   their buffers are registered with KWin's shim (`core/clients.c`) so KWin
   can import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
+- Xwayland runs with glamor on the GPU: KWin starts it through
+  `bin/Xwayland`, which attaches `libchameleon.so` in a reduced role (it only
+  describes KWin's device, as a render node, and hands out gbm buffers). X11
+  windows are drawn into AHardwareBuffers registered with KWin like an app's,
+  so they reach KWin without copies (`CHAMELEON_XWAYLAND_GLAMOR=0` turns this
+  off). X11 GL apps still render with llvmpipe: buffers they allocate
+  themselves through DRI3 can't be imported yet.
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.

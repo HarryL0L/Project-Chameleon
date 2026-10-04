@@ -301,6 +301,8 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     bo->next = g_bos;
     g_bos = bo;
     pthread_mutex_unlock(&g_lock);
+    if (role_xwayland())
+        clients_share(bo); /* every Xwayland gbm buffer is a window's, shown by KWin */
     return bo;
 }
 
@@ -313,6 +315,8 @@ void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
+    if (role_xwayland())
+        clients_unshare(bo->handle);
     link_forget_bo_locked(bo);
     for (struct cham_bo **p = &g_bos; *p; p = &(*p)->next) {
         if (*p == bo) {

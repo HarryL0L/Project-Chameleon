@@ -186,8 +186,83 @@ static void *clients_main(void *arg)
     return NULL;
 }
 
+/* ---- Xwayland's side ----
+ * Xwayland with glamor runs on libchameleon.so too (bin/Xwayland): its
+ * window buffers are gbm buffers, i.e. AHardwareBuffers, which it hands to
+ * KWin as dmabufs. Each one is registered with KWin like an app's buffer,
+ * under its GEM handle as id, for as long as it exists. */
+
+static pthread_mutex_t g_share_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_share_sock = -2; /* -2: not connected yet, -1: failed */
+
+/* "<KWin's Wayland socket>.chameleon"; KWin sets WAYLAND_DISPLAY for Xwayland. */
+static int share_connect(void)
+{
+    char wayland[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    input_socket_path(wayland, sizeof wayland); /* CHAMELEON_WAYLAND_SOCKET */
+    if (!wayland[0]) {
+        const char *name = getenv("WAYLAND_DISPLAY");
+        const char *dir = getenv("XDG_RUNTIME_DIR");
+        if (!name || !*name)
+            name = "wayland-0";
+        if (name[0] == '/')
+            snprintf(wayland, sizeof wayland, "%s", name);
+        else if (dir && *dir)
+            snprintf(wayland, sizeof wayland, "%s/%s", dir, name);
+    }
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    if (snprintf(addr.sun_path, sizeof addr.sun_path, "%s%s", wayland, CHAM_CLIENT_SOCKET_SUFFIX) >=
+        (int)sizeof addr.sun_path)
+        return -1;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof addr) == 0)
+        return s;
+    cham_log("xwayland: cannot reach KWin at %s: %s", addr.sun_path, strerror(errno));
+    if (s >= 0)
+        close(s);
+    return -1;
+}
+
+void clients_share(struct cham_bo *bo)
+{
+    pthread_mutex_lock(&g_share_lock);
+    if (g_share_sock == -2)
+        g_share_sock = share_connect();
+    struct cham_msg m = {CHAM_CLIENT_BUFFER_ADD, bo->handle, 0, 0};
+    int ok = g_share_sock >= 0 && cham_send(g_share_sock, &m, -1) == 0 && ahb_send(bo->ahb, g_share_sock) == 0;
+    while (ok) {
+        struct cham_msg ack;
+        int fd = -1;
+        if (cham_recv(g_share_sock, &ack, &fd) <= 0) {
+            ok = 0;
+            break;
+        }
+        if (fd >= 0)
+            close(fd);
+        if (ack.type == CHAM_CLIENT_BUFFER_ACK && ack.id == bo->handle) {
+            ok = ack.a == 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_share_lock);
+    if (!ok)
+        cham_log("xwayland: KWin did not take buffer %u (%ux%u); that window won't show", bo->handle,
+                 bo->width, bo->height);
+}
+
+void clients_unshare(uint32_t handle)
+{
+    pthread_mutex_lock(&g_share_lock);
+    struct cham_msg m = {CHAM_CLIENT_BUFFER_REMOVE, handle, 0, 0};
+    if (g_share_sock >= 0)
+        cham_send(g_share_sock, &m, -1);
+    pthread_mutex_unlock(&g_share_lock);
+}
+
 __attribute__((constructor)) static void clients_start(void)
 {
+    if (role_xwayland())
+        return; /* KWin's registry, not ours to serve */
     pthread_t t;
     if (pthread_create(&t, NULL, clients_main, NULL) == 0)
         pthread_detach(t);

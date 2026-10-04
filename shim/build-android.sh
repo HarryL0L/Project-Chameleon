@@ -17,7 +17,7 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
-mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland "$OUT/bin/"
+mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland shim/bin/Xwayland "$OUT/bin/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
 # missing symbol breaks KWin at load time. The vendor exports only its entry.

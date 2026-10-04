@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * libc / libdrm entry points libchameleon.so overrides when LD_PRELOADed
- * into kwin_wayland.
+ * into kwin_wayland (or Xwayland, for glamor: there the device is only
+ * opened and described, as a render node, and has no KMS state behind it).
  *
  * Opening the fake device path ($CHAMELEON_DRM_PATH, what KWIN_DRM_DEVICES
  * points at) returns the read end of a pipe: KWin polls and read()s DRM
@@ -58,12 +59,23 @@ DECLARE_REAL(int, ioctl, int, int, ...)
 DECLARE_REAL(int, drmGetDevice2, int, uint32_t, drmDevicePtr *)
 DECLARE_REAL(int, drmGetDevice, int, drmDevicePtr *)
 DECLARE_REAL(char *, drmGetDeviceNameFromFd2, int)
+DECLARE_REAL(int, drmGetDeviceFromDevId, dev_t, uint32_t, drmDevicePtr *)
 DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 
 static const char *fake_path(void)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");
     return p && *p ? p : "/data/data/com.termux/files/usr/tmp/chameleon-card0";
+}
+
+__attribute__((visibility("hidden"))) int role_xwayland(void)
+{
+    static int role = -1;
+    if (role < 0) {
+        const char *env = getenv("CHAMELEON_XWAYLAND");
+        role = env && strcmp(env, "1") == 0;
+    }
+    return role;
 }
 
 static int is_fake_path(const char *path)
@@ -102,7 +114,8 @@ static void fake_stat(struct stat *st)
 
 static int fake_open(void)
 {
-    kms_init_once();
+    if (!role_xwayland())
+        kms_init_once();
     int p[2];
     if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
         return -1;
@@ -315,6 +328,10 @@ static drmDevicePtr make_device(void)
     dev->deviceinfo.platform->compatible = compatible;
     strcpy(dev->businfo.platform->fullname, "/chameleon");
     dev->available_nodes = 1 << DRM_NODE_PRIMARY;
+    if (role_xwayland()) { /* glamor opens the render node */
+        dev->nodes[DRM_NODE_RENDER] = p;
+        dev->available_nodes |= 1 << DRM_NODE_RENDER;
+    }
     dev->bustype = DRM_BUS_PLATFORM;
     return dev;
 }
@@ -347,10 +364,22 @@ char *drmGetDeviceNameFromFd2(int fd)
     return REAL(drmGetDeviceNameFromFd2) ? REAL(drmGetDeviceNameFromFd2)(fd) : NULL;
 }
 
+/* The device KWin names in its linux-dmabuf feedback (Xwayland looks it up). */
+int drmGetDeviceFromDevId(dev_t dev_id, uint32_t flags, drmDevicePtr *device)
+{
+    if (dev_id == fake_rdev) {
+        *device = make_device();
+        return *device ? 0 : -ENOMEM;
+    }
+    resolve_drmGetDeviceFromDevId();
+    return REAL(drmGetDeviceFromDevId) ? REAL(drmGetDeviceFromDevId)(dev_id, flags, device) : -ENOSYS;
+}
+
 /* ---- environment ----
- * The launcher saves the user's LD_PRELOAD / LD_LIBRARY_PATH. The dynamic
- * linker has already read ours, so restore theirs: Xwayland and every app
- * KWin starts must get Termux's normal Mesa, not this shim. */
+ * The launchers save the user's LD_PRELOAD / LD_LIBRARY_PATH. The dynamic
+ * linker has already read ours, so restore theirs: every program KWin or
+ * Xwayland starts must get Termux's normal Mesa, not this shim (Xwayland
+ * gets it back through bin/Xwayland). */
 __attribute__((constructor)) static void restore_environment(void)
 {
     const char *saved = getenv("CHAMELEON_ORIG_LD_PRELOAD");
