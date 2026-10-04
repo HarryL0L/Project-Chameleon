@@ -19,24 +19,29 @@ android {
         }
     }
 
-    // Termux's *public* GitHub-release test key (from termux-app's
-    // testkey_untrusted.jks). Signing with it is what lets
-    // sharedUserId="com.termux" install next to a GitHub build of Termux.
+    // The release key, from the repository's secrets in CI (build.yml).
+    // Without it (forks, local builds) Android's debug key signs instead, and
+    // such an APK can't be installed over a release.
     signingConfigs {
-        termux {
-            storeFile = rootProject.file("termux-testkey.jks")
-            storePassword = "xrj45yWGLbsO7W0v"
-            keyAlias = "alias"
-            keyPassword = "xrj45yWGLbsO7W0v"
+        def keystore = System.getenv("CHAMELEON_KEYSTORE")
+        if (keystore) {
+            chameleon {
+                storeFile = file(keystore)
+                storePassword = System.getenv("CHAMELEON_KEYSTORE_PASSWORD")
+                keyAlias = "chameleon"
+                keyPassword = System.getenv("CHAMELEON_KEYSTORE_PASSWORD")
+            }
         }
     }
 
     buildTypes {
         debug {
-            signingConfig = signingConfigs.termux
+            signingConfig = signingConfigs.findByName("chameleon") ?: signingConfigs.debug
         }
         release {
-            signingConfig = signingConfigs.termux
+            signingConfig = signingConfigs.findByName("chameleon") ?: signingConfigs.debug
+            minifyEnabled = true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
         }
     }
 

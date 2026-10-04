@@ -9,6 +9,14 @@
  * defined, derivatives being core). Every bare GL_* name in an #if/#elif is
  * rewritten to defined(GL_*): for extension macros (defined as 1) that's
  * the same value, and it is valid everywhere.
+ *
+ * GLSL ES 3.00 also has no texture2D(), only texture(). KWin's blur
+ * (downsample.frag) and colour-blindness shaders still call texture2D(),
+ * which Mali accepts but Adreno rightly rejects, and a failed blur shader
+ * leaves KWin crashing on its next reconfigure. So in "#version 300 es"
+ * shaders texture2D( becomes texture(, unless the shader uses
+ * samplerExternalOES, where texture2D() is what GL_OES_EGL_image_external
+ * defines.
  */
 #include <ctype.h>
 #include <stdlib.h>
@@ -19,6 +27,31 @@
 static int is_ident(char c)
 {
     return isalnum((unsigned char)c) || c == '_';
+}
+
+/* Copies [s, e) into out with each texture2D( call renamed texture(. */
+static char *fix_texture2d(char *out, const char *s, const char *e)
+{
+    while (s < e) {
+        if ((size_t)(e - s) > 9 && memcmp(s, "texture2D", 9) == 0 && !is_ident(s[9])) {
+            const char *t = s + 9;
+            while (t < e && (*t == ' ' || *t == '\t'))
+                t++;
+            if (t < e && *t == '(') {
+                memcpy(out, "texture", 7);
+                out += 7;
+                s += 9;
+                continue;
+            }
+        }
+        if (is_ident(*s)) { /* copy the whole identifier, so foo_texture2D stays */
+            while (s < e && is_ident(*s))
+                *out++ = *s++;
+            continue;
+        }
+        *out++ = *s++;
+    }
+    return out;
 }
 
 /* Rewrites one #if/#elif expression [s, e) into out. */
@@ -63,6 +96,7 @@ char *cham_fix_glsl(const char *src)
     char *out = malloc(len * 4 + 1), *o = out;
     if (!out)
         return NULL;
+    const int texture2d = strncmp(src, "#version 300 es", 15) == 0 && !strstr(src, "samplerExternalOES");
     const char *line = src;
     while (*line) {
         const char *end = strchr(line, '\n');
@@ -83,6 +117,8 @@ char *cham_fix_glsl(const char *src)
         if (kw) {
             memcpy(o, line, kw);
             o = fix_condition(o + kw, line + kw, end);
+        } else if (texture2d && *p != '#') {
+            o = fix_texture2d(o, line, end);
         } else {
             memcpy(o, line, (size_t)(end - line));
             o += end - line;

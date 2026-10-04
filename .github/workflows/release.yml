@@ -1,0 +1,77 @@
+name: Release
+
+# Only on request: pushing a version tag (v0.1.0), or "Run workflow" on the
+# Actions tab. Creates a draft release with the app and the Chameleon .deb;
+# attach the KDE debs to the draft, check the notes, then publish it.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release, e.g. v0.1.0"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as a pre-release"
+        type: boolean
+        default: true
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - id: v
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+~][0-9A-Za-z.]+)?$ ]]; then
+            echo "::error::'$VERSION' isn't a version like v0.1.0"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: check
+    uses: ./.github/workflows/build.yml
+    with:
+      version: ${{ needs.check.outputs.version }}
+    secrets: inherit # the signing key
+
+  release:
+    needs: [check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: chameleon-${{ github.sha }}
+          path: out
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+          CHECKBOX: ${{ inputs.prerelease }}
+        run: |
+          # A tag push has no checkbox: v0.x and v1.0.0-beta style versions
+          # are pre-releases.
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            PRERELEASE=$CHECKBOX
+          elif [[ "$VERSION" == v0.* || "$VERSION" == *-* ]]; then
+            PRERELEASE=true
+          fi
+          cd out
+          DEB=$(ls chameleon_*_aarch64.deb)
+          sha256sum chameleon.apk "$DEB" > SHA256SUMS
+          sed "s/{{DEB}}/$DEB/g" ../.github/release-notes.md > notes.md
+          flags=(--draft --title "Project Chameleon $VERSION" --notes-file notes.md --target "$GITHUB_SHA")
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$VERSION" "${flags[@]}" chameleon.apk "$DEB" SHA256SUMS

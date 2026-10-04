@@ -27,13 +27,14 @@
 #include <jni.h>
 #include <poll.h>
 #include <pthread.h>
-#include <sys/stat.h>
-#include <sys/un.h>
+#include <sys/eventfd.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <mutex>
 #include <string>
 
@@ -609,8 +610,30 @@ void remove_buffer_locked(uint32_t id)
     }
 }
 
-// Returns true if the session ended because a new client is waiting.
-bool serve(int client, int listener)
+// Connections from KWin's shim, passed on by the Termux broker
+// (nativeConnection); g_conn_event counts arrivals.
+std::mutex g_conn_lock;
+std::deque<int> g_conns;
+int g_conn_event = -1;
+
+void drain_conn_event()
+{
+    uint64_t n;
+    while (read(g_conn_event, &n, sizeof n) > 0) {
+    }
+}
+
+// True if a newer connection is queued. The event is drained first, so a
+// later arrival still wakes the next poll.
+bool connection_waiting()
+{
+    drain_conn_event();
+    std::lock_guard<std::mutex> lock(g_conn_lock);
+    return !g_conns.empty();
+}
+
+// Serves one producer until it leaves or a newer connection arrives.
+void serve(int client, int arrivals)
 {
     {
         std::lock_guard<std::mutex> lock(g_lock);
@@ -624,13 +647,13 @@ bool serve(int client, int listener)
 
     bool replaced = false;
     for (;;) {
-        pollfd fds[2] = {{client, POLLIN, 0}, {listener, POLLIN, 0}};
+        pollfd fds[2] = {{client, POLLIN, 0}, {arrivals, POLLIN, 0}};
         if (poll(fds, 2, -1) < 0) {
             if (errno == EINTR)
                 continue;
             break;
         }
-        if (fds[1].revents & POLLIN) {
+        if ((fds[1].revents & POLLIN) && connection_waiting()) {
             // Newest producer wins, like a compositor restarting; tell the
             // old one so it doesn't reconnect and take the screen back.
             std::lock_guard<std::mutex> lock(g_lock);
@@ -719,7 +742,6 @@ done:
     }
     close(client);
     LOGI("producer disconnected%s", replaced ? " (replaced by a new one)" : "");
-    return replaced;
 }
 
 // Human-readable state for the on-screen status line (nativeStatus()).
@@ -732,61 +754,35 @@ void set_status(const std::string &status)
     g_status = status;
 }
 
-int open_listener(const std::string &path, ino_t *ino)
+int next_connection()
 {
-    int listener = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    strncpy(addr.sun_path, path.c_str(), sizeof addr.sun_path - 1);
-    unlink(path.c_str());
-    if (listener < 0 || bind(listener, (sockaddr *)&addr, sizeof addr) != 0 || listen(listener, 4) != 0) {
-        std::string err = strerror(errno);
-        LOGE("cannot listen on %s: %s (is this app installed with Termux's shared user?)", path.c_str(), err.c_str());
-        set_status("cannot listen on " + path + ": " + err);
-        if (listener >= 0)
-            close(listener);
-        return -1;
+    for (;;) {
+        drain_conn_event();
+        {
+            std::lock_guard<std::mutex> lock(g_conn_lock);
+            if (!g_conns.empty()) {
+                int fd = g_conns.front();
+                g_conns.pop_front();
+                if (!g_conns.empty()) {
+                    // A newer one is waiting: serve() replaces this one at once.
+                    uint64_t one = 1;
+                    write(g_conn_event, &one, sizeof one);
+                }
+                return fd;
+            }
+        }
+        pollfd pfd{g_conn_event, POLLIN, 0};
+        poll(&pfd, 1, -1);
     }
-    chmod(path.c_str(), 0600);
-    struct stat st{};
-    stat(path.c_str(), &st);
-    *ino = st.st_ino;
-    LOGI("listening on %s", path.c_str());
-    set_status("waiting for Termux (listening on " + path + ")");
-    return listener;
 }
 
 void *server_main(void *)
 {
-    const std::string path = CHAM_SOCKET_PATH;
-
-    ino_t ino = 0;
-    int listener = -1;
     for (;;) {
-        // (Re)create the socket if it's missing or someone replaced the file:
-        // then nothing could ever connect to us again.
-        struct stat st{};
-        if (listener < 0 || stat(path.c_str(), &st) != 0 || st.st_ino != ino) {
-            if (listener >= 0) {
-                LOGE("socket %s vanished; re-creating it", path.c_str());
-                close(listener);
-            }
-            listener = open_listener(path, &ino);
-            if (listener < 0) {
-                sleep(2);
-                continue;
-            }
-        }
-        pollfd pfd{listener, POLLIN, 0};
-        if (poll(&pfd, 1, 2000) <= 0)
-            continue;
-        int client = accept4(listener, nullptr, nullptr, SOCK_CLOEXEC);
-        while (client >= 0) {
-            set_status("connected to Termux");
-            bool replaced = serve(client, listener);
-            set_status("waiting for Termux (listening on " + path + ")");
-            client = replaced ? accept4(listener, nullptr, nullptr, SOCK_CLOEXEC) : -1;
-        }
+        set_status("waiting for Termux");
+        int client = next_connection();
+        set_status("connected to Termux");
+        serve(client, g_conn_event);
     }
     return nullptr;
 }
@@ -796,8 +792,20 @@ void *server_main(void *)
 extern "C" {
 
 JNIEXPORT void JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeConnection(JNIEnv *, jclass, jint fd)
+{
+    {
+        std::lock_guard<std::mutex> lock(g_conn_lock);
+        g_conns.push_back(fd);
+    }
+    uint64_t one = 1;
+    write(g_conn_event, &one, sizeof one);
+}
+
+JNIEXPORT void JNICALL
 Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStart(JNIEnv *, jclass)
 {
+    g_conn_event = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
     pthread_t thread;
     if (pthread_create(&thread, nullptr, server_main, nullptr) == 0)
         pthread_detach(thread);

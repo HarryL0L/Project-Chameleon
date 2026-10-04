@@ -7,7 +7,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
-import android.graphics.Insets;
+import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,8 +15,10 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Display;
+import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.PointerIcon;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -37,10 +39,14 @@ import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
+import java.util.Collections;
+import java.util.List;
+
 /**
  * Full-screen SurfaceView. The native presenter attaches an ASurfaceControl to
- * it and shows AHardwareBuffers sent by a Termux process over
- * $PREFIX/tmp/chameleon-0 (for KWin, after one GPU copy; see presenter.cpp).
+ * it and shows AHardwareBuffers from a Termux process (for KWin, after one GPU
+ * copy; see presenter.cpp), over a socket the Termux broker hands over
+ * (BrokerLink).
  *
  * Input goes back over the same socket: touches (direct or as a trackpad),
  * mouse, hardware keys and the Android keyboard. A small toolbar in the top
@@ -62,6 +68,8 @@ public class PresenterActivity extends Activity
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
+    static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
 
     private static final String PREFS = "chameleon";
@@ -71,6 +79,7 @@ public class PresenterActivity extends Activity
     private static final String PREF_BACK = "back_key";
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
+    private static final String PREF_EXTRA_KEYS = "extra_keys";
     private static final float DEFAULT_SPEED = 1.5f;
 
     private static boolean sStarted;
@@ -79,11 +88,12 @@ public class PresenterActivity extends Activity
     private TextView mWakeHint;
     private SurfaceView mSurface;
     private int mImeBottom;
+    private List<Rect> mCutouts = Collections.emptyList();
     private SharedPreferences mPrefs;
     private TouchInput mTouch;
     private final KeyInput mKeys = new KeyInput();
     private ImeView mImeView;
-    private LinearLayout mToolbar;
+    private FloatingMenu mMenu;
     private HorizontalScrollView mExtraKeys;
     private Button mCtrlKey, mAltKey;
     private boolean mKeyboardShown;
@@ -137,6 +147,8 @@ public class PresenterActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
+        // KWin draws its own cursor in the frames; Android's would be a second one.
+        view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
         mStatus.setTextColor(Color.LTGRAY);
         mStatus.setTextSize(12);
@@ -164,12 +176,17 @@ public class PresenterActivity extends Activity
         root.addView(mWakeHint, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mImeView, new FrameLayout.LayoutParams(1, 1));
-        root.addView(buildToolbar(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+        mMenu = new FloatingMenu(this, mPrefs,
+                toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard()),
+                toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings()));
         root.addView(buildExtraKeys(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        // Last, so it stays above the extra keys.
+        root.addView(mMenu, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
         // Not from inside the layout pass: the surface's size follows the row's.
         mExtraKeys.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateSurfaceArea));
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateMenuInsets));
         setContentView(root);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -183,7 +200,8 @@ public class PresenterActivity extends Activity
         });
 
         if (!sStarted) {
-            nativeStart(); // listens on CHAM_SOCKET_PATH; we run as the Termux user
+            nativeStart(); // serves the connections the Termux broker passes on
+            BrokerLink.listen(this);
             sStarted = true;
         }
     }
@@ -201,20 +219,7 @@ public class PresenterActivity extends Activity
         b.setContentDescription(getString(description));
         b.setFocusable(false);
         b.setOnClickListener(onClick);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(40), dp(40));
-        lp.setMarginStart(dp(8));
-        b.setLayoutParams(lp);
         return b;
-    }
-
-    private View buildToolbar() {
-        mToolbar = new LinearLayout(this);
-        mToolbar.setOrientation(LinearLayout.HORIZONTAL);
-        mToolbar.setPadding(dp(8), dp(8), dp(8), dp(8));
-        mToolbar.setAlpha(0.6f);
-        mToolbar.addView(toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard()));
-        mToolbar.addView(toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings()));
-        return mToolbar;
     }
 
     private Button extraKey(LinearLayout row, String label, Runnable action) {
@@ -276,7 +281,8 @@ public class PresenterActivity extends Activity
 
     private void setKeyboardShown(boolean shown) {
         mKeyboardShown = shown;
-        mExtraKeys.setVisibility(shown ? View.VISIBLE : View.GONE);
+        boolean extraKeys = shown && mPrefs.getBoolean(PREF_EXTRA_KEYS, true);
+        mExtraKeys.setVisibility(extraKeys ? View.VISIBLE : View.GONE);
         updateSurfaceArea();
     }
 
@@ -289,7 +295,8 @@ public class PresenterActivity extends Activity
         int bottom = 0;
         if (mKeyboardShown && mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true)) {
             bottom = mImeBottom;
-            bottom += mExtraKeys.getHeight(); // shown with the keyboard
+            if (mExtraKeys.getVisibility() == View.VISIBLE)
+                bottom += mExtraKeys.getHeight();
             // A full-size keyboard in landscape can leave a strip a couple of
             // hundred pixels tall, shorter than Plasma's panel. Below 40% of
             // the window the keyboard covers the desktop instead.
@@ -320,12 +327,18 @@ public class PresenterActivity extends Activity
         }
     }
 
-    /** Keeps the toolbar clear of the cutout and the extra keys above the IME. */
+    /** Keeps the menu clear of the camera cutouts, the keyboard and the extra keys. */
+    private void updateMenuInsets() {
+        int bottom = mImeBottom + (mExtraKeys.getVisibility() == View.VISIBLE ? mExtraKeys.getHeight() : 0);
+        mMenu.setObstacles(bottom, mCutouts);
+    }
+
+    /** Keeps the menu clear of the cutout and the extra keys above the IME. */
     private void onInsets(WindowInsets insets) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R)
             return;
-        Insets cutout = insets.getInsets(WindowInsets.Type.displayCutout());
-        mToolbar.setPadding(dp(8), dp(8) + cutout.top, dp(8) + cutout.right, dp(8));
+        DisplayCutout cutout = insets.getDisplayCutout();
+        mCutouts = cutout != null ? cutout.getBoundingRects() : Collections.emptyList();
         boolean imeVisible = insets.isVisible(WindowInsets.Type.ime());
         int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mExtraKeys.getLayoutParams();
@@ -334,6 +347,7 @@ public class PresenterActivity extends Activity
             mExtraKeys.setLayoutParams(lp);
         }
         mImeBottom = imeBottom;
+        updateMenuInsets();
         if (imeVisible != mKeyboardShown)
             setKeyboardShown(imeVisible); // e.g. closed with the keyboard's own button
         else
@@ -498,6 +512,10 @@ public class PresenterActivity extends Activity
         keyboardResize.setText(R.string.keyboard_resize);
         keyboardResize.setChecked(mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true));
         box.addView(keyboardResize);
+        CheckBox extraKeys = new CheckBox(this);
+        extraKeys.setText(R.string.extra_keys);
+        extraKeys.setChecked(mPrefs.getBoolean(PREF_EXTRA_KEYS, true));
+        box.addView(extraKeys);
         box.addView(settingsLabel(getString(R.string.screen_hint), false));
 
         ScrollView scroll = new ScrollView(this);
@@ -513,10 +531,11 @@ public class PresenterActivity extends Activity
                             .putString(PREF_BACK, back.getCheckedRadioButtonId() == backLeave.getId() ? "leave" : "escape")
                             .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))
                             .putBoolean(PREF_KEYBOARD_RESIZE, keyboardResize.isChecked())
+                            .putBoolean(PREF_EXTRA_KEYS, extraKeys.isChecked())
                             .apply();
                     applyInputPrefs();
                     applyOrientation();
-                    updateSurfaceArea();
+                    setKeyboardShown(mKeyboardShown); // the extra keys, and the surface's area
                 })
                 .setOnDismissListener(d -> hideSystemBars())
                 .show();

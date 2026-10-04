@@ -1,6 +1,7 @@
 # KWin integration notes
 
-Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
+Target: KWin 6.7.5 as packaged in
+[BullyMaguire-lol/termux-packages `dev/kwin-wayland`](https://github.com/BullyMaguire-lol/termux-packages/tree/dev/kwin-wayland)
 (`x11-packages/kwin`), which makes udev and libinput optional.
 
 ## Output: `--drm` with a fake device (no KWin changes)
@@ -16,7 +17,7 @@ Target: KWin 6.7.5 as packaged in HarryL0L/termux-packages `dev/c-test`
   gralloc handle's dmabuf fd), and EGL goes through glvnd to the
   `libEGL_chameleon.so` vendor, which forwards to Android's libEGL.
 - Atomic commit → `CHAM_PRESENT`; `CHAM_FRAME_DONE` → page-flip event on the
-  fake fd. One pending flip, exactly like the demo's default pacing.
+  fake fd. One pending flip, as with a real KMS driver.
 - KWin's DPMS off (idle, Plasma's power management) is an atomic commit
   with CRTC `ACTIVE` 0 and no mode; the shim sends `CHAM_SCREEN` (off, and on
   again), and the app shows "tap to wake", which sends a pointer nudge: any
