@@ -7,7 +7,7 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.graphics.Color;
-import android.graphics.Insets;
+import android.graphics.Rect;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,6 +15,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
 import android.view.Display;
+import android.view.DisplayCutout;
 import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.PointerIcon;
@@ -37,6 +38,9 @@ import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
+
+import java.util.Collections;
+import java.util.List;
 
 /**
  * Full-screen SurfaceView. The native presenter attaches an ASurfaceControl to
@@ -84,11 +88,12 @@ public class PresenterActivity extends Activity
     private TextView mWakeHint;
     private SurfaceView mSurface;
     private int mImeBottom;
+    private List<Rect> mCutouts = Collections.emptyList();
     private SharedPreferences mPrefs;
     private TouchInput mTouch;
     private final KeyInput mKeys = new KeyInput();
     private ImeView mImeView;
-    private LinearLayout mToolbar;
+    private FloatingMenu mMenu;
     private HorizontalScrollView mExtraKeys;
     private Button mCtrlKey, mAltKey;
     private boolean mKeyboardShown;
@@ -171,12 +176,17 @@ public class PresenterActivity extends Activity
         root.addView(mWakeHint, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mImeView, new FrameLayout.LayoutParams(1, 1));
-        root.addView(buildToolbar(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END));
+        mMenu = new FloatingMenu(this, mPrefs,
+                toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard()),
+                toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings()));
         root.addView(buildExtraKeys(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
+        // Last, so it stays above the extra keys.
+        root.addView(mMenu, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.START));
         // Not from inside the layout pass: the surface's size follows the row's.
         mExtraKeys.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateSurfaceArea));
+        root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateMenuInsets));
         setContentView(root);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -209,20 +219,7 @@ public class PresenterActivity extends Activity
         b.setContentDescription(getString(description));
         b.setFocusable(false);
         b.setOnClickListener(onClick);
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(dp(40), dp(40));
-        lp.setMarginStart(dp(8));
-        b.setLayoutParams(lp);
         return b;
-    }
-
-    private View buildToolbar() {
-        mToolbar = new LinearLayout(this);
-        mToolbar.setOrientation(LinearLayout.HORIZONTAL);
-        mToolbar.setPadding(dp(8), dp(8), dp(8), dp(8));
-        mToolbar.setAlpha(0.6f);
-        mToolbar.addView(toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard()));
-        mToolbar.addView(toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings()));
-        return mToolbar;
     }
 
     private Button extraKey(LinearLayout row, String label, Runnable action) {
@@ -330,12 +327,18 @@ public class PresenterActivity extends Activity
         }
     }
 
-    /** Keeps the toolbar clear of the cutout and the extra keys above the IME. */
+    /** Keeps the menu clear of the camera cutouts, the keyboard and the extra keys. */
+    private void updateMenuInsets() {
+        int bottom = mImeBottom + (mExtraKeys.getVisibility() == View.VISIBLE ? mExtraKeys.getHeight() : 0);
+        mMenu.setObstacles(bottom, mCutouts);
+    }
+
+    /** Keeps the menu clear of the cutout and the extra keys above the IME. */
     private void onInsets(WindowInsets insets) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R)
             return;
-        Insets cutout = insets.getInsets(WindowInsets.Type.displayCutout());
-        mToolbar.setPadding(dp(8), dp(8) + cutout.top, dp(8) + cutout.right, dp(8));
+        DisplayCutout cutout = insets.getDisplayCutout();
+        mCutouts = cutout != null ? cutout.getBoundingRects() : Collections.emptyList();
         boolean imeVisible = insets.isVisible(WindowInsets.Type.ime());
         int imeBottom = insets.getInsets(WindowInsets.Type.ime()).bottom;
         FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) mExtraKeys.getLayoutParams();
@@ -344,6 +347,7 @@ public class PresenterActivity extends Activity
             mExtraKeys.setLayoutParams(lp);
         }
         mImeBottom = imeBottom;
+        updateMenuInsets();
         if (imeVisible != mKeyboardShown)
             setKeyboardShown(imeVisible); // e.g. closed with the keyboard's own button
         else
