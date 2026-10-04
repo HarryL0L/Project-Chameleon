@@ -17,6 +17,7 @@ import android.util.TypedValue;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
+import android.view.PointerIcon;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
@@ -74,6 +75,7 @@ public class PresenterActivity extends Activity
     private static final String PREF_BACK = "back_key";
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
+    private static final String PREF_EXTRA_KEYS = "extra_keys";
     private static final float DEFAULT_SPEED = 1.5f;
 
     private static boolean sStarted;
@@ -140,6 +142,8 @@ public class PresenterActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
+        // KWin draws its own cursor in the frames; Android's would be a second one.
+        view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
         mStatus.setTextColor(Color.LTGRAY);
         mStatus.setTextSize(12);
@@ -280,7 +284,8 @@ public class PresenterActivity extends Activity
 
     private void setKeyboardShown(boolean shown) {
         mKeyboardShown = shown;
-        mExtraKeys.setVisibility(shown ? View.VISIBLE : View.GONE);
+        boolean extraKeys = shown && mPrefs.getBoolean(PREF_EXTRA_KEYS, true);
+        mExtraKeys.setVisibility(extraKeys ? View.VISIBLE : View.GONE);
         updateSurfaceArea();
     }
 
@@ -293,7 +298,8 @@ public class PresenterActivity extends Activity
         int bottom = 0;
         if (mKeyboardShown && mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true)) {
             bottom = mImeBottom;
-            bottom += mExtraKeys.getHeight(); // shown with the keyboard
+            if (mExtraKeys.getVisibility() == View.VISIBLE)
+                bottom += mExtraKeys.getHeight();
             // A full-size keyboard in landscape can leave a strip a couple of
             // hundred pixels tall, shorter than Plasma's panel. Below 40% of
             // the window the keyboard covers the desktop instead.
@@ -502,6 +508,10 @@ public class PresenterActivity extends Activity
         keyboardResize.setText(R.string.keyboard_resize);
         keyboardResize.setChecked(mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true));
         box.addView(keyboardResize);
+        CheckBox extraKeys = new CheckBox(this);
+        extraKeys.setText(R.string.extra_keys);
+        extraKeys.setChecked(mPrefs.getBoolean(PREF_EXTRA_KEYS, true));
+        box.addView(extraKeys);
         box.addView(settingsLabel(getString(R.string.screen_hint), false));
 
         ScrollView scroll = new ScrollView(this);
@@ -517,10 +527,11 @@ public class PresenterActivity extends Activity
                             .putString(PREF_BACK, back.getCheckedRadioButtonId() == backLeave.getId() ? "leave" : "escape")
                             .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))
                             .putBoolean(PREF_KEYBOARD_RESIZE, keyboardResize.isChecked())
+                            .putBoolean(PREF_EXTRA_KEYS, extraKeys.isChecked())
                             .apply();
                     applyInputPrefs();
                     applyOrientation();
-                    updateSurfaceArea();
+                    setKeyboardShown(mKeyboardShown); // the extra keys, and the surface's area
                 })
                 .setOnDismissListener(d -> hideSystemBars())
                 .show();

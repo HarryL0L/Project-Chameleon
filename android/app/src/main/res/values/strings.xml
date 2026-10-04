@@ -20,6 +20,7 @@
     <string name="orientation_portrait">Portrait</string>
     <string name="orientation_landscape">Landscape</string>
     <string name="keyboard_resize">Shrink the desktop above the keyboard</string>
+    <string name="extra_keys">Show extra keys above the keyboard (Esc, Ctrl, arrows…)</string>
     <string name="screen_hint">The desktop takes the size of this window: rotating the phone (or opening the keyboard, if enabled) resizes it, like plugging in a different monitor.</string>
     <string name="done">Done</string>
     <string name="screen_off">The desktop\'s screen is off\nTap to wake it</string>
