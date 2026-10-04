@@ -38,6 +38,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       version: ${{ needs.check.outputs.version }}
+    secrets: inherit # the signing key
 
   release:
     needs: [check, build]

@@ -28,8 +28,22 @@ jobs:
           gradle-version: "9.8.0"
 
       - name: Build presenter APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
+          CHAMELEON_KEYSTORE_PASSWORD: ${{ secrets.SIGNING_KEYSTORE_PASSWORD }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
+          # Signed with the release key when the secrets are there (not in
+          # forks or their pull requests); a release must be.
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            export CHAMELEON_KEYSTORE="$RUNNER_TEMP/chameleon.jks"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$CHAMELEON_KEYSTORE"
+          elif [ -n "$RELEASE_VERSION" ]; then
+            echo "::error::a release needs the signing secrets"
+            exit 1
+          fi
           gradle --no-daemon -p android assembleDebug
+          rm -f "$RUNNER_TEMP/chameleon.jks"
           mkdir -p out
           cp android/app/build/outputs/apk/debug/app-debug.apk out/chameleon.apk
           # The NDK the app build uses (android/app/build.gradle ndkVersion).
