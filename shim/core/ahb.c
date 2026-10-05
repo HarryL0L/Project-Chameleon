@@ -292,6 +292,7 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     bo->dmabuf_fd = fd;
     bo->dmabuf_dev = st.st_dev;
     bo->dmabuf_ino = st.st_ino;
+    bo->src_fd = -1;
     bo->refs = 1;
     bo->slot = -1;
     bo->release_fence = -1;
@@ -326,6 +327,8 @@ void bo_unref_locked(struct cham_bo *bo)
     }
     if (bo->release_fence >= 0)
         close(bo->release_fence);
+    if (bo->src_fd >= 0)
+        close(bo->src_fd);
     close(bo->dmabuf_fd);
     ahb.release(bo->ahb);
     free(bo);

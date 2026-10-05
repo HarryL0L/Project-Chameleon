@@ -78,8 +78,11 @@ screen keeps its first size instead of following the app's window).
   describes KWin's device, as a render node, and hands out gbm buffers). X11
   windows are drawn into AHardwareBuffers registered with KWin like an app's,
   so they reach KWin without copies (`CHAMELEON_XWAYLAND_GLAMOR=0` turns this
-  off). X11 GL apps still render with llvmpipe: buffers they allocate
-  themselves through DRI3 can't be imported yet.
+  off). X11 GL and Vulkan apps are refused the device, so their Mesa picks
+  its own driver (e.g. panfrost/panvk on kbase, with
+  `MESA_LOADER_DRIVER_OVERRIDE`), and the linear dmabufs they present are
+  copied into a texture of an AHardwareBuffer each time glamor draws them
+  (`gbm_bo_import`, `gles/gles.c`).
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.

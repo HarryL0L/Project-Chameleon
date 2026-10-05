@@ -29,6 +29,12 @@ EGLBoolean cham_wl_destroy_surface(EGLDisplay dpy, EGLSurface surface);
 
 /* gles/gles.c */
 void *cham_gl_get_proc(const char *name);
+/* Textures of buffers imported from another driver (cham_bo.src_fd), which
+ * are refreshed from its dmabuf whenever bound. `image` is an EGLImageKHR. */
+struct cham_bo;
+void cham_gl_foreign_image(void *image, const struct cham_bo *bo);
+void cham_gl_foreign_target(void *image); /* after glEGLImageTargetTexture2DOES(GL_TEXTURE_2D, image) */
+void cham_gl_foreign_image_gone(void *image);
 
 /* bridge.c: is libchameleon.so (KWin's fake KMS device) in this process? */
 int cham_core_present(void);

@@ -46,13 +46,6 @@ GL_APICALL void GL_APIENTRY glBindRenderbuffer(GLenum target, GLuint renderbuffe
     p_glBindRenderbuffer(target, renderbuffer);
 }
 
-static void (GL_APIENTRY *p_glBindTexture)(GLenum target, GLuint texture);
-GL_APICALL void GL_APIENTRY glBindTexture(GLenum target, GLuint texture)
-{
-    CHAM_NOTE_CALL("glBindTexture");
-    p_glBindTexture(target, texture);
-}
-
 static void (GL_APIENTRY *p_glBlendColor)(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha);
 GL_APICALL void GL_APIENTRY glBlendColor(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
 {
@@ -233,13 +226,6 @@ GL_APICALL void GL_APIENTRY glDeleteShader(GLuint shader)
 {
     CHAM_NOTE_CALL("glDeleteShader");
     p_glDeleteShader(shader);
-}
-
-static void (GL_APIENTRY *p_glDeleteTextures)(GLsizei n, const GLuint *textures);
-GL_APICALL void GL_APIENTRY glDeleteTextures(GLsizei n, const GLuint *textures)
-{
-    CHAM_NOTE_CALL("glDeleteTextures");
-    p_glDeleteTextures(n, textures);
 }
 
 static void (GL_APIENTRY *p_glDepthFunc)(GLenum func);
@@ -2454,7 +2440,6 @@ GL_APICALL void GL_APIENTRY glTexStorage3DMultisample(GLenum target, GLsizei sam
     p_glTexStorage3DMultisample(target, samples, internalformat, width, height, depth, fixedsamplelocations);
 }
 
-
 const struct cham_gl_entry cham_gl_entries[] = {
     {"glActiveTexture", (void **)&p_glActiveTexture, (void *)glActiveTexture},
     {"glAttachShader", (void **)&p_glAttachShader, (void *)glAttachShader},
@@ -2462,7 +2447,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glBindBuffer", (void **)&p_glBindBuffer, (void *)glBindBuffer},
     {"glBindFramebuffer", (void **)&p_glBindFramebuffer, (void *)glBindFramebuffer},
     {"glBindRenderbuffer", (void **)&p_glBindRenderbuffer, (void *)glBindRenderbuffer},
-    {"glBindTexture", (void **)&p_glBindTexture, (void *)glBindTexture},
     {"glBlendColor", (void **)&p_glBlendColor, (void *)glBlendColor},
     {"glBlendEquation", (void **)&p_glBlendEquation, (void *)glBlendEquation},
     {"glBlendEquationSeparate", (void **)&p_glBlendEquationSeparate, (void *)glBlendEquationSeparate},
@@ -2489,7 +2473,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glDeleteProgram", (void **)&p_glDeleteProgram, (void *)glDeleteProgram},
     {"glDeleteRenderbuffers", (void **)&p_glDeleteRenderbuffers, (void *)glDeleteRenderbuffers},
     {"glDeleteShader", (void **)&p_glDeleteShader, (void *)glDeleteShader},
-    {"glDeleteTextures", (void **)&p_glDeleteTextures, (void *)glDeleteTextures},
     {"glDepthFunc", (void **)&p_glDepthFunc, (void *)glDepthFunc},
     {"glDepthMask", (void **)&p_glDepthMask, (void *)glDepthMask},
     {"glDepthRangef", (void **)&p_glDepthRangef, (void *)glDepthRangef},

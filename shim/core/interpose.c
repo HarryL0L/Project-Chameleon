@@ -114,8 +114,19 @@ static void fake_stat(struct stat *st)
 
 static int fake_open(void)
 {
-    if (!role_xwayland())
+    if (role_xwayland()) {
+        /* The first open is glamor's. Later ones are DRI3 clients asking for
+         * the device, which only Android's driver can use: refuse, so their
+         * Mesa picks its own driver (panfrost/panvk on kbase, else llvmpipe)
+         * and presents its buffers to glamor. */
+        static int opened;
+        if (__atomic_fetch_add(&opened, 1, __ATOMIC_RELAXED) > 0) {
+            errno = ENODEV;
+            return -1;
+        }
+    } else {
         kms_init_once();
+    }
     int p[2];
     if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
         return -1;

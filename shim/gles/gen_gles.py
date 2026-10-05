@@ -10,7 +10,8 @@ import re
 import sys
 
 OVERRIDDEN = {"glShaderSource", "glGetString", "glGetStringi", "glGetIntegerv",
-              "glTexImage2D", "glTexSubImage2D", "glTexImage3D", "glTexSubImage3D"}
+              "glTexImage2D", "glTexSubImage2D", "glTexImage3D", "glTexSubImage3D",
+              "glBindTexture", "glDeleteTextures"}
 proto = re.compile(r"^GL_APICALL (.+?)\s*GL_APIENTRY (gl\w+) \((.*)\);$")
 
 funcs = []

@@ -25,18 +25,28 @@
  *    an untagged bounce buffer first (CHAMELEON_GL_BOUNCE=0 disables it),
  *    and uploads run with the framebuffer unbound, restored right after
  *    (CHAMELEON_GL_UPLOAD_UNBIND=0 disables it).
+ *  - glBindTexture/glDeleteTextures: textures standing in for another
+ *    driver's buffer are refreshed from it when bound (see "buffers of other
+ *    drivers" below).
  */
 #define _GNU_SOURCE
 #include <GLES3/gl32.h>
 #include <dlfcn.h>
+#include <drm_fourcc.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <linux/dma-buf.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../core/cham_shim.h"
+#include "../vendor/vendor.h"
 #include "gles_internal.h"
 
 static void (GL_APIENTRY *p_glShaderSource)(GLuint, GLsizei, const GLchar *const *, const GLint *);
@@ -51,6 +61,10 @@ static void (GL_APIENTRY *p_glTexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei
 static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint, GLsizei, GLsizei, GLsizei, GLenum,
                                              GLenum, const void *);
 static void (GL_APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
+static void (GL_APIENTRY *p_glBindTexture)(GLenum, GLuint);
+static void (GL_APIENTRY *p_glDeleteTextures)(GLsizei, const GLuint *);
+static void (GL_APIENTRY *p_glPixelStorei)(GLenum, GLint);
+static void (GL_APIENTRY *p_glBindBuffer)(GLenum, GLuint);
 static int g_bounce = 1;
 static int g_unbind = 1;
 
@@ -77,6 +91,10 @@ __attribute__((constructor)) static void load(void)
     const char *bounce = getenv("CHAMELEON_GL_BOUNCE");
     g_bounce = !(bounce && *bounce == '0');
     *(void **)&p_glBindFramebuffer = dlsym(lib, "glBindFramebuffer");
+    *(void **)&p_glBindTexture = dlsym(lib, "glBindTexture");
+    *(void **)&p_glDeleteTextures = dlsym(lib, "glDeleteTextures");
+    *(void **)&p_glPixelStorei = dlsym(lib, "glPixelStorei");
+    *(void **)&p_glBindBuffer = dlsym(lib, "glBindBuffer");
     const char *unbind = getenv("CHAMELEON_GL_UPLOAD_UNBIND");
     g_unbind = !(unbind && *unbind == '0');
 }
@@ -441,6 +459,165 @@ GL_APICALL void GL_APIENTRY glShaderSource(GLuint shader, GLsizei count, const G
     free(joined);
 }
 
+/* ---- buffers of other drivers ----
+ * gbm_bo_import (Xwayland's DRI3 clients: panfrost, panvk, ... rendering on
+ * their own) gives another driver's linear dmabuf an AHardwareBuffer of its
+ * own (cham_bo.src_fd). Android's driver can't read that dmabuf, so a
+ * texture made from the stand-in gets the client's pixels whenever it is
+ * bound, which is when glamor copies a presented frame into the window. */
+
+struct foreign {
+    void *image;    /* NULL once destroyed */
+    GLuint texture; /* 0 until the image is bound to one, or once deleted */
+    int fd;
+    void *map;
+    size_t size, offset;
+    GLsizei width, height;
+    GLint row_length; /* pixels */
+    GLenum format;
+    struct foreign *next;
+};
+
+static pthread_mutex_t g_foreign_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct foreign *g_foreign;
+
+void cham_gl_foreign_image(void *image, const struct cham_bo *bo)
+{
+    struct foreign *f = calloc(1, sizeof *f);
+    if (!f)
+        return;
+    f->image = image;
+    f->offset = bo->src_offset;
+    f->width = (GLsizei)bo->width;
+    f->height = (GLsizei)bo->height;
+    f->row_length = (GLint)(bo->src_stride / 4);
+    f->format = bo->format == DRM_FORMAT_ARGB8888 || bo->format == DRM_FORMAT_XRGB8888 ? 0x80E1 /* GL_BGRA_EXT */
+                                                                                     : GL_RGBA;
+    f->size = bo->src_offset + (size_t)bo->src_stride * bo->height;
+    f->fd = fcntl(bo->src_fd, F_DUPFD_CLOEXEC, 0);
+    f->map = f->fd >= 0 ? mmap(NULL, f->size, PROT_READ, MAP_SHARED, f->fd, 0) : MAP_FAILED;
+    if (f->map == MAP_FAILED) {
+        cham_log("cannot map a %dx%d buffer from another driver: %s", f->width, f->height, strerror(errno));
+        if (f->fd >= 0)
+            close(f->fd);
+        free(f);
+        return;
+    }
+    static int logged;
+    if (!logged++)
+        cham_log("buffers from another driver: copied into textures as they are drawn (first: %dx%d)", f->width,
+                 f->height);
+    pthread_mutex_lock(&g_foreign_lock);
+    f->next = g_foreign;
+    g_foreign = f;
+    pthread_mutex_unlock(&g_foreign_lock);
+}
+
+static void foreign_free(struct foreign *f)
+{
+    munmap(f->map, f->size);
+    close(f->fd);
+    free(f);
+}
+
+/* Into the texture bound to GL_TEXTURE_2D, under default unpack state. */
+static void foreign_upload(const struct foreign *f)
+{
+    struct dma_buf_sync sync = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
+    ioctl(f->fd, DMA_BUF_IOCTL_SYNC, &sync);
+    GLint row_length = 0, alignment = 4, skip_pixels = 0, skip_rows = 0, pbo = 0;
+    p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
+    p_glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
+    p_glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skip_pixels);
+    p_glGetIntegerv(GL_UNPACK_SKIP_ROWS, &skip_rows);
+    p_glGetIntegerv(GL_PIXEL_UNPACK_BUFFER_BINDING, &pbo);
+    p_glPixelStorei(GL_UNPACK_ROW_LENGTH, f->row_length);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    p_glPixelStorei(GL_UNPACK_SKIP_PIXELS, 0);
+    p_glPixelStorei(GL_UNPACK_SKIP_ROWS, 0);
+    if (pbo)
+        p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, f->width, f->height, f->format, GL_UNSIGNED_BYTE,
+                    (const char *)f->map + f->offset);
+    if (pbo)
+        p_glBindBuffer(GL_PIXEL_UNPACK_BUFFER, (GLuint)pbo);
+    p_glPixelStorei(GL_UNPACK_ROW_LENGTH, row_length);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
+    p_glPixelStorei(GL_UNPACK_SKIP_PIXELS, skip_pixels);
+    p_glPixelStorei(GL_UNPACK_SKIP_ROWS, skip_rows);
+    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
+    ioctl(f->fd, DMA_BUF_IOCTL_SYNC, &sync);
+}
+
+void cham_gl_foreign_target(void *image)
+{
+    if (!__atomic_load_n(&g_foreign, __ATOMIC_RELAXED))
+        return;
+    pthread_mutex_lock(&g_foreign_lock);
+    for (struct foreign *f = g_foreign; f; f = f->next) {
+        if (f->image == image) {
+            GLint texture = 0;
+            p_glGetIntegerv(GL_TEXTURE_BINDING_2D, &texture);
+            f->texture = (GLuint)texture; /* one texture per image, as glamor does */
+            foreign_upload(f);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_foreign_lock);
+}
+
+/* Entries matching `image` or one of `textures` lose that link; an entry
+ * with neither left is freed. */
+static void foreign_forget(void *image, GLsizei n, const GLuint *textures)
+{
+    if (!__atomic_load_n(&g_foreign, __ATOMIC_RELAXED))
+        return;
+    pthread_mutex_lock(&g_foreign_lock);
+    for (struct foreign **p = &g_foreign; *p;) {
+        struct foreign *f = *p;
+        if (image && f->image == image)
+            f->image = NULL;
+        for (GLsizei i = 0; i < n; i++)
+            if (f->texture && f->texture == textures[i])
+                f->texture = 0;
+        if (!f->image && !f->texture) {
+            *p = f->next;
+            foreign_free(f);
+        } else {
+            p = &f->next;
+        }
+    }
+    pthread_mutex_unlock(&g_foreign_lock);
+}
+
+void cham_gl_foreign_image_gone(void *image)
+{
+    foreign_forget(image, 0, NULL);
+}
+
+GL_APICALL void GL_APIENTRY glBindTexture(GLenum target, GLuint texture)
+{
+    CHAM_NOTE_CALL("glBindTexture");
+    p_glBindTexture(target, texture);
+    if (target != GL_TEXTURE_2D || !texture || !__atomic_load_n(&g_foreign, __ATOMIC_RELAXED))
+        return;
+    pthread_mutex_lock(&g_foreign_lock);
+    for (struct foreign *f = g_foreign; f; f = f->next) {
+        if (f->texture == texture) {
+            foreign_upload(f);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_foreign_lock);
+}
+
+GL_APICALL void GL_APIENTRY glDeleteTextures(GLsizei n, const GLuint *textures)
+{
+    CHAM_NOTE_CALL("glDeleteTextures");
+    foreign_forget(NULL, n, textures);
+    p_glDeleteTextures(n, textures);
+}
+
 /* ---- entry points for glvnd ---- */
 
 #define OWN(name) {#name, (void *)name}
@@ -450,6 +627,7 @@ static const struct {
 } k_own[] = {
     OWN(glShaderSource), OWN(glGetString),  OWN(glGetStringi),    OWN(glGetIntegerv),
     OWN(glTexImage2D),   OWN(glTexSubImage2D), OWN(glTexImage3D), OWN(glTexSubImage3D),
+    OWN(glBindTexture),  OWN(glDeleteTextures),
 };
 
 /* Our function for a core GLES 3.2 entry point, NULL for anything else

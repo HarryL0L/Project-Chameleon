@@ -27,6 +27,11 @@ struct cham_bo {
     int dmabuf_fd;     /* our own dup of the gralloc handle's pixel dmabuf */
     dev_t dmabuf_dev;
     ino_t dmabuf_ino;
+    /* gbm_bo_import of another driver's linear dmabuf (Xwayland's DRI3
+     * clients): what this buffer stands in for, copied in by the EGL vendor
+     * whenever a texture of it is bound. src_fd is -1 otherwise. */
+    int src_fd;
+    uint32_t src_offset, src_stride;
 
     /* private to the core */
     int refs;

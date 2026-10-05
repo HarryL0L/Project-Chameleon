@@ -6,6 +6,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -118,14 +119,49 @@ struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *gbm, uint32_t wid
                                          GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 }
 
+/* Another driver's buffer, e.g. a DRI3 client's of Xwayland (panfrost,
+ * panvk, ... rendering on their own): Android's driver can't use its
+ * dmabuf, so the buffer gets an AHardwareBuffer of its own that the EGL
+ * vendor fills from the dmabuf whenever a texture of it is bound. Only
+ * linear single-plane 32-bit RGB, which is what such clients present. */
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type, void *buffer, uint32_t flags)
 {
-    (void)gbm;
-    (void)type;
-    (void)buffer;
     (void)flags;
-    errno = ENOSYS; /* foreign dmabufs have no AHardwareBuffer to show */
-    return NULL;
+    int fd = -1;
+    uint32_t width = 0, height = 0, format = 0, stride = 0, offset = 0;
+    uint64_t modifier = DRM_FORMAT_MOD_INVALID; /* implicit: taken as linear */
+    if (type == GBM_BO_IMPORT_FD) {
+        const struct gbm_import_fd_data *d = buffer;
+        fd = d->fd, width = d->width, height = d->height, stride = d->stride, format = d->format;
+    } else if (type == GBM_BO_IMPORT_FD_MODIFIER) {
+        const struct gbm_import_fd_modifier_data *d = buffer;
+        if (d->num_fds == 1 && d->strides[0] > 0 && d->offsets[0] >= 0) {
+            fd = d->fds[0], width = d->width, height = d->height, format = d->format;
+            stride = (uint32_t)d->strides[0], offset = (uint32_t)d->offsets[0], modifier = d->modifier;
+        }
+    }
+    int rgb32 = format == DRM_FORMAT_ARGB8888 || format == DRM_FORMAT_XRGB8888 || format == DRM_FORMAT_ABGR8888 ||
+                format == DRM_FORMAT_XBGR8888;
+    if (fd < 0 || !rgb32 || stride < width * 4 ||
+        (modifier != DRM_FORMAT_MOD_LINEAR && modifier != DRM_FORMAT_MOD_INVALID)) {
+        static int logged;
+        if (logged++ < 4)
+            cham_log("gbm import: can't take a %ux%u %.4s buffer with modifier 0x%llx", width, height,
+                     (const char *)&format, (unsigned long long)modifier);
+        errno = ENOSYS;
+        return NULL;
+    }
+    struct gbm_bo *bo = create(gbm, width, height, format, GBM_BO_USE_RENDERING, DRM_FORMAT_MOD_INVALID);
+    if (!bo)
+        return NULL;
+    bo->cb->src_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
+    bo->cb->src_offset = offset;
+    bo->cb->src_stride = stride;
+    if (bo->cb->src_fd < 0) {
+        gbm_bo_destroy(bo);
+        return NULL;
+    }
+    return bo;
 }
 
 void gbm_bo_destroy(struct gbm_bo *bo)

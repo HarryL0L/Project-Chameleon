@@ -469,12 +469,15 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
     if (image != EGL_NO_IMAGE_KHR &&
         ((uint32_t)fourcc == DRM_FORMAT_XRGB8888 || (uint32_t)fourcc == DRM_FORMAT_XBGR8888))
         opaque_add(image);
+    if (image != EGL_NO_IMAGE_KHR && bo && bo->src_fd >= 0)
+        cham_gl_foreign_image(image, bo); /* stands in for another driver's dmabuf */
     return image;
 }
 
 static EGLBoolean EGLAPIENTRY shim_eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
 {
     opaque_find(image, 1);
+    cham_gl_foreign_image_gone(image);
     REAL(EGLBoolean, eglDestroyImageKHR, (EGLDisplay, EGLImageKHR))
     return p_eglDestroyImageKHR ? p_eglDestroyImageKHR(dpy, image) : EGL_FALSE;
 }
@@ -482,6 +485,7 @@ static EGLBoolean EGLAPIENTRY shim_eglDestroyImageKHR(EGLDisplay dpy, EGLImageKH
 EGLAPI EGLBoolean EGLAPIENTRY eglDestroyImage(EGLDisplay dpy, EGLImage image)
 {
     opaque_find(image, 1);
+    cham_gl_foreign_image_gone(image);
     REAL(EGLBoolean, eglDestroyImage, (EGLDisplay, EGLImage))
     return p_eglDestroyImage ? p_eglDestroyImage(dpy, image) : EGL_FALSE;
 }
@@ -540,6 +544,8 @@ static void tr_EGLImageTargetTexture2DOES(unsigned target, void *image)
 {
     CHAM_NOTE_CALL("glEGLImageTargetTexture2DOES");
     p_tr_EGLImageTargetTexture2DOES(target, image);
+    if (target == 0x0DE1 /* GL_TEXTURE_2D */)
+        cham_gl_foreign_target(image);
     if (target == 0x0DE1 /* GL_TEXTURE_2D */ && opaque_find(image, 0)) {
         static void (*tex_parameteri)(unsigned, unsigned, int);
         if (!tex_parameteri)
