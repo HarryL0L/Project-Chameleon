@@ -15,10 +15,13 @@
  *    GL_EXT_texture_format_BGRA8888, so KWin uploads plain RGBA (hidden
  *    while that crash was being hunted, kept as the well-trodden path).
  *    Override with CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
- *    One is added: GL_EXT_unpack_subimage on OpenGL ES 3.0+, where its
- *    GL_UNPACK_ROW_LENGTH/SKIP_* are core (same enums). KWin demands the
- *    name on any GLES, but most ES 3 drivers (all Adreno, PowerVR, newer
- *    Mali) no longer list it.
+ *    Two may be added, for names programs demand that the driver only
+ *    provides under another name: GL_EXT_unpack_subimage on OpenGL ES 3.0+,
+ *    where its GL_UNPACK_ROW_LENGTH/SKIP_* are core (same enums) - KWin
+ *    demands it on any GLES, but most ES 3 drivers (all Adreno, PowerVR,
+ *    newer Mali) no longer list it; and GL_OES_texture_border_clamp, which
+ *    Xwayland's glamor demands, on OpenGL ES 3.2 or with
+ *    GL_EXT_texture_border_clamp (same enums; Adreno lists only those).
  *  - glTex(Sub)Image2D/3D: two precautions from the same hunt. Source data
  *    at a *tagged* heap pointer (0xb4...: Android sets the top byte, which
  *    the CPU ignores but a driver importing the memory may not) is copied to
@@ -134,16 +137,27 @@ static int has_extension(const char *list, const char *name)
     return 0;
 }
 
-/* Extensions implied by the context's core version that KWin still asks
- * for by name. */
-static const char *implied_extension(const char *all)
+/* Extensions the driver provides under another name (the context's core
+ * version or another extension) that programs ask for by this one. */
+static const struct {
+    const char *name, *alias;
+    int major, minor; /* core since OpenGL ES major.minor */
+} k_implied[] = {
+    {"GL_EXT_unpack_subimage", NULL, 3, 0},
+    {"GL_OES_texture_border_clamp", "GL_EXT_texture_border_clamp", 3, 2},
+};
+#define N_IMPLIED (sizeof k_implied / sizeof k_implied[0])
+
+static int implied(const char *all, size_t i)
 {
     const char *version = (const char *)p_glGetString(GL_VERSION);
-    int major = 0;
-    if (version && sscanf(version, "OpenGL ES %d", &major) == 1 && major >= 3 &&
-        !has_extension(all, "GL_EXT_unpack_subimage"))
-        return "GL_EXT_unpack_subimage";
-    return NULL;
+    int major = 0, minor = 0;
+    if (!version || sscanf(version, "OpenGL ES %d.%d", &major, &minor) < 1)
+        return 0;
+    if (has_extension(all, k_implied[i].name))
+        return 0;
+    return major > k_implied[i].major || (major == k_implied[i].major && minor >= k_implied[i].minor) ||
+           (k_implied[i].alias && has_extension(all, k_implied[i].alias));
 }
 
 static void build_extensions_locked(void)
@@ -153,9 +167,14 @@ static void build_extensions_locked(void)
     const char *all = (const char *)p_glGetString(GL_EXTENSIONS);
     if (!all)
         return; /* no context yet: try again next time */
-    const char *added = implied_extension(all);
-    g_ext_string = calloc(1, strlen(all) + (added ? strlen(added) + 1 : 0) + 1);
-    size_t max = 2;
+    int added[N_IMPLIED];
+    size_t extra = 0;
+    for (size_t i = 0; i < N_IMPLIED; i++) {
+        added[i] = implied(all, i);
+        extra += added[i] ? strlen(k_implied[i].name) + 1 : 0;
+    }
+    g_ext_string = calloc(1, strlen(all) + extra + 1);
+    size_t max = 1 + N_IMPLIED;
     for (const char *c = all; *c; c++)
         max += *c == ' ';
     g_ext_list = calloc(max, sizeof *g_ext_list);
@@ -179,12 +198,15 @@ static void build_extensions_locked(void)
         }
         p = e;
     }
-    if (added) {
+    for (size_t i = 0; i < N_IMPLIED; i++) {
+        if (!added[i])
+            continue;
         if (out != g_ext_string)
             *out++ = ' ';
-        strcpy(out, added);
+        strcpy(out, k_implied[i].name);
+        out += strlen(out);
         g_ext_count++;
-        cham_log("adding GL extension %s (core in OpenGL ES 3.0)", added);
+        cham_log("adding GL extension %s (provided by the driver under another name)", k_implied[i].name);
     }
     /* glGetStringi needs NUL-terminated names: split a private copy */
     char *names = strdup(g_ext_string);
