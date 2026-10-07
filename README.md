@@ -245,6 +245,28 @@ sequenceDiagram
 Code: [`shim/core/output.c`](shim/core/output.c), [`presenter.cpp`](android/app/src/main/cpp/presenter.cpp) (`place()`)
 </details>
 
+<details>
+<summary><b>📋 Clipboard</b>: copy on one side, paste on the other</summary>
+
+- Text copied in a desktop app can be pasted in Android apps, and the other
+  way round (*Clipboard sharing* in the app's settings, on by default).
+- On the same Wayland connection as input, the shim joins KWin's clipboard
+  the way a clipboard manager does, with `ext_data_control_v1` (KWin 6.4 and
+  later). X11 apps share it through Xwayland as usual.
+- The text itself only travels through pipes, never through the shim: a
+  desktop copy is written by the copying app into a pipe whose other end
+  goes to the Chameleon app (`CLIPBOARD_DATA`), and a desktop paste of
+  Android's text gets a pipe the Chameleon app writes into
+  (`CLIPBOARD_REQUEST`).
+- Android lets only the app in front read its clipboard, so new Android text
+  is offered (`CLIPBOARD_OFFER`) when Chameleon gets the focus or while it
+  has it. The clip itself is only read when it changed, so Android doesn't
+  keep showing "pasted from your clipboard". Desktop text reaches Android at
+  any time.
+
+Code: [`shim/core/clipboard.c`](shim/core/clipboard.c), [`ClipboardShare.java`](android/app/src/main/java/io/github/harryl0l/chameleon/ClipboardShare.java)
+</details>
+
 ### One frame, end to end
 
 ```mermaid
@@ -385,7 +407,7 @@ AHardwareBuffer and AImageReader support.
 |---|---|
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
-| [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, screen size, crash reporter |
+| [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, screen size, clipboard, crash reporter |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
@@ -421,6 +443,7 @@ shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libg
 - [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
 - [x] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
 - [x] Screen resize and rotation (keyboard-aware resizing)
+- [x] Clipboard sharing with Android
 - [ ] Xwayland acceleration
 
 ## Notes

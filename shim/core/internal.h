@@ -43,10 +43,13 @@ void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, 
                             uint32_t refresh_mhz);
 /* The app's surface size (last CONFIG), 0x0 while it has none. */
 void link_app_size(uint32_t *width, uint32_t *height);
+/* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
+void link_clipboard(uint32_t type, int fd);
 
 /* ---- input.c: app input -> KWin's fake input ---- */
 struct cham_msg;
-/* CHAM_INPUT, and CHAM_CONFIG for output.c; handled on the input thread. */
+/* CHAM_INPUT, CHAM_CONFIG for output.c and CHAM_CLIPBOARD_OFFER for
+ * clipboard.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
 /* KWin's Wayland socket, seen when it bind()s it. */
 void input_note_socket(const char *path);
@@ -65,6 +68,12 @@ int output_timeout_ms(void); /* until output_tick() has work, or -1 */
 void output_tick(void);
 /* Fraction of KWin's screen the app shows (it crops up to 7 pixels). */
 void output_visible(double *fx, double *fy);
+
+/* ---- clipboard.c: the desktop's clipboard <-> Android's (input thread) ---- */
+void clipboard_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version);
+void clipboard_connected(void);
+void clipboard_disconnected(void);
+void clipboard_offer(void); /* Android's clipboard has new text */
 
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {

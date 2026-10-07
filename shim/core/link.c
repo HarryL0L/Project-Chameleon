@@ -261,6 +261,7 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             g_replaced = 1;
         break;
     case CHAM_INPUT:
+    case CHAM_CLIPBOARD_OFFER:
         input_post(m);
         break;
     }
@@ -347,6 +348,13 @@ static void start_threads(void)
 void link_start(void)
 {
     pthread_once(&g_once, start_threads);
+}
+
+void link_clipboard(uint32_t type, int fd)
+{
+    pthread_mutex_lock(&g_lock);
+    send_msg_locked(type, 0, 0, 0, fd);
+    pthread_mutex_unlock(&g_lock);
 }
 
 void link_app_size(uint32_t *width, uint32_t *height)

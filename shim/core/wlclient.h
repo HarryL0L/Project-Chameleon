@@ -46,7 +46,7 @@ struct cham_wl {
     uint32_t (*get_version)(struct wl_proxy *);
     void *(*get_user_data)(struct wl_proxy *);
     void (*proxy_destroy)(struct wl_proxy *);
-    const struct wl_interface *registry_iface, *output_iface;
+    const struct wl_interface *registry_iface, *output_iface, *seat_iface;
 };
 extern struct cham_wl wl;
 

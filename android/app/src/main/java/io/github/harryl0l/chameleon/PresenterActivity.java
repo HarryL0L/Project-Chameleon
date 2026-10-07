@@ -80,6 +80,7 @@ public class PresenterActivity extends Activity
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
     private static final String PREF_EXTRA_KEYS = "extra_keys";
+    private static final String PREF_CLIPBOARD = "clipboard_sharing";
     private static final float DEFAULT_SPEED = 1.5f;
 
     private static boolean sStarted;
@@ -90,6 +91,7 @@ public class PresenterActivity extends Activity
     private int mImeBottom;
     private List<Rect> mCutouts = Collections.emptyList();
     private SharedPreferences mPrefs;
+    private ClipboardShare mClipboard;
     private TouchInput mTouch;
     private final KeyInput mKeys = new KeyInput();
     private ImeView mImeView;
@@ -139,6 +141,7 @@ public class PresenterActivity extends Activity
 
         mPrefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
         mTouch = new TouchInput(getResources().getDisplayMetrics().density);
+        mClipboard = ClipboardShare.get(this);
         applyInputPrefs();
         applyOrientation();
 
@@ -390,6 +393,7 @@ public class PresenterActivity extends Activity
     private void applyInputPrefs() {
         mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT,
                 mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED), mPrefs.getBoolean(PREF_TAP, true));
+        mClipboard.setEnabled(mPrefs.getBoolean(PREF_CLIPBOARD, true));
     }
 
     private boolean isTrackpad() {
@@ -518,6 +522,13 @@ public class PresenterActivity extends Activity
         box.addView(extraKeys);
         box.addView(settingsLabel(getString(R.string.screen_hint), false));
 
+        box.addView(settingsLabel(getString(R.string.clipboard), true));
+        CheckBox clipboard = new CheckBox(this);
+        clipboard.setText(R.string.clipboard_sharing);
+        clipboard.setChecked(mPrefs.getBoolean(PREF_CLIPBOARD, true));
+        box.addView(clipboard);
+        box.addView(settingsLabel(getString(R.string.clipboard_hint), false));
+
         ScrollView scroll = new ScrollView(this);
         scroll.addView(box);
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -532,6 +543,7 @@ public class PresenterActivity extends Activity
                             .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))
                             .putBoolean(PREF_KEYBOARD_RESIZE, keyboardResize.isChecked())
                             .putBoolean(PREF_EXTRA_KEYS, extraKeys.isChecked())
+                            .putBoolean(PREF_CLIPBOARD, clipboard.isChecked())
                             .apply();
                     applyInputPrefs();
                     applyOrientation();
@@ -607,8 +619,10 @@ public class PresenterActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (hasFocus)
+        if (hasFocus) {
             hideSystemBars();
+            mClipboard.onPrimaryClipChanged(); // copied in another app meanwhile?
+        }
     }
 
     private void hideSystemBars() {

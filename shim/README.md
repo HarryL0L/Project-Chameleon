@@ -66,6 +66,8 @@ screen keeps its first size instead of following the app's window).
   display's refresh rate (battery saver): the shim
   switches KWin's mode over `kde_output_management_v2`, adding a custom mode
   when needed (`core/output.c`).
+- Clipboard: text is shared with Android both ways through KWin's
+  `ext_data_control_v1` (KWin 6.4+; `core/clipboard.c`), only in pipes.
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL

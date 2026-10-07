@@ -23,6 +23,9 @@
     <string name="keyboard_resize">Shrink the desktop above the keyboard</string>
     <string name="extra_keys">Show extra keys above the keyboard (Esc, Ctrl, arrows…)</string>
     <string name="screen_hint">The desktop takes the size of this window: rotating the phone (or opening the keyboard, if enabled) resizes it, like plugging in a different monitor.</string>
+    <string name="clipboard">Clipboard</string>
+    <string name="clipboard_sharing">Clipboard sharing</string>
+    <string name="clipboard_hint">Text copied on the desktop can be pasted in Android apps, and the other way round. Android only lets Chameleon see its clipboard while Chameleon is open.</string>
     <string name="done">Done</string>
     <string name="screen_off">The desktop\'s screen is off\nTap to wake it</string>
 </resources>
