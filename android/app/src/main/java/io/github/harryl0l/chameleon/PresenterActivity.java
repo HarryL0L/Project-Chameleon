@@ -6,8 +6,14 @@ import android.app.AlertDialog;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Rect;
+import android.graphics.drawable.Drawable;
+import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.InsetDrawable;
+import android.graphics.drawable.LayerDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.hardware.display.DisplayManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -28,7 +34,6 @@ import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.Button;
-import android.widget.CheckBox;
 import android.widget.FrameLayout;
 import android.widget.HorizontalScrollView;
 import android.widget.ImageButton;
@@ -37,6 +42,7 @@ import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
+import android.widget.Switch;
 import android.widget.TextView;
 
 import java.util.Collections;
@@ -413,43 +419,195 @@ public class PresenterActivity extends Activity
         return (progress + 25) / 100f;
     }
 
-    private TextView settingsLabel(String text, boolean heading) {
+    /** A rounded card with a heading, added to box; the section's rows go into it. */
+    private LinearLayout settingsCard(LinearLayout box, int heading) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(16), dp(12), dp(16), dp(8));
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(20));
+        bg.setColor(accentColor() & 0x00ffffff | 0x1f000000);
+        card.setBackground(bg);
+        TextView t = new TextView(this);
+        t.setText(heading);
+        t.setAllCaps(true);
+        t.setTextSize(12);
+        t.setTextColor(accentColor());
+        t.setPadding(0, 0, 0, dp(4));
+        card.addView(t);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(12);
+        box.addView(card, lp);
+        return card;
+    }
+
+    private TextView settingsHint(int text) {
         TextView t = new TextView(this);
         t.setText(text);
-        t.setTextSize(heading ? 16 : 13);
-        t.setPadding(0, heading ? dp(16) : dp(2), 0, dp(4));
-        if (!heading)
-            t.setAlpha(0.7f);
+        t.setTextSize(13);
+        t.setAlpha(0.7f);
+        t.setPadding(0, 0, 0, dp(6));
         return t;
     }
 
+    /** A label on the left, its control on the right. */
+    private LinearLayout settingsRow(TextView label, View control) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setMinimumHeight(dp(48));
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+        row.addView(control);
+        return row;
+    }
+
+    private LinearLayout settingsRow(int label, View control) {
+        TextView t = new TextView(this);
+        t.setText(label);
+        t.setTextSize(16);
+        return settingsRow(t, control);
+    }
+
+    /** Saved and applied at once. Drawn like a Material 3 switch: an outlined
+     *  track with a small dot when off, a filled one with a checked dot when on. */
+    private Switch settingsSwitch(String pref) {
+        Switch s = new Switch(this);
+        int accent = accentColor();
+        int outline = new TextView(this).getCurrentTextColor() & 0x00ffffff | 0x99000000;
+
+        GradientDrawable trackOn = new GradientDrawable();
+        trackOn.setCornerRadius(dp(16));
+        trackOn.setSize(dp(52), dp(32));
+        trackOn.setColor(accent);
+        GradientDrawable trackOff = new GradientDrawable();
+        trackOff.setCornerRadius(dp(16));
+        trackOff.setSize(dp(52), dp(32));
+        trackOff.setStroke(dp(2), outline);
+        StateListDrawable track = new StateListDrawable();
+        track.addState(new int[] {android.R.attr.state_checked}, trackOn);
+        track.addState(new int[0], trackOff);
+
+        GradientDrawable dotOn = new GradientDrawable();
+        dotOn.setShape(GradientDrawable.OVAL);
+        dotOn.setSize(dp(24), dp(24));
+        dotOn.setColor(onColor(accent));
+        Drawable check = getDrawable(R.drawable.ic_check).mutate();
+        check.setTint(accent);
+        LayerDrawable thumbOn = new LayerDrawable(new Drawable[] {dotOn, check});
+        // The thumb is 26 dp wide, as a switch is at least twice its thumb's
+        // width: the dots sit off-centre in it to land where Material 3 puts them.
+        thumbOn.setLayerInset(0, 0, dp(4), dp(2), dp(4));
+        thumbOn.setLayerInset(1, dp(4), dp(8), dp(6), dp(8));
+        GradientDrawable dotOff = new GradientDrawable();
+        dotOff.setShape(GradientDrawable.OVAL);
+        dotOff.setSize(dp(16), dp(16));
+        dotOff.setColor(outline);
+        LayerDrawable thumbOff = new LayerDrawable(new Drawable[] {dotOff});
+        thumbOff.setLayerInset(0, dp(8), dp(8), dp(2), dp(8));
+        StateListDrawable thumb = new StateListDrawable();
+        thumb.addState(new int[] {android.R.attr.state_checked}, thumbOn);
+        thumb.addState(new int[0], thumbOff);
+
+        s.setTrackDrawable(track);
+        s.setThumbDrawable(thumb);
+        s.setSwitchMinWidth(dp(52));
+        s.setChecked(mPrefs.getBoolean(pref, true));
+        s.setOnCheckedChangeListener((v, on) -> {
+            mPrefs.edit().putBoolean(pref, on).apply();
+            applySettings();
+        });
+        return s;
+    }
+
+    /** Two or three side-by-side buttons, one of them selected; returns the group. */
+    private RadioGroup settingsChoice(int[] labels, String[] values, String current, OnChoice onChoice) {
+        RadioGroup group = new RadioGroup(this);
+        group.setOrientation(LinearLayout.HORIZONTAL);
+        int accent = accentColor();
+        ColorStateList text = new ColorStateList(
+                new int[][] {{android.R.attr.state_checked}, {}},
+                new int[] {onColor(accent), new TextView(this).getCurrentTextColor()});
+        for (int i = 0; i < labels.length; i++) {
+            RadioButton b = new RadioButton(this);
+            b.setText(labels[i]);
+            b.setId(View.generateViewId());
+            b.setTag(values[i]);
+            b.setButtonDrawable(null);
+            b.setTextColor(text);
+            b.setGravity(Gravity.CENTER);
+            b.setPadding(dp(12), dp(6), dp(12), dp(6));
+            GradientDrawable on = new GradientDrawable();
+            on.setCornerRadius(dp(16));
+            on.setColor(accent);
+            GradientDrawable off = new GradientDrawable();
+            off.setCornerRadius(dp(16));
+            off.setStroke(dp(1), accent);
+            StateListDrawable bg = new StateListDrawable();
+            bg.addState(new int[] {android.R.attr.state_checked}, on);
+            bg.addState(new int[0], off);
+            b.setBackground(bg);
+            RadioGroup.LayoutParams lp = new RadioGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT);
+            if (i > 0)
+                lp.setMarginStart(dp(6));
+            group.addView(b, lp);
+            if (values[i].equals(current))
+                group.check(b.getId());
+        }
+        group.setOnCheckedChangeListener((g, id) -> onChoice.chosen((String) g.findViewById(id).getTag()));
+        return group;
+    }
+
+    private interface OnChoice {
+        void chosen(String value);
+    }
+
+    private int accentColor() {
+        TypedValue v = new TypedValue();
+        return getTheme().resolveAttribute(android.R.attr.colorAccent, v, true) ? v.data : 0xff4f8ef7;
+    }
+
+    /** Black or white, whichever reads better on color. */
+    private static int onColor(int color) {
+        double l = 0.299 * Color.red(color) + 0.587 * Color.green(color) + 0.114 * Color.blue(color);
+        return l > 150 ? 0xff1b1b1f : Color.WHITE;
+    }
+
+    private void applySettings() {
+        applyInputPrefs();
+        applyOrientation();
+        setKeyboardShown(mKeyboardShown); // the extra keys, and the surface's area
+    }
+
+    /** Every change is saved and applied as it is made. */
     private void showSettings() {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(24), dp(8), dp(24), dp(8));
+        box.setPadding(dp(16), 0, dp(16), dp(8));
 
-        box.addView(settingsLabel(getString(R.string.touch_input), true));
-        RadioGroup modes = new RadioGroup(this);
-        RadioButton direct = new RadioButton(this);
-        direct.setText(R.string.mode_direct);
-        direct.setId(View.generateViewId());
-        RadioButton trackpad = new RadioButton(this);
-        trackpad.setText(R.string.mode_trackpad);
-        trackpad.setId(View.generateViewId());
-        modes.addView(direct);
-        modes.addView(trackpad);
-        boolean isTrackpad = isTrackpad();
-        modes.check(isTrackpad ? trackpad.getId() : direct.getId());
-        box.addView(modes);
-        TextView modeHint = settingsLabel(getString(isTrackpad ? R.string.mode_trackpad_hint : R.string.mode_direct_hint), false);
-        box.addView(modeHint);
+        LinearLayout touch = settingsCard(box, R.string.touch_input);
+        TextView modeHint = settingsHint(isTrackpad() ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
+        LinearLayout trackpadOptions = new LinearLayout(this);
+        trackpadOptions.setOrientation(LinearLayout.VERTICAL);
+        trackpadOptions.setVisibility(isTrackpad() ? View.VISIBLE : View.GONE);
+        touch.addView(settingsRow(R.string.input_mode, settingsChoice(
+                new int[] {R.string.mode_direct, R.string.mode_trackpad}, new String[] {"direct", "trackpad"},
+                isTrackpad() ? "trackpad" : "direct", value -> {
+                    mPrefs.edit().putString(PREF_MODE, value).apply();
+                    applySettings();
+                    boolean t = isTrackpad();
+                    modeHint.setText(t ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
+                    trackpadOptions.setVisibility(t ? View.VISIBLE : View.GONE);
+                })));
+        touch.addView(modeHint);
 
-        TextView speedLabel = settingsLabel("", true);
+        TextView speedLabel = new TextView(this);
+        speedLabel.setTextSize(16);
+        float current = mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED);
+        speedLabel.setText(getString(R.string.pointer_speed, current));
         SeekBar speed = new SeekBar(this);
         speed.setMax(speedToProgress(3f));
-        float current = mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED);
         speed.setProgress(speedToProgress(current));
-        speedLabel.setText(getString(R.string.pointer_speed, current));
         speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
@@ -460,104 +618,93 @@ public class PresenterActivity extends Activity
             public void onStartTrackingTouch(SeekBar s) {}
 
             @Override
-            public void onStopTrackingTouch(SeekBar s) {}
+            public void onStopTrackingTouch(SeekBar s) {
+                mPrefs.edit().putFloat(PREF_SPEED, progressToSpeed(s.getProgress())).apply();
+                applySettings();
+            }
         });
-        CheckBox tap = new CheckBox(this);
-        tap.setText(R.string.tap_to_click);
-        tap.setChecked(mPrefs.getBoolean(PREF_TAP, true));
-        LinearLayout trackpadOptions = new LinearLayout(this);
-        trackpadOptions.setOrientation(LinearLayout.VERTICAL);
-        trackpadOptions.addView(speedLabel);
+        trackpadOptions.addView(speedLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT));
         trackpadOptions.addView(speed);
-        trackpadOptions.addView(tap);
-        trackpadOptions.setVisibility(isTrackpad ? View.VISIBLE : View.GONE);
-        box.addView(trackpadOptions);
-        modes.setOnCheckedChangeListener((group, id) -> {
-            boolean t = id == trackpad.getId();
-            modeHint.setText(t ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
-            trackpadOptions.setVisibility(t ? View.VISIBLE : View.GONE);
-        });
+        trackpadOptions.addView(settingsRow(R.string.tap_to_click, settingsSwitch(PREF_TAP)));
+        touch.addView(trackpadOptions);
+        touch.addView(settingsHint(R.string.mouse_hint));
 
-        box.addView(settingsLabel(getString(R.string.back_button), true));
-        RadioGroup back = new RadioGroup(this);
-        RadioButton backEsc = new RadioButton(this);
-        backEsc.setText(R.string.back_escape);
-        backEsc.setId(View.generateViewId());
-        RadioButton backLeave = new RadioButton(this);
-        backLeave.setText(R.string.back_leave);
-        backLeave.setId(View.generateViewId());
-        back.addView(backEsc);
-        back.addView(backLeave);
-        back.check(backLeavesApp() ? backLeave.getId() : backEsc.getId());
-        box.addView(back);
+        LinearLayout keys = settingsCard(box, R.string.keys);
+        keys.addView(settingsRow(R.string.back_button, settingsChoice(
+                new int[] {R.string.back_escape, R.string.back_leave}, new String[] {"escape", "leave"},
+                backLeavesApp() ? "leave" : "escape", value -> {
+                    mPrefs.edit().putString(PREF_BACK, value).apply();
+                    applySettings();
+                })));
+        keys.addView(settingsRow(R.string.extra_keys, settingsSwitch(PREF_EXTRA_KEYS)));
 
-        box.addView(settingsLabel(getString(R.string.mouse_hint), false));
+        LinearLayout screen = settingsCard(box, R.string.screen);
+        // Three choices don't fit beside the label: they go below it.
+        TextView orientationLabel = new TextView(this);
+        orientationLabel.setText(R.string.orientation);
+        orientationLabel.setTextSize(16);
+        orientationLabel.setPadding(0, dp(12), 0, dp(8));
+        screen.addView(orientationLabel);
+        screen.addView(settingsChoice(
+                new int[] {R.string.orientation_auto, R.string.orientation_portrait, R.string.orientation_landscape},
+                new String[] {"auto", "portrait", "landscape"}, mPrefs.getString(PREF_ORIENTATION, "auto"), value -> {
+                    mPrefs.edit().putString(PREF_ORIENTATION, value).apply();
+                    applySettings();
+                }));
+        screen.addView(settingsRow(R.string.keyboard_resize, settingsSwitch(PREF_KEYBOARD_RESIZE)));
+        screen.addView(settingsHint(R.string.screen_hint));
 
-        box.addView(settingsLabel(getString(R.string.screen), true));
-        RadioGroup orientation = new RadioGroup(this);
-        String[] orientationValues = {"auto", "portrait", "landscape"};
-        int[] orientationLabels = {R.string.orientation_auto, R.string.orientation_portrait,
-                R.string.orientation_landscape};
-        int[] orientationIds = new int[orientationValues.length];
-        String currentOrientation = mPrefs.getString(PREF_ORIENTATION, "auto");
-        for (int i = 0; i < orientationValues.length; i++) {
-            RadioButton b = new RadioButton(this);
-            b.setText(orientationLabels[i]);
-            orientationIds[i] = View.generateViewId();
-            b.setId(orientationIds[i]);
-            orientation.addView(b);
-            if (orientationValues[i].equals(currentOrientation))
-                orientation.check(orientationIds[i]);
-        }
-        if (orientation.getCheckedRadioButtonId() == View.NO_ID)
-            orientation.check(orientationIds[0]);
-        box.addView(orientation);
-        CheckBox keyboardResize = new CheckBox(this);
-        keyboardResize.setText(R.string.keyboard_resize);
-        keyboardResize.setChecked(mPrefs.getBoolean(PREF_KEYBOARD_RESIZE, true));
-        box.addView(keyboardResize);
-        CheckBox extraKeys = new CheckBox(this);
-        extraKeys.setText(R.string.extra_keys);
-        extraKeys.setChecked(mPrefs.getBoolean(PREF_EXTRA_KEYS, true));
-        box.addView(extraKeys);
-        box.addView(settingsLabel(getString(R.string.screen_hint), false));
-
-        box.addView(settingsLabel(getString(R.string.clipboard), true));
-        CheckBox clipboard = new CheckBox(this);
-        clipboard.setText(R.string.clipboard_sharing);
-        clipboard.setChecked(mPrefs.getBoolean(PREF_CLIPBOARD, true));
-        box.addView(clipboard);
-        box.addView(settingsLabel(getString(R.string.clipboard_hint), false));
+        LinearLayout clipboard = settingsCard(box, R.string.clipboard);
+        clipboard.addView(settingsRow(R.string.clipboard_sharing, settingsSwitch(PREF_CLIPBOARD)));
+        clipboard.addView(settingsHint(R.string.clipboard_hint));
 
         ScrollView scroll = new ScrollView(this);
         scroll.addView(box);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+        // Close below the scrolling cards, shaped like the choice buttons
+        // (the dialog's own button bar can't take that shape).
+        Button close = new Button(this);
+        close.setText(R.string.close);
+        close.setAllCaps(false);
+        close.setTextSize(TypedValue.COMPLEX_UNIT_PX, new RadioButton(this).getTextSize());
+        close.setTextColor(onColor(accentColor()));
+        close.setStateListAnimator(null); // no shadow
+        close.setMinHeight(0);
+        close.setMinimumHeight(0);
+        close.setPadding(dp(20), 0, dp(20), 0);
+        GradientDrawable pill = new GradientDrawable();
+        pill.setCornerRadius(dp(20));
+        pill.setColor(accentColor());
+        close.setBackground(pill);
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        // Between the title and the cards scrolling under it.
+        View separator = new View(this);
+        separator.setBackgroundColor(new TextView(this).getCurrentTextColor());
+        separator.setAlpha(0.2f);
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(1));
+        sp.setMargins(dp(24), dp(12), dp(24), 0);
+        content.addView(separator, sp);
+        content.addView(scroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, 1)); // shrinks to fit, the button stays
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40));
+        lp.gravity = Gravity.END;
+        lp.setMargins(0, dp(12), dp(16), dp(16));
+        content.addView(close, lp);
+
+        AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle(R.string.settings_title)
-                .setView(scroll)
-                .setPositiveButton(R.string.done, (d, w) -> {
-                    mPrefs.edit()
-                            .putString(PREF_MODE, modes.getCheckedRadioButtonId() == trackpad.getId() ? "trackpad" : "direct")
-                            .putFloat(PREF_SPEED, progressToSpeed(speed.getProgress()))
-                            .putBoolean(PREF_TAP, tap.isChecked())
-                            .putString(PREF_BACK, back.getCheckedRadioButtonId() == backLeave.getId() ? "leave" : "escape")
-                            .putString(PREF_ORIENTATION, orientationValue(orientation, orientationIds, orientationValues))
-                            .putBoolean(PREF_KEYBOARD_RESIZE, keyboardResize.isChecked())
-                            .putBoolean(PREF_EXTRA_KEYS, extraKeys.isChecked())
-                            .putBoolean(PREF_CLIPBOARD, clipboard.isChecked())
-                            .apply();
-                    applyInputPrefs();
-                    applyOrientation();
-                    setKeyboardShown(mKeyboardShown); // the extra keys, and the surface's area
-                })
+                .setView(content)
                 .setOnDismissListener(d -> hideSystemBars())
                 .show();
-    }
-
-    private static String orientationValue(RadioGroup group, int[] ids, String[] values) {
-        for (int i = 0; i < ids.length; i++)
-            if (group.getCheckedRadioButtonId() == ids[i])
-                return values[i];
-        return values[0];
+        close.setOnClickListener(v -> dialog.dismiss());
+        // Rounder than the default dialog.
+        TypedValue v = new TypedValue();
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(28));
+        bg.setColor(dialog.getContext().getTheme().resolveAttribute(android.R.attr.colorBackground, v, true)
+                ? v.data : 0xff202124);
+        dialog.getWindow().setBackgroundDrawable(new InsetDrawable(bg, dp(16)));
     }
 
     private Display display() {
