@@ -32,7 +32,8 @@ enum cham_msg_type {
                                fd = acquire fence (optional) */
     CHAM_SCREEN = 5,        /* a = 1: the compositor turned its screen off (idle, DPMS),
                                0: on again. Input wakes it. */
-    CHAM_CLIPBOARD_DATA = 6,    /* the desktop copied text: fd = pipe to read it from (UTF-8) */
+    CHAM_CLIPBOARD_DATA = 6,    /* the desktop copied text: fd = pipe to read it from (UTF-8),
+                                   a = 1: a password manager marked it secret */
     CHAM_CLIPBOARD_REQUEST = 7, /* a desktop app pastes the presenter's text: fd = pipe to
                                    write it into (UTF-8), then close */
 
@@ -45,7 +46,8 @@ enum cham_msg_type {
     CHAM_BYE = 103,         /* a = CHAM_BYE_*; sent right before the presenter closes */
     CHAM_INPUT = 104,       /* id = CHAM_INPUT_*, a/b as described there */
     CHAM_CLIPBOARD_OFFER = 105, /* Android's clipboard has new text: the producer makes it the
-                                   desktop's clipboard and asks for it with CLIPBOARD_REQUEST */
+                                   desktop's clipboard and asks for it with CLIPBOARD_REQUEST;
+                                   a = 1: Android marks it sensitive (a password) */
 };
 
 /* Input events, presenter -> producer (the KWin shim feeds them to KWin's

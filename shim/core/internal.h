@@ -44,7 +44,7 @@ void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, 
 /* The app's surface size (last CONFIG), 0x0 while it has none. */
 void link_app_size(uint32_t *width, uint32_t *height);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
-void link_clipboard(uint32_t type, int fd);
+void link_clipboard(uint32_t type, uint64_t a, int fd);
 
 /* ---- input.c: app input -> KWin's fake input ---- */
 struct cham_msg;
@@ -73,7 +73,7 @@ void output_visible(double *fx, double *fy);
 void clipboard_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version);
 void clipboard_connected(void);
 void clipboard_disconnected(void);
-void clipboard_offer(void); /* Android's clipboard has new text */
+void clipboard_offer(int secret); /* Android's clipboard has new text */
 
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {

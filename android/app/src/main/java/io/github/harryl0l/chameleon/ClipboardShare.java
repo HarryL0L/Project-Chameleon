@@ -8,6 +8,7 @@ import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.ParcelFileDescriptor;
+import android.os.PersistableBundle;
 import android.system.ErrnoException;
 import android.system.Os;
 import android.system.OsConstants;
@@ -42,9 +43,11 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
     private static final int MAX_BYTES = 1 << 20;
     // A desktop app that stops writing mid-copy must not stall this thread.
     private static final int READ_TIMEOUT_MS = 5000;
+    // ClipDescription.EXTRA_IS_SENSITIVE, API 33; older Androids ignore it.
+    private static final String EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE";
 
     private static native long nativeClipboardWait();
-    private static native void nativeClipboardOffer();
+    private static native void nativeClipboardOffer(boolean secret);
 
     private static ClipboardShare sInstance;
 
@@ -86,6 +89,11 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
         ClipDescription description = mClipboard.getPrimaryClipDescription();
         if (description == null || description.getTimestamp() == mSeen)
             return;
+        // Text only: coerceToText() turns an image or a file into its URI.
+        if (!description.hasMimeType("text/*")) {
+            mSeen = description.getTimestamp();
+            return;
+        }
         ClipData clip = mClipboard.getPrimaryClip(); // null without the focus
         if (clip == null || clip.getItemCount() == 0)
             return;
@@ -94,18 +102,20 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
         if (text == null || text.length() == 0 || text.toString().equals(mText))
             return;
         mText = text.toString();
-        nativeClipboardOffer();
+        PersistableBundle extras = description.getExtras();
+        nativeClipboardOffer(extras != null && extras.getBoolean(EXTRA_IS_SENSITIVE));
     }
 
     private void serve() {
         for (;;) {
             long next = nativeClipboardWait();
-            int type = (int) (next >>> 32);
+            int type = (int) (next >>> 32) & 0xff;
+            boolean secret = (next >>> 40 & 1) != 0;
             try (ParcelFileDescriptor pipe = ParcelFileDescriptor.adoptFd((int) next)) {
                 if (!mEnabled)
                     continue;
                 if (type == DATA)
-                    receive(pipe);
+                    receive(pipe, secret);
                 else if (type == REQUEST)
                     send(pipe);
             } catch (IOException e) {
@@ -114,8 +124,12 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
         }
     }
 
-    /** The desktop copied text: put it on Android's clipboard. */
-    private void receive(ParcelFileDescriptor pipe) throws IOException {
+    /**
+     * The desktop copied text: put it on Android's clipboard, marked
+     * sensitive when a password manager copied it, so Android hides it.
+     * The other way, sensitive Android text is a password to KDE too.
+     */
+    private void receive(ParcelFileDescriptor pipe, boolean secret) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         byte[] chunk = new byte[16384];
         StructPollfd readable = new StructPollfd();
@@ -145,9 +159,15 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
             return;
         String text = new String(bytes.toByteArray(), StandardCharsets.UTF_8);
         mText = text;
+        ClipData clip = ClipData.newPlainText("Chameleon", text);
+        if (secret) {
+            PersistableBundle extras = new PersistableBundle();
+            extras.putBoolean(EXTRA_IS_SENSITIVE, true);
+            clip.getDescription().setExtras(extras);
+        }
         mMain.post(() -> {
             try {
-                mClipboard.setPrimaryClip(ClipData.newPlainText("Chameleon", text));
+                mClipboard.setPrimaryClip(clip);
             } catch (RuntimeException e) {
                 Log.w(TAG, "clipboard: " + e);
             }

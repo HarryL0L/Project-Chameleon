@@ -263,6 +263,12 @@ Code: [`shim/core/output.c`](shim/core/output.c), [`presenter.cpp`](android/app/
   has it. The clip itself is only read when it changed, so Android doesn't
   keep showing "pasted from your clipboard". Desktop text reaches Android at
   any time.
+- Only text is shared; Android images and files stay on Android.
+- Passwords stay hidden both ways: a desktop password manager's copy
+  (marked with `x-kde-passwordManagerHint`, e.g. KeePassXC) is marked
+  sensitive on Android, which hides it in its "copied" preview, and text
+  Android apps mark sensitive gets that hint on the desktop, which keeps it
+  out of Klipper's history.
 
 Code: [`shim/core/clipboard.c`](shim/core/clipboard.c), [`ClipboardShare.java`](android/app/src/main/java/io/github/harryl0l/chameleon/ClipboardShare.java)
 </details>

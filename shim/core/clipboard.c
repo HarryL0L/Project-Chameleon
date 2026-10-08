@@ -13,7 +13,9 @@
  *    becomes the desktop's clipboard owner, and each paste's pipe goes to the
  *    app (CHAM_CLIPBOARD_REQUEST), which writes the text into it.
  * The shim's own offers carry a private type, so they don't go back to
- * Android. Primary selections (middle-click paste) are left alone.
+ * Android. Passwords carry KDE's password manager hint on the desktop and
+ * Android's "sensitive" flag on Android, either way, so neither side shows
+ * them or keeps them in its clipboard history. Primary selections (middle-click paste) are left alone.
  */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -72,6 +74,9 @@ static const char *const k_text_types[] = {"text/plain;charset=utf-8", "UTF8_STR
 #define N_TEXT_TYPES (sizeof k_text_types / sizeof k_text_types[0])
 /* Marks the shim's own offers. */
 static const char k_ours[] = "application/x-chameleon-android";
+/* Set by password managers (KeePassXC, KDE's) on passwords they copy, with
+ * the value "secret"; Klipper leaves those out of its history. */
+static const char k_secret[] = "x-kde-passwordManagerHint";
 
 /* ---- state (input thread only) ---- */
 
@@ -79,6 +84,7 @@ struct offer {
     struct wl_proxy *proxy;
     int text; /* 1 + index of the best text type offered, 0 for none */
     int ours;
+    int secret;
 };
 
 static struct wl_proxy *g_manager, *g_seat, *g_device, *g_source;
@@ -98,6 +104,8 @@ static void offer_type(void *data, struct wl_proxy *proxy, const char *mime)
     struct offer *o = data;
     if (strcmp(mime, k_ours) == 0)
         o->ours = 1;
+    else if (strcmp(mime, k_secret) == 0)
+        o->secret = 1;
     for (size_t i = 0; i < N_TEXT_TYPES; i++)
         if (strcmp(mime, k_text_types[i]) == 0 && (!o->text || (int)i + 1 < o->text))
             o->text = (int)i + 1;
@@ -136,7 +144,7 @@ static void device_selection(void *data, struct wl_proxy *device, struct wl_prox
     /* libwayland sends a duplicate of p[1]. */
     wl.marshal_flags(o->proxy, 0 /* receive */, NULL, 1, 0, k_text_types[o->text - 1], p[1]);
     close(p[1]);
-    link_clipboard(CHAM_CLIPBOARD_DATA, p[0]);
+    link_clipboard(CHAM_CLIPBOARD_DATA, o->secret, p[0]);
     close(p[0]);
 }
 
@@ -168,8 +176,10 @@ static void (*k_device_listener[])(void) = {
 static void source_send(void *data, struct wl_proxy *source, const char *mime, int32_t fd)
 {
     (void)data;
-    if (source == g_source && strcmp(mime, k_ours) != 0)
-        link_clipboard(CHAM_CLIPBOARD_REQUEST, fd);
+    if (strcmp(mime, k_secret) == 0)
+        write(fd, "secret", 6); /* fits the pipe's buffer: doesn't block */
+    else if (source == g_source && strcmp(mime, k_ours) != 0)
+        link_clipboard(CHAM_CLIPBOARD_REQUEST, 0, fd);
     close(fd);
 }
 
@@ -186,7 +196,7 @@ static void (*k_source_listener[])(void) = {
     (void (*)(void))source_cancelled,
 };
 
-void clipboard_offer(void)
+void clipboard_offer(int secret)
 {
     if (!g_device)
         return;
@@ -198,6 +208,8 @@ void clipboard_offer(void)
     for (size_t i = 0; i < N_TEXT_TYPES; i++)
         wl.marshal_flags(g_source, 0 /* offer */, NULL, 1, 0, k_text_types[i]);
     wl.marshal_flags(g_source, 0 /* offer */, NULL, 1, 0, k_ours);
+    if (secret)
+        wl.marshal_flags(g_source, 0 /* offer */, NULL, 1, 0, k_secret);
     wl.marshal_flags(g_device, 0 /* set_selection */, NULL, 1, 0, g_source);
 }
 

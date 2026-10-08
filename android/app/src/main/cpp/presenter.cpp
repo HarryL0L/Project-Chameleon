@@ -38,7 +38,6 @@
 #include <deque>
 #include <mutex>
 #include <string>
-#include <utility>
 
 #include "cham_io.h"
 #include "chameleon_proto.h"
@@ -616,16 +615,21 @@ void remove_buffer_locked(uint32_t id)
 // ClipboardShare's thread (nativeClipboardWait).
 std::mutex g_clip_lock;
 std::condition_variable g_clip_cond;
-std::deque<std::pair<uint32_t, int>> g_clip;
+struct Clip {
+    uint32_t type;
+    bool secret;  // CHAM_CLIPBOARD_DATA's a
+    int fd;
+};
+std::deque<Clip> g_clip;
 
-void queue_clipboard(uint32_t type, int fd)
+void queue_clipboard(uint32_t type, bool secret, int fd)
 {
     std::lock_guard<std::mutex> lock(g_clip_lock);
     if (g_clip.size() >= 16) {  // nobody is taking them
         close(fd);
         return;
     }
-    g_clip.emplace_back(type, fd);
+    g_clip.push_back({type, secret, fd});
     g_clip_cond.notify_one();
 }
 
@@ -720,7 +724,7 @@ void serve(int client, int arrivals)
         case CHAM_CLIPBOARD_DATA:
         case CHAM_CLIPBOARD_REQUEST:
             if (fd >= 0)
-                queue_clipboard(msg.type, fd);
+                queue_clipboard(msg.type, msg.a != 0, fd);
             fd = -1;
             break;
         case CHAM_SCREEN: {
@@ -923,24 +927,25 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSetFrameRateVote(JNIEn
 }
 
 // Blocks until the producer sends a clipboard pipe: returns
-// CHAM_CLIPBOARD_DATA/REQUEST << 32 | fd, the fd now the caller's.
+// secret << 40 | CHAM_CLIPBOARD_DATA/REQUEST << 32 | fd, the fd now the
+// caller's.
 JNIEXPORT jlong JNICALL
 Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardWait(JNIEnv *, jclass)
 {
     std::unique_lock<std::mutex> lock(g_clip_lock);
     g_clip_cond.wait(lock, [] { return !g_clip.empty(); });
-    auto [type, fd] = g_clip.front();
+    Clip clip = g_clip.front();
     g_clip.pop_front();
-    return (jlong)((uint64_t)type << 32 | (uint32_t)fd);
+    return (jlong)((uint64_t)clip.secret << 40 | (uint64_t)clip.type << 32 | (uint32_t)clip.fd);
 }
 
-// Android's clipboard has new text (CHAM_CLIPBOARD_OFFER); dropped when no
-// producer is connected.
+// Android's clipboard has new text (CHAM_CLIPBOARD_OFFER), sensitive when
+// secret; dropped when no producer is connected.
 JNIEXPORT void JNICALL
-Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardOffer(JNIEnv *, jclass)
+Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardOffer(JNIEnv *, jclass, jboolean secret)
 {
     std::lock_guard<std::mutex> lock(g_lock);
-    send_locked(CHAM_CLIPBOARD_OFFER, 0, 0, 0);
+    send_locked(CHAM_CLIPBOARD_OFFER, 0, secret ? 1 : 0, 0);
 }
 
 // Touch, pointer and key events for the producer (CHAM_INPUT); dropped when

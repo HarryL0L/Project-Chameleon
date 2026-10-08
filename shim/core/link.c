@@ -350,10 +350,10 @@ void link_start(void)
     pthread_once(&g_once, start_threads);
 }
 
-void link_clipboard(uint32_t type, int fd)
+void link_clipboard(uint32_t type, uint64_t a, int fd)
 {
     pthread_mutex_lock(&g_lock);
-    send_msg_locked(type, 0, 0, 0, fd);
+    send_msg_locked(type, 0, a, 0, fd);
     pthread_mutex_unlock(&g_lock);
 }
 

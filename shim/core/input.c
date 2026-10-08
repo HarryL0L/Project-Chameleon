@@ -454,7 +454,7 @@ static void *input_main(void *arg)
             if (batch[i].type == CHAM_INPUT)
                 forward(&batch[i]);
             else if (batch[i].type == CHAM_CLIPBOARD_OFFER)
-                clipboard_offer();
+                clipboard_offer(batch[i].a != 0);
         }
         output_tick();
         wl.flush(g_display);
