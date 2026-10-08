@@ -9,7 +9,8 @@
  * process connects to KWin's Wayland socket as an ordinary client, binds
  * fake input plus xdg_output (for the screen's logical geometry), and turns
  * the app's CHAM_INPUT messages into fake-input requests. The same
- * connection carries output.c's screen-size changes (CHAM_CONFIG).
+ * connection carries output.c's screen-size changes (CHAM_CONFIG) and
+ * clipboard.c's clipboard sharing.
  *
  * The socket path is taken from KWin's own bind() (interpose.c), or from
  * $CHAMELEON_WAYLAND_SOCKET when kwin_wayland_wrapper made the socket, and
@@ -176,6 +177,7 @@ static int load_wayland(void)
     W(proxy_destroy, "wl_proxy_destroy");
     W(registry_iface, "wl_registry_interface");
     W(output_iface, "wl_output_interface");
+    W(seat_iface, "wl_seat_interface");
 #undef W
     if (!wl.connect_to_fd || !wl.marshal_flags || !wl.add_listener || !wl.registry_iface || !wl.output_iface ||
         !wl.prepare_read || !wl.get_version || !wl.get_user_data || !wl.proxy_destroy) {
@@ -202,6 +204,7 @@ static void registry_global(void *data, struct wl_proxy *registry, uint32_t name
         g_xdg_manager = wl_bind(g_registry, name, &k_xdg_output_manager_iface, 1);
     } else {
         output_global(g_registry, name, iface, version);
+        clipboard_global(g_registry, name, iface, version);
     }
 }
 
@@ -255,6 +258,7 @@ static void (*k_xdg_output_listener[])(void) = {
 static void disconnect_wayland(void)
 {
     output_disconnected();
+    clipboard_disconnected();
     if (g_display)
         wl.disconnect(g_display);
     g_display = NULL;
@@ -302,6 +306,7 @@ static int connect_wayland(void)
     wl.roundtrip(g_display);
     cham_log("input: connected to KWin (fake input v%u)", g_fake_input_version);
     output_connected(g_display);
+    clipboard_connected();
     return 1;
 }
 
@@ -445,9 +450,12 @@ static void *input_main(void *arg)
         if (!g_display)
             continue;
         warned = 0;
-        for (size_t i = 0; have_input && i < (size_t)got / sizeof batch[0]; i++)
+        for (size_t i = 0; have_input && i < (size_t)got / sizeof batch[0]; i++) {
             if (batch[i].type == CHAM_INPUT)
                 forward(&batch[i]);
+            else if (batch[i].type == CHAM_CLIPBOARD_OFFER)
+                clipboard_offer(batch[i].a != 0);
+        }
         output_tick();
         wl.flush(g_display);
     }
@@ -467,7 +475,8 @@ static void start(void)
         pthread_detach(t);
 }
 
-/* CHAM_INPUT and CHAM_CONFIG messages, from the presenter link's thread. */
+/* CHAM_INPUT, CHAM_CONFIG and CHAM_CLIPBOARD_OFFER messages, from the
+ * presenter link's thread. */
 void input_post(const struct cham_msg *m)
 {
     pthread_once(&g_once, start);
