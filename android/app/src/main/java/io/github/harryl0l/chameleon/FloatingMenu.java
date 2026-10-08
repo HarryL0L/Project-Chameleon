@@ -142,8 +142,15 @@ final class FloatingMenu extends LinearLayout {
     /** Puts the menu at its edge and height, inside the free area. */
     private void place() {
         ViewGroup parent = (ViewGroup) getParent();
-        if (parent == null || mDragging || getWidth() == 0)
+        if (parent == null || mDragging)
             return;
+        if (getWidth() == 0) {
+            // Squeezed to nothing by a margin from a wider window (rotated
+            // to portrait on the right edge): back to the corner to be
+            // measured again, then placed by the next layout.
+            moveTo(0, 0);
+            return;
+        }
         int x = mRight ? parent.getWidth() - mMargin - getWidth() : mMargin;
         int y = mMargin + Math.round(Math.max(0, freeHeight()) * mY);
         y = Math.max(0, Math.min(y, parent.getHeight() - getHeight()));
