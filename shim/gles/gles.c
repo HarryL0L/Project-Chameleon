@@ -28,22 +28,23 @@
  *    an untagged bounce buffer first (CHAMELEON_GL_BOUNCE=0 disables it),
  *    and uploads run with the framebuffer unbound, restored right after
  *    (CHAMELEON_GL_UPLOAD_UNBIND=0 disables it).
- *  - glBindTexture/glDeleteTextures: textures standing in for another
- *    driver's buffer are refreshed from it when bound (see "buffers of other
- *    drivers" below).
+ *  - glBindTexture/glDeleteTextures/glFlush/glFinish: textures standing in
+ *    for another driver's buffer are refreshed from it when bound, once
+ *    between flushes (see "buffers of other drivers" below).
+ *    CHAMELEON_FOREIGN_UNLOCK=0 keeps their AHardwareBuffer locked instead of
+ *    unlocking it after each copy: faster, but some drivers only show what
+ *    was written once it is unlocked.
  */
 #define _GNU_SOURCE
 #include <GLES3/gl32.h>
 #include <dlfcn.h>
 #include <drm_fourcc.h>
 #include <errno.h>
-#include <fcntl.h>
-#include <linux/dma-buf.h>
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -68,8 +69,14 @@ static void (GL_APIENTRY *p_glBindTexture)(GLenum, GLuint);
 static void (GL_APIENTRY *p_glDeleteTextures)(GLsizei, const GLuint *);
 static void (GL_APIENTRY *p_glPixelStorei)(GLenum, GLint);
 static void (GL_APIENTRY *p_glBindBuffer)(GLenum, GLuint);
+static void (GL_APIENTRY *p_glFlush)(void);
+static void (GL_APIENTRY *p_glFinish)(void);
+static GLsync (GL_APIENTRY *p_glFenceSync)(GLenum, GLbitfield);
+static GLenum (GL_APIENTRY *p_glClientWaitSync)(GLsync, GLbitfield, GLuint64);
+static void (GL_APIENTRY *p_glDeleteSync)(GLsync);
 static int g_bounce = 1;
 static int g_unbind = 1;
+static int g_foreign_unlock = 1;
 
 __attribute__((constructor)) static void load(void)
 {
@@ -98,8 +105,15 @@ __attribute__((constructor)) static void load(void)
     *(void **)&p_glDeleteTextures = dlsym(lib, "glDeleteTextures");
     *(void **)&p_glPixelStorei = dlsym(lib, "glPixelStorei");
     *(void **)&p_glBindBuffer = dlsym(lib, "glBindBuffer");
+    *(void **)&p_glFlush = dlsym(lib, "glFlush");
+    *(void **)&p_glFinish = dlsym(lib, "glFinish");
+    *(void **)&p_glFenceSync = dlsym(lib, "glFenceSync");
+    *(void **)&p_glClientWaitSync = dlsym(lib, "glClientWaitSync");
+    *(void **)&p_glDeleteSync = dlsym(lib, "glDeleteSync");
     const char *unbind = getenv("CHAMELEON_GL_UPLOAD_UNBIND");
     g_unbind = !(unbind && *unbind == '0');
+    const char *unlock = getenv("CHAMELEON_FOREIGN_UNLOCK");
+    g_foreign_unlock = !(unlock && *unlock == '0');
 }
 
 /* ---- hidden extensions ---- */
@@ -485,23 +499,58 @@ GL_APICALL void GL_APIENTRY glShaderSource(GLuint shader, GLsizei count, const G
  * gbm_bo_import (Xwayland's DRI3 clients: panfrost, panvk, ... rendering on
  * their own) gives another driver's linear dmabuf an AHardwareBuffer of its
  * own (cham_bo.src_fd). Android's driver can't read that dmabuf, so a
- * texture made from the stand-in gets the client's pixels whenever it is
- * bound, which is when glamor copies a presented frame into the window. */
+ * texture made from the stand-in gets the client's pixels when it is bound,
+ * which is when glamor copies a presented frame into the window: copied
+ * straight into the AHardwareBuffer (same format and layout, linear), as
+ * Android's glTexSubImage2D is slow at it (rearranges the pixels on the
+ * CPU), else with glTexSubImage2D. The dmabuf is read without its cache
+ * sync calls, as Termux:X11 has long read these buffers. Once between
+ * flushes is enough: glamor may bind it several times for one copy, and a
+ * client can only present a new frame in it after glamor flushed (Present
+ * flushes right after each copy). */
 
 struct foreign {
     void *image;    /* NULL once destroyed */
     GLuint texture; /* 0 until the image is bound to one, or once deleted */
-    int fd;
     void *map;
     size_t size, offset;
     GLsizei width, height;
     GLint row_length; /* pixels */
     GLenum format;
+    AHardwareBuffer *ahb; /* the stand-in, held; NULL: glTexSubImage2D instead */
+    size_t ahb_stride;    /* bytes */
+    void *locked;         /* its pixels while kept locked (CHAMELEON_FOREIGN_UNLOCK=0) */
+    GLsync drawn;         /* the GPU's done with what was drawn from it before */
+    int fresh; /* copied in since the last flush */
     struct foreign *next;
 };
 
 static pthread_mutex_t g_foreign_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct foreign *g_foreign;
+
+static struct {
+    void (*acquire)(AHardwareBuffer *);
+    void (*release)(AHardwareBuffer *);
+    int (*lock)(AHardwareBuffer *, uint64_t usage, int32_t fence, const void *rect, void **out);
+    int (*unlock)(AHardwareBuffer *, int32_t *fence);
+} g_ahb;
+
+static int ahb_load(void)
+{
+    static int loaded = -1;
+    if (loaded >= 0)
+        return loaded;
+    void *lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so" : "/system/lib/libnativewindow.so",
+                       RTLD_NOW | RTLD_LOCAL);
+    if (lib) {
+        *(void **)&g_ahb.acquire = dlsym(lib, "AHardwareBuffer_acquire");
+        *(void **)&g_ahb.release = dlsym(lib, "AHardwareBuffer_release");
+        *(void **)&g_ahb.lock = dlsym(lib, "AHardwareBuffer_lock");
+        *(void **)&g_ahb.unlock = dlsym(lib, "AHardwareBuffer_unlock");
+    }
+    loaded = g_ahb.acquire && g_ahb.release && g_ahb.lock && g_ahb.unlock;
+    return loaded;
+}
 
 void cham_gl_foreign_image(void *image, const struct cham_bo *bo)
 {
@@ -516,19 +565,22 @@ void cham_gl_foreign_image(void *image, const struct cham_bo *bo)
     f->format = bo->format == DRM_FORMAT_ARGB8888 || bo->format == DRM_FORMAT_XRGB8888 ? 0x80E1 /* GL_BGRA_EXT */
                                                                                      : GL_RGBA;
     f->size = bo->src_offset + (size_t)bo->src_stride * bo->height;
-    f->fd = fcntl(bo->src_fd, F_DUPFD_CLOEXEC, 0);
-    f->map = f->fd >= 0 ? mmap(NULL, f->size, PROT_READ, MAP_SHARED, f->fd, 0) : MAP_FAILED;
+    f->map = mmap(NULL, f->size, PROT_READ, MAP_SHARED, bo->src_fd, 0);
     if (f->map == MAP_FAILED) {
         cham_log("cannot map a %dx%d buffer from another driver: %s", f->width, f->height, strerror(errno));
-        if (f->fd >= 0)
-            close(f->fd);
         free(f);
         return;
     }
+    if (bo->ahb && ahb_load()) {
+        g_ahb.acquire(bo->ahb);
+        f->ahb = bo->ahb;
+        f->ahb_stride = bo->stride;
+    }
     static int logged;
     if (!logged++)
-        cham_log("buffers from another driver: copied into textures as they are drawn (first: %dx%d)", f->width,
-                 f->height);
+        cham_log("buffers from another driver: copied into textures as they are drawn, %s%s (first: %dx%d)",
+                 f->ahb ? "into their AHardwareBuffer" : "with glTexSubImage2D",
+                 f->ahb && !g_foreign_unlock ? ", kept locked" : "", f->width, f->height);
     pthread_mutex_lock(&g_foreign_lock);
     f->next = g_foreign;
     g_foreign = f;
@@ -537,16 +589,74 @@ void cham_gl_foreign_image(void *image, const struct cham_bo *bo)
 
 static void foreign_free(struct foreign *f)
 {
+    if (f->drawn)
+        p_glDeleteSync(f->drawn);
+    if (f->locked)
+        g_ahb.unlock(f->ahb, NULL);
+    if (f->ahb)
+        g_ahb.release(f->ahb);
     munmap(f->map, f->size);
-    close(f->fd);
     free(f);
 }
 
-/* Into the texture bound to GL_TEXTURE_2D, under default unpack state. */
-static void foreign_upload(const struct foreign *f)
+static uint64_t now_ns(void)
 {
-    struct dma_buf_sync sync = {.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ};
-    ioctl(f->fd, DMA_BUF_IOCTL_SYNC, &sync);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* Copy times, logged every 5 s while copies happen. Under g_foreign_lock. */
+static struct {
+    uint64_t since, ns;
+    unsigned count;
+} g_copies;
+
+static void note_copy(uint64_t start)
+{
+    uint64_t end = now_ns();
+    if (!g_copies.since)
+        g_copies.since = start;
+    g_copies.ns += end - start;
+    g_copies.count++;
+    if (end - g_copies.since >= 5000000000ull) {
+        cham_log("buffers from another driver: %u copies in the last %.0f s, %.2f ms each", g_copies.count,
+                 (end - g_copies.since) / 1e9, g_copies.ns / 1e6 / g_copies.count);
+        memset(&g_copies, 0, sizeof g_copies);
+    }
+}
+
+/* Into the AHardwareBuffer, once the GPU is done with what was drawn from it
+ * before (the last copy into a window, fenced at the flush after it). 0 if
+ * it can't be locked. */
+static int upload_ahb(struct foreign *f)
+{
+    if (f->drawn) {
+        p_glClientWaitSync(f->drawn, GL_SYNC_FLUSH_COMMANDS_BIT, 1000000000ull);
+        p_glDeleteSync(f->drawn);
+        f->drawn = NULL;
+    }
+    void *dst = f->locked;
+    if (!dst && (g_ahb.lock(f->ahb, 0x30 /* AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN */, -1, NULL, &dst) != 0 || !dst))
+        return 0;
+    const char *src = (const char *)f->map + f->offset;
+    size_t src_stride = (size_t)f->row_length * 4, row = (size_t)f->width * 4;
+    if (src_stride == f->ahb_stride) {
+        memcpy(dst, src, src_stride * (size_t)(f->height - 1) + row);
+    } else {
+        for (GLsizei y = 0; y < f->height; y++)
+            memcpy((char *)dst + (size_t)y * f->ahb_stride, src + (size_t)y * src_stride, row);
+    }
+    if (g_foreign_unlock)
+        g_ahb.unlock(f->ahb, NULL);
+    else
+        f->locked = dst;
+    return 1;
+}
+
+/* Into the texture bound to GL_TEXTURE_2D, under default unpack state. */
+static void upload_gl(struct foreign *f)
+{
     GLint row_length = 0, alignment = 4, skip_pixels = 0, skip_rows = 0, pbo = 0;
     p_glGetIntegerv(GL_UNPACK_ROW_LENGTH, &row_length);
     p_glGetIntegerv(GL_UNPACK_ALIGNMENT, &alignment);
@@ -567,8 +677,46 @@ static void foreign_upload(const struct foreign *f)
     p_glPixelStorei(GL_UNPACK_ALIGNMENT, alignment);
     p_glPixelStorei(GL_UNPACK_SKIP_PIXELS, skip_pixels);
     p_glPixelStorei(GL_UNPACK_SKIP_ROWS, skip_rows);
-    sync.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ;
-    ioctl(f->fd, DMA_BUF_IOCTL_SYNC, &sync);
+}
+
+/* Nothing if already done since the last flush. */
+static void foreign_upload(struct foreign *f)
+{
+    if (f->fresh)
+        return;
+    f->fresh = 1;
+    uint64_t start = now_ns();
+    if (!f->ahb || !upload_ahb(f))
+        upload_gl(f);
+    note_copy(start);
+}
+
+/* Before a flush: a fence after what was drawn from the buffers copied in
+ * since the last one, for their next copy to wait on. */
+static void foreign_fence(void)
+{
+    if (!__atomic_load_n(&g_foreign, __ATOMIC_RELAXED) || !p_glFenceSync)
+        return;
+    pthread_mutex_lock(&g_foreign_lock);
+    for (struct foreign *f = g_foreign; f; f = f->next) {
+        if (f->fresh && f->ahb) {
+            if (f->drawn)
+                p_glDeleteSync(f->drawn);
+            f->drawn = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+        }
+    }
+    pthread_mutex_unlock(&g_foreign_lock);
+}
+
+/* After a flush, the clients may have drawn new frames. */
+static void foreign_stale(void)
+{
+    if (!__atomic_load_n(&g_foreign, __ATOMIC_RELAXED))
+        return;
+    pthread_mutex_lock(&g_foreign_lock);
+    for (struct foreign *f = g_foreign; f; f = f->next)
+        f->fresh = 0;
+    pthread_mutex_unlock(&g_foreign_lock);
 }
 
 void cham_gl_foreign_target(void *image)
@@ -640,6 +788,22 @@ GL_APICALL void GL_APIENTRY glDeleteTextures(GLsizei n, const GLuint *textures)
     p_glDeleteTextures(n, textures);
 }
 
+GL_APICALL void GL_APIENTRY glFlush(void)
+{
+    CHAM_NOTE_CALL("glFlush");
+    foreign_fence();
+    p_glFlush();
+    foreign_stale();
+}
+
+GL_APICALL void GL_APIENTRY glFinish(void)
+{
+    CHAM_NOTE_CALL("glFinish");
+    foreign_fence();
+    p_glFinish();
+    foreign_stale();
+}
+
 /* ---- entry points for glvnd ---- */
 
 #define OWN(name) {#name, (void *)name}
@@ -649,7 +813,7 @@ static const struct {
 } k_own[] = {
     OWN(glShaderSource), OWN(glGetString),  OWN(glGetStringi),    OWN(glGetIntegerv),
     OWN(glTexImage2D),   OWN(glTexSubImage2D), OWN(glTexImage3D), OWN(glTexSubImage3D),
-    OWN(glBindTexture),  OWN(glDeleteTextures),
+    OWN(glBindTexture),  OWN(glDeleteTextures), OWN(glFlush), OWN(glFinish),
 };
 
 /* Our function for a core GLES 3.2 entry point, NULL for anything else

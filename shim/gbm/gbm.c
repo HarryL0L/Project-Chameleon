@@ -151,7 +151,9 @@ struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type, void *buffer
         errno = ENOSYS;
         return NULL;
     }
-    struct gbm_bo *bo = create(gbm, width, height, format, GBM_BO_USE_RENDERING, DRM_FORMAT_MOD_INVALID);
+    /* Written by the CPU: the EGL vendor copies the pixels straight in. */
+    struct gbm_bo *bo = create(gbm, width, height, format, GBM_BO_USE_RENDERING | GBM_BO_USE_WRITE,
+                               DRM_FORMAT_MOD_INVALID);
     if (!bo)
         return NULL;
     bo->cb->src_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);

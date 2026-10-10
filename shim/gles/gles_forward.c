@@ -298,20 +298,6 @@ GL_APICALL void GL_APIENTRY glEnableVertexAttribArray(GLuint index)
     p_glEnableVertexAttribArray(index);
 }
 
-static void (GL_APIENTRY *p_glFinish)(void);
-GL_APICALL void GL_APIENTRY glFinish(void)
-{
-    CHAM_NOTE_CALL("glFinish");
-    p_glFinish();
-}
-
-static void (GL_APIENTRY *p_glFlush)(void);
-GL_APICALL void GL_APIENTRY glFlush(void)
-{
-    CHAM_NOTE_CALL("glFlush");
-    p_glFlush();
-}
-
 static void (GL_APIENTRY *p_glFramebufferRenderbuffer)(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer);
 GL_APICALL void GL_APIENTRY glFramebufferRenderbuffer(GLenum target, GLenum attachment, GLenum renderbuffertarget, GLuint renderbuffer)
 {
@@ -2483,8 +2469,6 @@ const struct cham_gl_entry cham_gl_entries[] = {
     {"glDrawElements", (void **)&p_glDrawElements, (void *)glDrawElements},
     {"glEnable", (void **)&p_glEnable, (void *)glEnable},
     {"glEnableVertexAttribArray", (void **)&p_glEnableVertexAttribArray, (void *)glEnableVertexAttribArray},
-    {"glFinish", (void **)&p_glFinish, (void *)glFinish},
-    {"glFlush", (void **)&p_glFlush, (void *)glFlush},
     {"glFramebufferRenderbuffer", (void **)&p_glFramebufferRenderbuffer, (void *)glFramebufferRenderbuffer},
     {"glFramebufferTexture2D", (void **)&p_glFramebufferTexture2D, (void *)glFramebufferTexture2D},
     {"glFrontFace", (void **)&p_glFrontFace, (void *)glFrontFace},

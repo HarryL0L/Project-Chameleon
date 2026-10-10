@@ -81,8 +81,9 @@ screen keeps its first size instead of following the app's window).
   off). X11 GL and Vulkan apps are refused the device, so their Mesa picks
   its own driver (e.g. panfrost/panvk on kbase, with
   `MESA_LOADER_DRIVER_OVERRIDE`), and the linear dmabufs they present are
-  copied into a texture of an AHardwareBuffer each time glamor draws them
-  (`gbm_bo_import`, `gles/gles.c`).
+  copied straight into an AHardwareBuffer each time glamor draws them
+  (`gbm_bo_import`, `gles/gles.c`). `CHAMELEON_FOREIGN_UNLOCK=0` keeps that
+  buffer locked between copies, which is faster where the driver allows it.
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.
