@@ -4,7 +4,7 @@
 # AHardwareBuffer) and runs kms_test.c against the fake device with the
 # system's real libdrm, and the input and output paths against a real Wayland
 # server.
-# Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev.
+# Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev, libudev-dev, libinput-dev.
 set -e
 cd "$(dirname "$0")/../.."
 if [ -z "$OUT" ]; then
@@ -21,6 +21,10 @@ cc $CFLAGS -Ishim/include -o "$OUT/kms_test" shim/test/kms_test.c "$OUT/libgbm.s
     -Wl,-rpath,"$OUT"
 CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" CHAMELEON_WAIT=5 \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
+# udev monitors are Chameleon's; libinput's udev backend starts on them.
+cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/udev.c -Wl,-soname,libchameleon_udev.so
+cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)
+LD_PRELOAD="$OUT/libchameleon_udev.so" "$OUT/udev_test"
 cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles/glsl_fix.c
 "$OUT/glsl_fix_test"
 cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config --cflags --libs wayland-server)

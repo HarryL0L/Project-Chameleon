@@ -10,6 +10,7 @@ mkdir -p "$OUT"
 CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -fno-emulated-tls \
     -Ishim/include -Ishim/include/libdrm"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" shim/core/*.c -ldl -Wl,-soname,libchameleon.so
+"$CC" $CFLAGS -shared -o "$OUT/libchameleon_udev.so" shim/udev/udev.c -Wl,-soname,libchameleon_udev.so
 "$CC" $CFLAGS -shared -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon -Wl,-soname,libgbm.so
 # glvnd EGL vendor (EGL + GLES on Android's driver); not linked to
 # libchameleon.so, since it is loaded into every program glvnd routes to it.

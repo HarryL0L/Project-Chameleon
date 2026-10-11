@@ -83,6 +83,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - name: Install libdrm, libwayland, glvnd
-        run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev
       - name: Fake KMS device against the real libdrm
         run: shim/test/run-host-test.sh

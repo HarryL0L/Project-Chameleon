@@ -5,7 +5,7 @@
 #   packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
-#   lib/chameleon/          libchameleon.so, libEGL_chameleon.so, the launch
+#   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, the launch
 #                           scripts and bin/kwin_wayland - and the fake
 #                           libgbm.so, which must stay out of $PREFIX/lib where
 #                           it would replace Mesa's for every program
@@ -27,7 +27,7 @@ trap 'rm -rf "$ROOT"' EXIT
 LIB="$ROOT$PREFIX/lib/chameleon"
 mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT/DEBIAN"
 
-install -m 644 "$SHIM/libchameleon.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
+install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$LIB/"
 install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"

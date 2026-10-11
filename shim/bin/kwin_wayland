@@ -27,7 +27,7 @@ if [ -z "$REAL" ]; then
     exit 1
 fi
 
-for lib in libchameleon.so libgbm.so libEGL_chameleon.so; do
+for lib in libchameleon.so libchameleon_udev.so libgbm.so libEGL_chameleon.so; do
     if [ ! -f "$SHIM_DIR/$lib" ]; then
         echo "chameleon: $SHIM_DIR/$lib is missing" >&2
         exit 1
@@ -114,7 +114,9 @@ export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDORS"
 export CHAMELEON_ORIG_LD_PRELOAD=${LD_PRELOAD:-}
 export CHAMELEON_ORIG_LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-}
 export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"  # the fake libgbm.so
-export LD_PRELOAD="$SHIM_DIR/libchameleon.so${LD_PRELOAD:+:$LD_PRELOAD}"
+# libchameleon_udev.so: udev monitors that work without the kernel's uevent
+# socket (KWin's GpuManager and libinput need one to start).
+export LD_PRELOAD="$SHIM_DIR/libchameleon.so:$SHIM_DIR/libchameleon_udev.so${LD_PRELOAD:+:$LD_PRELOAD}"
 
 if [ -n "$need_drm" ]; then
     exec "$REAL" --drm "$@"

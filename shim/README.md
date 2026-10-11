@@ -62,6 +62,10 @@ screen keeps its first size instead of following the app's window).
 
 - Input: touch (direct or trackpad), mouse and keyboard from the app, injected
   through KWin's fake-input protocol (`core/input.c`).
+- udev: `libchameleon_udev.so` (`udev/udev.c`), preloaded into KWin, makes
+  every udev monitor Chameleon's own, since an Android app can't open the
+  kernel's uevent socket. KWin built with udev and libinput needs a working
+  monitor to start; no devices are announced through it yet.
 - KWin's screen follows the app's window (rotation, keyboard) and the
   display's refresh rate (battery saver): the shim
   switches KWin's mode over `kde_output_management_v2`, adding a custom mode
@@ -82,7 +86,7 @@ screen keeps its first size instead of following the app's window).
 ## Test on a desktop
 
 `shim/test/run-host-test.sh` (needs `libdrm-dev libwayland-dev libegl-dev
-libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
+libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
 
 - the fake device driven by the real libdrm the way KWin does: enumeration,
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
@@ -90,6 +94,8 @@ libgles-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
 - the input path against a real libwayland-server fake-input global;
 - the screen following the app's window and refresh rate, against a
   stand-in for KWin's output management (`output_test`);
+- udev monitors and libinput's udev backend starting on them, with the
+  system's real libudev and libinput (`udev_test`);
 - the GLSL fix-ups (`glsl_fix_test`);
 - the EGL vendor through the system's real glvnd, with a stand-in for
   Android's driver, both as any program and as KWin;
