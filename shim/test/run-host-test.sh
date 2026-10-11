@@ -22,7 +22,7 @@ cc $CFLAGS -Ishim/include -o "$OUT/kms_test" shim/test/kms_test.c "$OUT/libgbm.s
 CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" CHAMELEON_WAIT=5 \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
-cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/udev.c -Wl,-soname,libchameleon_udev.so
+cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)
 LD_PRELOAD="$OUT/libchameleon_udev.so" "$OUT/udev_test"
 cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles/glsl_fix.c
@@ -31,6 +31,11 @@ cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config
 mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
 CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/input_test"
+# ...or, once something reads it, to the evdev touchscreen, through real libinput.
+cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c $(pkg-config --cflags --libs libinput libudev)
+mkdir -p "$OUT/runtime-ev" && chmod 700 "$OUT/runtime-ev"
+CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
+    LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
 # KWin's screen follows the app's window (output management).
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/output_test" shim/test/output_test.c \
     $(pkg-config --cflags --libs wayland-server)

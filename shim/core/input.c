@@ -436,6 +436,8 @@ static void *input_main(void *arg)
         for (size_t i = 0; got > 0 && i < (size_t)got / sizeof batch[0]; i++) {
             if (batch[i].type == CHAM_CONFIG)
                 output_config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
+            else if (batch[i].type == CHAM_INPUT && evdev_touch(&batch[i]))
+                batch[i].type = 0; /* went to the evdev touchscreen's readers (evdev.c) */
             else
                 have_input = 1;
         }

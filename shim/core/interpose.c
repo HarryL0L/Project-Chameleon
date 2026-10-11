@@ -353,6 +353,7 @@ char *drmGetDeviceNameFromFd2(int fd)
  * KWin starts must get Termux's normal Mesa, not this shim. */
 __attribute__((constructor)) static void restore_environment(void)
 {
+    evdev_start(); /* before KWin's libinput looks for devices */
     const char *saved = getenv("CHAMELEON_ORIG_LD_PRELOAD");
     if (saved) {
         if (*saved)

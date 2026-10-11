@@ -56,6 +56,11 @@ void input_note_socket(const char *path);
 /* KWin's Wayland socket path, once known (env or bind()); "" if not yet. */
 void input_socket_path(char *out, size_t size);
 
+/* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
+void evdev_start(void);
+/* Takes a touch message (input thread) if the touchscreen has a reader. */
+int evdev_touch(const struct cham_msg *m);
+
 /* ---- output.c: KWin's screen follows the app's window (input thread) ---- */
 struct wl_proxy;
 struct wl_display;

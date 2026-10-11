@@ -61,11 +61,17 @@ screen keeps its first size instead of following the app's window).
 ## Status / limits
 
 - Input: touch (direct or trackpad), mouse and keyboard from the app, injected
-  through KWin's fake-input protocol (`core/input.c`).
-- udev: `libchameleon_udev.so` (`udev/udev.c`), preloaded into KWin, makes
-  every udev monitor Chameleon's own, since an Android app can't open the
-  kernel's uevent socket. KWin built with udev and libinput needs a working
-  monitor to start; no devices are announced through it yet.
+  through KWin's fake-input protocol (`core/input.c`). Direct touch also
+  appears as an evdev touchscreen (`core/evdev.c`, served on
+  `$XDG_RUNTIME_DIR/chameleon-evdev`); while a program such as KWin's
+  libinput reads it, touches go there instead of to fake input.
+- udev: `libchameleon_udev.so`, preloaded into KWin, is the device manager:
+  every udev monitor is Chameleon's own, since an Android app can't open the
+  kernel's uevent socket (`udev/udev.c`), enumerations list Chameleon's input
+  devices, and their `/dev/input/eventN` nodes open, stat and answer evdev
+  ioctls like the kernel's (`udev/evdev.c`). Preloaded into any other
+  program with the same `XDG_RUNTIME_DIR` (`libinput debug-events`), it
+  shows the same devices while KWin runs.
 - KWin's screen follows the app's window (rotation, keyboard) and the
   display's refresh rate (battery saver): the shim
   switches KWin's mode over `kde_output_management_v2`, adding a custom mode
@@ -92,6 +98,8 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one;
 - the input path against a real libwayland-server fake-input global;
+- the evdev touchscreen seen by the system's real libinput through
+  `libchameleon_udev.so`: listing, nodes, multitouch (`evdev_test`);
 - the screen following the app's window and refresh rate, against a
   stand-in for KWin's output management (`output_test`);
 - udev monitors and libinput's udev backend starting on them, with the
