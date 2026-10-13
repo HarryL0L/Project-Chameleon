@@ -10,9 +10,7 @@
     <string name="mode_direct">Direct</string>
     <string name="mode_direct_hint">Taps and drags go where your finger is.</string>
     <string name="mode_trackpad">Trackpad</string>
-    <string name="mode_trackpad_hint">Drag moves the pointer; tap clicks. Two-finger tap: right click, three-finger tap: middle click, two-finger drag: scroll. Long-press, or tap then drag, holds the button.</string>
-    <string name="pointer_speed">Pointer speed: %1$.2f×</string>
-    <string name="tap_to_click">Tap to click</string>
+    <string name="mode_trackpad_hint">The screen works as a laptop touchpad: tap to click, two-finger tap for right click, three-finger tap for middle click, two-finger drag to scroll, double-tap and drag to hold the button. Speed and tapping follow the desktop\'s touchpad settings.</string>
     <string name="keys">Keys</string>
     <string name="back_button">Back button</string>
     <string name="back_escape">Esc</string>

@@ -88,8 +88,9 @@ struct fake_fd {
     struct fake_fd *next;
 };
 void kms_init_once(void);
-/* The screen's physical size, as the connector reports it. */
-void kms_physical_size(uint32_t *mm_width, uint32_t *mm_height);
+/* The app's screen when KWin started, in pixels and as the connector reports
+ * its physical size. */
+void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
 /* Size of the mode KWin has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The buffer on KWin's screen, or NULL if the screen shows none. */

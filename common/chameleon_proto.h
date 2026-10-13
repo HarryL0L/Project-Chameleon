@@ -75,6 +75,11 @@ enum cham_input_kind {
                                       notch, as evdev's REL_*WHEEL_HI_RES: + is up / right */
     CHAM_INPUT_MOUSE_MOTION = 14,  /* b = CHAM_INPUT_DELTA(dx, dy) in the captured mouse's own
                                       counts (not fractions of the surface) */
+    CHAM_INPUT_PAD_DOWN = 15,      /* trackpad mode, as TOUCH_DOWN .. TOUCH_FRAME: the surface is */
+    CHAM_INPUT_PAD_MOTION = 16,    /* a touchpad (the shim's evdev touchpad, no fake-input */
+    CHAM_INPUT_PAD_UP = 17,        /* fallback) */
+    CHAM_INPUT_PAD_CANCEL = 18,
+    CHAM_INPUT_PAD_FRAME = 19,
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)

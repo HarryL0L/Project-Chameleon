@@ -41,7 +41,6 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -80,14 +79,11 @@ public class PresenterActivity extends Activity
 
     private static final String PREFS = "chameleon";
     private static final String PREF_MODE = "input_mode";
-    private static final String PREF_SPEED = "pointer_speed";
-    private static final String PREF_TAP = "tap_to_click";
     private static final String PREF_BACK = "back_key";
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
     private static final String PREF_EXTRA_KEYS = "extra_keys";
     private static final String PREF_CLIPBOARD = "clipboard_sharing";
-    private static final float DEFAULT_SPEED = 1.5f;
 
     private static boolean sStarted;
     private int mWidth, mHeight;
@@ -146,7 +142,7 @@ public class PresenterActivity extends Activity
         requestHighestRefreshRate();
 
         mPrefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        mTouch = new TouchInput(getResources().getDisplayMetrics().density);
+        mTouch = new TouchInput();
         mClipboard = ClipboardShare.get(this);
         applyInputPrefs();
         applyOrientation();
@@ -403,8 +399,7 @@ public class PresenterActivity extends Activity
     // ---- settings ----
 
     private void applyInputPrefs() {
-        mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT,
-                mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED), mPrefs.getBoolean(PREF_TAP, true));
+        mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT);
         mClipboard.setEnabled(mPrefs.getBoolean(PREF_CLIPBOARD, true));
     }
 
@@ -414,15 +409,6 @@ public class PresenterActivity extends Activity
 
     private boolean backLeavesApp() {
         return "leave".equals(mPrefs.getString(PREF_BACK, "escape"));
-    }
-
-    // Pointer speed 0.25x..3x on a SeekBar of 0..275.
-    private static int speedToProgress(float speed) {
-        return Math.round(speed * 100) - 25;
-    }
-
-    private static float progressToSpeed(int progress) {
-        return (progress + 25) / 100f;
     }
 
     /** A rounded card with a heading, added to box; the section's rows go into it. */
@@ -593,47 +579,14 @@ public class PresenterActivity extends Activity
 
         LinearLayout touch = settingsCard(box, R.string.touch_input);
         TextView modeHint = settingsHint(isTrackpad() ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
-        LinearLayout trackpadOptions = new LinearLayout(this);
-        trackpadOptions.setOrientation(LinearLayout.VERTICAL);
-        trackpadOptions.setVisibility(isTrackpad() ? View.VISIBLE : View.GONE);
         touch.addView(settingsRow(R.string.input_mode, settingsChoice(
                 new int[] {R.string.mode_direct, R.string.mode_trackpad}, new String[] {"direct", "trackpad"},
                 isTrackpad() ? "trackpad" : "direct", value -> {
                     mPrefs.edit().putString(PREF_MODE, value).apply();
                     applySettings();
-                    boolean t = isTrackpad();
-                    modeHint.setText(t ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
-                    trackpadOptions.setVisibility(t ? View.VISIBLE : View.GONE);
+                    modeHint.setText(isTrackpad() ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
                 })));
         touch.addView(modeHint);
-
-        TextView speedLabel = new TextView(this);
-        speedLabel.setTextSize(16);
-        float current = mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED);
-        speedLabel.setText(getString(R.string.pointer_speed, current));
-        SeekBar speed = new SeekBar(this);
-        speed.setMax(speedToProgress(3f));
-        speed.setProgress(speedToProgress(current));
-        speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                speedLabel.setText(getString(R.string.pointer_speed, progressToSpeed(progress)));
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-                mPrefs.edit().putFloat(PREF_SPEED, progressToSpeed(s.getProgress())).apply();
-                applySettings();
-            }
-        });
-        trackpadOptions.addView(speedLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        trackpadOptions.addView(speed);
-        trackpadOptions.addView(settingsRow(R.string.tap_to_click, settingsSwitch(PREF_TAP)));
-        touch.addView(trackpadOptions);
         touch.addView(settingsHint(R.string.mouse_hint));
 
         LinearLayout keys = settingsCard(box, R.string.keys);

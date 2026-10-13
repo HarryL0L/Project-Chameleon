@@ -7,12 +7,14 @@
  *  1 keyboard: hardware keyboards, by their Linux key codes;
  *  2 mouse: a relative mouse, fed from the mouse the app captures
  *    (Android's pointer capture: the mouse's own counts and buttons), with
- *    high-resolution wheels.
+ *    high-resolution wheels;
+ *  3 touchpad: the app's trackpad mode, the screen as a laptop's touchpad
+ *    without buttons (so libinput taps to click), in screen pixels.
  * Touch positions are fractions of the screen, so those axes run 0..65535
  * and the compositor maps them onto its output. While a program reads a
  * device, its input goes there; otherwise input.c sends it through KWin's
  * fake input as before (and so does everything else: trackpad mode, the soft
- * keyboard, a mouse the app hasn't captured).
+ * keyboard, a mouse the app hasn't captured; the touchpad has no fallback).
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -32,7 +34,7 @@
 #include "../../common/chameleon_proto.h"
 #include "internal.h"
 
-enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_COUNT };
+enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_COUNT };
 
 #define TOUCH_SLOTS 10
 #define MAX_READERS 8
@@ -56,10 +58,14 @@ static struct device {
 static pthread_mutex_t g_evdev_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* Device state, on the input thread only. */
-static int g_slot_id[TOUCH_SLOTS]; /* the app's touch id per slot, -1 = free */
-static int32_t g_slot_x[TOUCH_SLOTS], g_slot_y[TOUCH_SLOTS], g_cur_slot = -1, g_abs_x = -1, g_abs_y = -1;
-static int g_tracking_id;
-static int g_touching;
+static struct mt {         /* a multitouch device (protocol B) */
+    int slot_id[TOUCH_SLOTS]; /* the app's touch id per slot, -1 = free */
+    int32_t x[TOUCH_SLOTS], y[TOUCH_SLOTS], cur_slot, abs_x, abs_y; /* as last sent */
+    int tracking_id;
+    int touching;
+    int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
+} g_touch, g_pad;
+static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
 static uint8_t g_keys_down[CHAM_BITS(KEY_CNT)]; /* keys and buttons pressed on the devices */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
 
@@ -111,19 +117,52 @@ static void describe(void)
     cham_bit_set(d->rel, REL_HWHEEL);
     cham_bit_set(d->rel, REL_WHEEL_HI_RES);
     cham_bit_set(d->rel, REL_HWHEEL_HI_RES);
+
+    /* A clickpad would have BTN_LEFT; without it, libinput taps to click. */
+    d = &g_dev[DEV_TOUCHPAD].info;
+    snprintf(d->name, sizeof d->name, "Chameleon touchpad");
+    snprintf(d->udev_type, sizeof d->udev_type, "ID_INPUT_TOUCHPAD");
+    d->id.bustype = BUS_VIRTUAL;
+    cham_bit_set(d->prop, INPUT_PROP_POINTER);
+    cham_bit_set(d->ev, EV_SYN);
+    cham_bit_set(d->ev, EV_KEY);
+    cham_bit_set(d->ev, EV_ABS);
+    const unsigned pad_keys[] = {BTN_TOUCH, BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP,
+                                 BTN_TOOL_QUADTAP, BTN_TOOL_QUINTTAP};
+    for (size_t i = 0; i < sizeof pad_keys / sizeof pad_keys[0]; i++)
+        cham_bit_set(d->key, pad_keys[i]);
+    set_axis(d, ABS_X, AXIS_MAX);
+    set_axis(d, ABS_Y, AXIS_MAX);
+    set_axis(d, ABS_MT_SLOT, TOUCH_SLOTS - 1);
+    set_axis(d, ABS_MT_POSITION_X, AXIS_MAX);
+    set_axis(d, ABS_MT_POSITION_Y, AXIS_MAX);
+    set_axis(d, ABS_MT_TRACKING_ID, 65535);
 }
 
-/* Units per mm from the size the connector reports (the touch axes span
- * the screen), so programs that measure in mm get sensible numbers. */
+/* Units per mm from the size the connector reports, so programs that
+ * measure in mm get sensible numbers. The touchscreen's axes span the
+ * screen. The touchpad's are pixels, the same per mm both ways whichever
+ * way the phone is turned (libinput's touchpad gestures are measured in mm),
+ * and as long as the screen's longer side either way. */
 static void set_resolution(void)
 {
-    uint32_t mm_w, mm_h;
-    kms_physical_size(&mm_w, &mm_h);
-    if (!mm_w || !mm_h)
+    uint32_t w, h, mm_w, mm_h;
+    kms_screen_size(&w, &h, &mm_w, &mm_h);
+    if (!w || !h || !mm_w || !mm_h)
         return;
     struct cham_evdev_info *t = &g_dev[DEV_TOUCH].info;
     t->absinfo[ABS_X].resolution = t->absinfo[ABS_MT_POSITION_X].resolution = AXIS_MAX / (int32_t)mm_w;
     t->absinfo[ABS_Y].resolution = t->absinfo[ABS_MT_POSITION_Y].resolution = AXIS_MAX / (int32_t)mm_h;
+    struct cham_evdev_info *p = &g_dev[DEV_TOUCHPAD].info;
+    int32_t size = (int32_t)(w > h ? w : h), res = size / (int32_t)(w > h ? mm_w : mm_h);
+    const unsigned axes[] = {ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y};
+    for (size_t i = 0; i < sizeof axes / sizeof axes[0]; i++) {
+        p->absinfo[axes[i]].maximum = size - 1;
+        p->absinfo[axes[i]].resolution = res > 0 ? res : 1;
+    }
+    pthread_mutex_lock(&g_evdev_lock);
+    g_pad_size = size;
+    pthread_mutex_unlock(&g_evdev_lock);
 }
 
 /* ---- server ---- */
@@ -201,7 +240,9 @@ void evdev_start(void)
         return;
     describe();
     for (int i = 0; i < TOUCH_SLOTS; i++)
-        g_slot_id[i] = -1;
+        g_touch.slot_id[i] = g_pad.slot_id[i] = -1;
+    g_touch.cur_slot = g_touch.abs_x = g_touch.abs_y = -1;
+    g_pad.cur_slot = g_pad.abs_x = g_pad.abs_y = -1;
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     unlink(addr.sun_path);
     if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(s, 8) != 0) {
@@ -312,85 +353,117 @@ static void abs_value(struct device *d, uint16_t code, int32_t value, int32_t *l
     *last = value;
 }
 
-static int slot_of(int id, int claim)
+static int slot_of(struct mt *t, int id, int claim)
 {
     for (int i = 0; i < TOUCH_SLOTS; i++)
-        if (g_slot_id[i] == id)
+        if (t->slot_id[i] == id)
             return i;
     for (int i = 0; claim && i < TOUCH_SLOTS; i++) {
-        if (g_slot_id[i] < 0) {
-            g_slot_id[i] = id;
+        if (t->slot_id[i] < 0) {
+            t->slot_id[i] = id;
             return i;
         }
     }
     return -1;
 }
 
-static void select_slot(struct device *d, int slot)
+static void select_slot(struct device *d, struct mt *t, int slot)
 {
-    abs_value(d, ABS_MT_SLOT, slot, &g_cur_slot);
+    abs_value(d, ABS_MT_SLOT, slot, &t->cur_slot);
 }
 
-static void position(struct device *d, int slot, uint64_t pos)
+/* pos as fractions of the screen; the touchpad's axes are its pixels. */
+static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
 {
     int32_t x = (int32_t)CHAM_INPUT_X(pos), y = (int32_t)CHAM_INPUT_Y(pos);
-    if (x == g_slot_x[slot] && y == g_slot_y[slot])
+    if (t == &g_pad) {
+        uint32_t w, h, mm_w, mm_h;
+        kms_mode_size(&w, &h);
+        if (!w || !h) /* before KWin's first modeset */
+            kms_screen_size(&w, &h, &mm_w, &mm_h);
+        pthread_mutex_lock(&g_evdev_lock);
+        int32_t size = g_pad_size;
+        pthread_mutex_unlock(&g_evdev_lock);
+        x = (int32_t)((int64_t)x * (int32_t)w / 65536);
+        y = (int32_t)((int64_t)y * (int32_t)h / 65536);
+        if (size > 0) {
+            x = x < size ? x : size - 1;
+            y = y < size ? y : size - 1;
+        }
+    }
+    if (x == t->x[slot] && y == t->y[slot])
         return;
-    select_slot(d, slot);
-    abs_value(d, ABS_MT_POSITION_X, x, &g_slot_x[slot]);
-    abs_value(d, ABS_MT_POSITION_Y, y, &g_slot_y[slot]);
+    select_slot(d, t, slot);
+    abs_value(d, ABS_MT_POSITION_X, x, &t->x[slot]);
+    abs_value(d, ABS_MT_POSITION_Y, y, &t->y[slot]);
     if (slot == 0) { /* single-touch axes follow the first finger */
-        abs_value(d, ABS_X, x, &g_abs_x);
-        abs_value(d, ABS_Y, y, &g_abs_y);
+        abs_value(d, ABS_X, x, &t->abs_x);
+        abs_value(d, ABS_Y, y, &t->abs_y);
     }
 }
 
-static void lift(struct device *d, int slot)
+static void lift(struct device *d, struct mt *t, int slot)
 {
-    select_slot(d, slot);
+    select_slot(d, t, slot);
     add(d, EV_ABS, ABS_MT_TRACKING_ID, -1);
-    g_slot_id[slot] = -1;
-    if (--g_touching == 0)
+    t->slot_id[slot] = -1;
+    if (--t->touching == 0)
         add(d, EV_KEY, BTN_TOUCH, 0);
 }
 
-static int touch(const struct cham_msg *m)
+/* The touchpad's finger count, as the one BTN_TOOL_* key held. */
+static void tool(struct device *d, struct mt *t)
 {
-    struct device *d = &g_dev[DEV_TOUCH];
-    if (!g_touching && !has_readers(d))
+    static const uint16_t keys[] = {0, BTN_TOOL_FINGER, BTN_TOOL_DOUBLETAP, BTN_TOOL_TRIPLETAP, BTN_TOOL_QUADTAP,
+                                    BTN_TOOL_QUINTTAP};
+    int n = t->touching < 5 ? t->touching : 5;
+    if (n == t->tool)
+        return;
+    if (t->tool)
+        add(d, EV_KEY, keys[t->tool], 0);
+    if (n)
+        add(d, EV_KEY, keys[n], 1);
+    t->tool = n;
+}
+
+/* Touch messages, kind as CHAM_INPUT_TOUCH_* (the touchpad's mapped). */
+static int touch(struct device *d, struct mt *t, unsigned kind, const struct cham_msg *m)
+{
+    if (!t->touching && !has_readers(d))
         return 0;
     if (take_fresh(d)) {
-        g_cur_slot = g_abs_x = g_abs_y = -1;
+        t->cur_slot = t->abs_x = t->abs_y = -1;
         for (int i = 0; i < TOUCH_SLOTS; i++)
-            g_slot_x[i] = g_slot_y[i] = -1;
+            t->x[i] = t->y[i] = -1;
     }
     int slot;
-    switch (m->id) {
+    switch (kind) {
     case CHAM_INPUT_TOUCH_DOWN:
-        if ((slot = slot_of((int)m->a, 1)) < 0)
+        if ((slot = slot_of(t, (int)m->a, 1)) < 0)
             break;
-        select_slot(d, slot);
-        add(d, EV_ABS, ABS_MT_TRACKING_ID, g_tracking_id++ & 0xffff);
-        if (g_touching++ == 0)
+        select_slot(d, t, slot);
+        add(d, EV_ABS, ABS_MT_TRACKING_ID, t->tracking_id++ & 0xffff);
+        if (t->touching++ == 0)
             add(d, EV_KEY, BTN_TOUCH, 1);
-        g_slot_x[slot] = g_slot_y[slot] = -1; /* a new contact reports its position */
-        position(d, slot, m->b);
+        t->x[slot] = t->y[slot] = -1; /* a new contact reports its position */
+        position(d, t, slot, m->b);
         break;
     case CHAM_INPUT_TOUCH_MOTION:
-        if ((slot = slot_of((int)m->a, 0)) >= 0)
-            position(d, slot, m->b);
+        if ((slot = slot_of(t, (int)m->a, 0)) >= 0)
+            position(d, t, slot, m->b);
         break;
     case CHAM_INPUT_TOUCH_UP:
-        if ((slot = slot_of((int)m->a, 0)) >= 0)
-            lift(d, slot);
+        if ((slot = slot_of(t, (int)m->a, 0)) >= 0)
+            lift(d, t, slot);
         break;
     case CHAM_INPUT_TOUCH_CANCEL:
         for (int i = 0; i < TOUCH_SLOTS; i++)
-            if (g_slot_id[i] >= 0)
-                lift(d, i);
-        flush(d);
-        break;
+            if (t->slot_id[i] >= 0)
+                lift(d, t, i);
+        __attribute__((fallthrough)); /* and a frame */
     case CHAM_INPUT_TOUCH_FRAME:
+        if (t == &g_pad)
+            tool(d, t);
         flush(d);
         break;
     }
@@ -422,7 +495,14 @@ int evdev_input(const struct cham_msg *m)
     case CHAM_INPUT_TOUCH_UP:
     case CHAM_INPUT_TOUCH_CANCEL:
     case CHAM_INPUT_TOUCH_FRAME:
-        return touch(m);
+        return touch(&g_dev[DEV_TOUCH], &g_touch, m->id, m);
+    case CHAM_INPUT_PAD_DOWN:
+    case CHAM_INPUT_PAD_MOTION:
+    case CHAM_INPUT_PAD_UP:
+    case CHAM_INPUT_PAD_CANCEL:
+    case CHAM_INPUT_PAD_FRAME:
+        touch(&g_dev[DEV_TOUCHPAD], &g_pad, m->id - CHAM_INPUT_PAD_DOWN + CHAM_INPUT_TOUCH_DOWN, m);
+        return 1; /* no fallback: fake input has no touchpad */
     case CHAM_INPUT_KEY:
         return key(&g_dev[DEV_KEYBOARD], (unsigned)m->a, m->b != 0);
     case CHAM_INPUT_MOUSE_BUTTON:

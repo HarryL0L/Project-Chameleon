@@ -131,7 +131,7 @@ static uint64_t g_frame;
 
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
-static uint32_t g_mm_width, g_mm_height;
+static uint32_t g_screen_width, g_screen_height, g_mm_width, g_mm_height;
 
 /* ---- setup ---- */
 
@@ -181,6 +181,8 @@ static void kms_init(void)
     double dpi = dpi_env ? atof(dpi_env) : 400.0;
     if (dpi < 50)
         dpi = 400.0;
+    g_screen_width = w;
+    g_screen_height = h;
     g_mm_width = (uint32_t)(w * 25.4 / dpi + 0.5);
     g_mm_height = (uint32_t)(h * 25.4 / dpi + 0.5);
 }
@@ -562,9 +564,11 @@ static uint32_t mode_mhz(const struct drm_mode_modeinfo *m)
     return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : g_mode_mhz;
 }
 
-void kms_physical_size(uint32_t *mm_width, uint32_t *mm_height)
+void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height)
 {
     kms_init_once();
+    *width = g_screen_width;
+    *height = g_screen_height;
     *mm_width = g_mm_width;
     *mm_height = g_mm_height;
 }

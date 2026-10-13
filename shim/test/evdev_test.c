@@ -112,9 +112,9 @@ int main(void)
     printf("libinput\n");
     struct libinput *li = libinput_udev_create_context(&iface, NULL, udev);
     CHECK(li && libinput_udev_assign_seat(li, "seat0") == 0, "libinput_udev_assign_seat");
-    int touchscreen = 0, keyboard = 0, mouse = 0;
+    int touchscreen = 0, keyboard = 0, mouse = 0, touchpad = 0;
     struct libinput_event *ev;
-    for (int i = 0; li && i < 3 && (ev = wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED)); i++) {
+    for (int i = 0; li && i < 4 && (ev = wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED)); i++) {
         struct libinput_device *dev = libinput_event_get_device(ev);
         const char *name = libinput_device_get_name(dev);
         touchscreen |= !strcmp(name, "Chameleon touchscreen") &&
@@ -122,11 +122,16 @@ int main(void)
         keyboard |= !strcmp(name, "Chameleon keyboard") &&
                     libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_KEYBOARD);
         mouse |= !strcmp(name, "Chameleon mouse") && libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER);
+        touchpad |= !strcmp(name, "Chameleon touchpad") &&
+                    libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER) &&
+                    libinput_device_config_tap_get_finger_count(dev) > 0 &&
+                    libinput_device_config_tap_get_default_enabled(dev) == LIBINPUT_CONFIG_TAP_ENABLED;
         libinput_event_destroy(ev);
     }
     CHECK(touchscreen, "libinput adds the touchscreen as a touch device");
     CHECK(keyboard, "libinput adds the keyboard as a keyboard");
     CHECK(mouse, "libinput adds the mouse as a pointer");
+    CHECK(touchpad, "libinput adds the touchpad, tapping on by default");
 
     send_input(c, CHAM_INPUT_TOUCH_DOWN, 3, CHAM_INPUT_POS(32768, 16384)); /* (0.5, 0.25) */
     send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
@@ -205,6 +210,35 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(v120 == -120, "wheel a notch up (v120 %.0f, want -120)", v120);
+
+    /* Touchpad: one finger moves the pointer, a tap clicks. */
+    send_input(c, CHAM_INPUT_PAD_DOWN, 1, CHAM_INPUT_POS(20000, 20000));
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    for (int i = 1; i <= 10; i++) {
+        usleep(10000);
+        send_input(c, CHAM_INPUT_PAD_MOTION, 1, CHAM_INPUT_POS(20000 + i * 600, 20000));
+        send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    }
+    send_input(c, CHAM_INPUT_PAD_UP, 1, 0);
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    x = 0;
+    if (li && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_MOTION))) {
+        x = libinput_event_pointer_get_dx_unaccelerated(libinput_event_get_pointer_event(ev));
+        libinput_event_destroy(ev);
+    }
+    CHECK(x > 0, "touchpad: a finger moving right moves the pointer right (dx %.1f)", x);
+    usleep(500000);
+    send_input(c, CHAM_INPUT_PAD_DOWN, 2, CHAM_INPUT_POS(30000, 30000));
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    usleep(50000);
+    send_input(c, CHAM_INPUT_PAD_UP, 2, 0);
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    button = -1; /* (the mouse's right button release may come first) */
+    for (int i = 0; li && i < 3 && button != BTN_LEFT && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_BUTTON)); i++) {
+        button = (int)libinput_event_pointer_get_button(libinput_event_get_pointer_event(ev));
+        libinput_event_destroy(ev);
+    }
+    CHECK(button == BTN_LEFT, "touchpad: a tap is a left click (button 0x%x)", button);
 
     if (li)
         libinput_unref(li);

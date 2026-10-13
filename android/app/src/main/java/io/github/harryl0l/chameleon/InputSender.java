@@ -11,20 +11,15 @@ final class InputSender {
         System.loadLibrary("chameleon_presenter");
     }
 
-    static final int TOUCH_DOWN = 1;
-    static final int TOUCH_MOTION = 2;
-    static final int TOUCH_UP = 3;
-    static final int TOUCH_CANCEL = 4;
-    static final int TOUCH_FRAME = 5;
+    static final int TOUCH_DOWN = 1; // .. TOUCH_FRAME = 5
     static final int POINTER_MOTION = 6;
     static final int POINTER_ABS = 7;
-    static final int BUTTON = 8;
-    static final int AXIS = 9;
     static final int KEYSYM = 10;
     static final int KEY = 11;
     static final int MOUSE_BUTTON = 12;
     static final int MOUSE_WHEEL = 13;
     static final int MOUSE_MOTION = 14;
+    static final int PAD_DOWN = 15; // .. PAD_FRAME = 19
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
@@ -56,17 +51,21 @@ final class InputSender {
         return (ix & 0xffffffffL) | (iy << 32);
     }
 
-    static void touch(int kind, int id, long pos) {
-        nativeSendInput(kind, id, pos);
+    // A finger message: down is TOUCH_DOWN (the touchscreen) or PAD_DOWN (the
+    // touchpad), step one of these offsets from it.
+    static final int DOWN = 0, MOTION = 1, UP = 2, CANCEL = 3, FRAME = 4;
+
+    static void finger(int down, int step, int id, long pos) {
+        nativeSendInput(down + step, id, pos);
     }
 
-    static void touchFrame() {
-        nativeSendInput(TOUCH_FRAME, 0, 0);
+    static void fingersFrame(int down) {
+        nativeSendInput(down + FRAME, 0, 0);
     }
 
-    static void touchCancel() {
-        nativeSendInput(TOUCH_CANCEL, 0, 0);
-        nativeSendInput(TOUCH_FRAME, 0, 0);
+    static void fingersCancel(int down) {
+        nativeSendInput(down + CANCEL, 0, 0);
+        nativeSendInput(down + FRAME, 0, 0);
     }
 
     static void motion(long delta) {
@@ -75,20 +74,6 @@ final class InputSender {
 
     static void moveTo(long pos) {
         nativeSendInput(POINTER_ABS, 0, pos);
-    }
-
-    static void button(int button, boolean pressed) {
-        nativeSendInput(BUTTON, button, pressed ? 1 : 0);
-    }
-
-    static void click(int button) {
-        button(button, true);
-        button(button, false);
-    }
-
-    /** Scroll by {@code value} (wl_pointer axis units, ~15 per wheel notch). */
-    static void axis(int axis, float value) {
-        nativeSendInput(AXIS, axis, (long) (value * 256f));
     }
 
     /** Captured mouse movement, in the mouse's own counts. */
