@@ -44,7 +44,7 @@ struct udev_list_entry;
 
 #define MAGIC_ENTRY 0x43484d4c454e5452ull  /* "CHMLENTR" */
 #define MAGIC_DEVICE 0x43484d4c44455643ull /* "CHMLDEVC" */
-#define MAX_PROPS 8
+#define MAX_PROPS 10
 #define MAX_FILTERS 4
 
 struct entry {
@@ -183,8 +183,9 @@ static void describe(struct dev *d, struct udev *udev, int index, const struct c
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MAJOR", d->major, NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MINOR", d->minor, NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_INPUT", "1", NULL};
-    if (d->type[0])
-        p[d->nprops++] = (struct entry){MAGIC_ENTRY, d->type, "1", NULL};
+    char *save, *type = strtok_r(d->type, " ", &save);
+    for (; type && d->nprops < MAX_PROPS; type = strtok_r(NULL, " ", &save))
+        p[d->nprops++] = (struct entry){MAGIC_ENTRY, type, "1", NULL};
     link_entries(p, d->nprops);
 }
 

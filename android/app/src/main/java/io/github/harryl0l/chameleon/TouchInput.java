@@ -6,6 +6,7 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.view.HapticFeedbackConstants;
 import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 
@@ -17,9 +18,14 @@ import android.view.View;
  * long press holds the button (moving windows, drag and drop, selection),
  * two-finger tap = right click,
  * three-finger tap = middle click, two-finger drag scrolls.
- * A mouse always drives the pointer directly, in either mode.
+ * A mouse always drives the pointer directly, in either mode: the first
+ * mouse event captures it (pointer capture, as games do), so the desktop gets
+ * its own counts and buttons as from a real mouse, without Android's pointer
+ * handling in between. Android gives the mouse back when the app loses focus;
+ * the next mouse event captures it again.
  */
-final class TouchInput implements View.OnTouchListener, View.OnGenericMotionListener {
+final class TouchInput implements View.OnTouchListener, View.OnGenericMotionListener,
+        View.OnCapturedPointerListener {
     enum Mode { DIRECT, TRACKPAD }
 
     private static final long TAP_MS = 250;
@@ -42,6 +48,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     private final Runnable mLongPress = this::longPress;
 
     private int mMouseButtons;
+    private float mMouseRestX, mMouseRestY; // captured movement short of a whole count
 
     TouchInput(float density) {
         mTouchSlop = 8 * density;
@@ -219,6 +226,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
 
     // ---- mouse ----
 
+    /** The mouse's Back button is left out: see mouseBackKey(). */
     private static int evdevButton(int androidButton) {
         switch (androidButton) {
             case MotionEvent.BUTTON_PRIMARY:
@@ -227,27 +235,70 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                 return InputSender.BTN_RIGHT;
             case MotionEvent.BUTTON_TERTIARY:
                 return InputSender.BTN_MIDDLE;
-            case MotionEvent.BUTTON_BACK:
-                return InputSender.BTN_SIDE;
             case MotionEvent.BUTTON_FORWARD:
                 return InputSender.BTN_EXTRA;
         }
         return 0;
     }
 
+    /** A mouse the app hasn't captured yet: absolute, then capture it. */
     private boolean mouse(View v, MotionEvent e) {
-        int w = v.getWidth(), h = v.getHeight();
-        if (e.getActionMasked() == MotionEvent.ACTION_SCROLL) {
-            float vs = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
-            float hs = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
-            if (vs != 0)
-                InputSender.axis(InputSender.AXIS_VERTICAL, -vs * 15f);
-            if (hs != 0)
-                InputSender.axis(InputSender.AXIS_HORIZONTAL, hs * 15f);
-            return true;
+        if (!wheel(e)) {
+            InputSender.moveTo(InputSender.pos(e.getX(), e.getY(), v.getWidth(), v.getHeight()));
+            buttons(e.getButtonState());
         }
-        InputSender.moveTo(InputSender.pos(e.getX(), e.getY(), w, h));
-        int buttons = e.getButtonState();
+        if (v.hasWindowFocus() && !v.hasPointerCapture())
+            v.requestPointerCapture();
+        return true;
+    }
+
+    /**
+     * A Back key from a mouse is its right button: many phones (realme,
+     * Xiaomi, Asus, older Android) report the right button as Back, and send
+     * a Back key for it, to every app. A real side Back button acts the same.
+     */
+    static boolean mouseBackKey(KeyEvent e) {
+        if (e.getKeyCode() != KeyEvent.KEYCODE_BACK
+                || !(e.isFromSource(InputDevice.SOURCE_MOUSE) || e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)))
+            return false;
+        if (e.getRepeatCount() == 0 && e.getAction() != KeyEvent.ACTION_MULTIPLE)
+            InputSender.mouseButton(InputSender.BTN_RIGHT, e.getAction() == KeyEvent.ACTION_DOWN);
+        return true;
+    }
+
+    @Override
+    public boolean onCapturedPointer(View v, MotionEvent e) {
+        if (!e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE))
+            return false;
+        if (wheel(e))
+            return true;
+        float dx = mMouseRestX + e.getX(), dy = mMouseRestY + e.getY();
+        for (int i = 0; i < e.getHistorySize(); i++) {
+            dx += e.getHistoricalX(i);
+            dy += e.getHistoricalY(i);
+        }
+        int ix = (int) dx, iy = (int) dy;
+        mMouseRestX = dx - ix;
+        mMouseRestY = dy - iy;
+        if (ix != 0 || iy != 0)
+            InputSender.mouseMotion(ix, iy);
+        buttons(e.getButtonState());
+        return true;
+    }
+
+    private static boolean wheel(MotionEvent e) {
+        if (e.getActionMasked() != MotionEvent.ACTION_SCROLL)
+            return false;
+        float vs = e.getAxisValue(MotionEvent.AXIS_VSCROLL);
+        float hs = e.getAxisValue(MotionEvent.AXIS_HSCROLL);
+        if (vs != 0)
+            InputSender.mouseWheel(InputSender.AXIS_VERTICAL, vs);
+        if (hs != 0)
+            InputSender.mouseWheel(InputSender.AXIS_HORIZONTAL, hs);
+        return true;
+    }
+
+    private void buttons(int buttons) {
         int changed = buttons ^ mMouseButtons;
         for (int bit = 1; changed != 0 && bit != 0; bit <<= 1) {
             if ((changed & bit) == 0)
@@ -255,9 +306,8 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
             changed &= ~bit;
             int button = evdevButton(bit);
             if (button != 0)
-                InputSender.button(button, (buttons & bit) != 0);
+                InputSender.mouseButton(button, (buttons & bit) != 0);
         }
         mMouseButtons = buttons;
-        return true;
     }
 }

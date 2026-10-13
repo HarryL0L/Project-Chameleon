@@ -373,6 +373,9 @@ static void forward(const struct cham_msg *m)
         wl.marshal_flags(fi, FI_POINTER_MOTION, NULL, v, 0, fixed(CHAM_INPUT_DX(m->b) / 1048576.0 * w),
                          fixed(CHAM_INPUT_DY(m->b) / 1048576.0 * h));
         break;
+    case CHAM_INPUT_MOUSE_MOTION: /* a count per logical pixel */
+        wl.marshal_flags(fi, FI_POINTER_MOTION, NULL, v, 0, fixed(CHAM_INPUT_DX(m->b)), fixed(CHAM_INPUT_DY(m->b)));
+        break;
     case CHAM_INPUT_POINTER_ABS:
         if (v < 3)
             break;
@@ -380,10 +383,15 @@ static void forward(const struct cham_msg *m)
         wl.marshal_flags(fi, FI_POINTER_MOTION_ABSOLUTE, NULL, v, 0, x, y);
         break;
     case CHAM_INPUT_BUTTON:
+    case CHAM_INPUT_MOUSE_BUTTON:
         wl.marshal_flags(fi, FI_BUTTON, NULL, v, 0, (uint32_t)m->a, (uint32_t)(m->b ? 1 : 0));
         break;
     case CHAM_INPUT_AXIS:
         wl.marshal_flags(fi, FI_AXIS, NULL, v, 0, (uint32_t)(m->a ? 1 : 0), (wl_fixed_t)(int64_t)m->b);
+        break;
+    case CHAM_INPUT_MOUSE_WHEEL: /* 15 units per notch, + is down / right */
+        wl.marshal_flags(fi, FI_AXIS, NULL, v, 0, (uint32_t)(m->a ? 1 : 0),
+                         (wl_fixed_t)((m->a ? 1 : -1) * (int64_t)m->b * 15 * 256 / 120));
         break;
     case CHAM_INPUT_KEYSYM:
         if (v >= 6)
@@ -436,8 +444,8 @@ static void *input_main(void *arg)
         for (size_t i = 0; got > 0 && i < (size_t)got / sizeof batch[0]; i++) {
             if (batch[i].type == CHAM_CONFIG)
                 output_config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
-            else if (batch[i].type == CHAM_INPUT && evdev_touch(&batch[i]))
-                batch[i].type = 0; /* went to the evdev touchscreen's readers (evdev.c) */
+            else if (batch[i].type == CHAM_INPUT && evdev_input(&batch[i]))
+                batch[i].type = 0; /* went to an evdev device's readers (evdev.c) */
             else
                 have_input = 1;
         }

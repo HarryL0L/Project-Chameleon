@@ -24,7 +24,7 @@
 
 struct cham_evdev_info {
     char name[80];
-    char udev_type[32];       /* "ID_INPUT_TOUCHSCREEN", ... (set to "1" in udev) */
+    char udev_type[32];       /* "ID_INPUT_TOUCHSCREEN", ... space-separated (each "1" in udev) */
     struct input_id id;
     uint8_t ev[CHAM_BITS(EV_CNT)];
     uint8_t key[CHAM_BITS(KEY_CNT)];

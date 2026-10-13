@@ -50,7 +50,9 @@ enum cham_msg_type {
                                    a = 1: Android marks it sensitive (a password) */
 };
 
-/* Input events, presenter -> producer (the KWin shim feeds them to KWin's
+/* Input events, presenter -> producer (the KWin shim serves touch, the
+ * hardware keyboard and the mouse as evdev devices, and feeds the rest, or
+ * everything while no program reads those, to KWin's
  * org_kde_kwin_fake_input). Positions are fractions of the surface so they
  * map onto the producer's screen whatever its size or scale:
  *   pos   = CHAM_INPUT_POS(x, y), x/y in [0, 1] as 16.16 fixed point
@@ -63,11 +65,16 @@ enum cham_input_kind {
     CHAM_INPUT_TOUCH_CANCEL = 4,
     CHAM_INPUT_TOUCH_FRAME = 5,    /* ends a group of touch events */
     CHAM_INPUT_POINTER_MOTION = 6, /* b = delta */
-    CHAM_INPUT_POINTER_ABS = 7,    /* b = pos */
+    CHAM_INPUT_POINTER_ABS = 7,    /* b = pos (a mouse the app hasn't captured) */
     CHAM_INPUT_BUTTON = 8,         /* a = evdev button (BTN_LEFT = 0x110), b = 1 pressed / 0 released */
     CHAM_INPUT_AXIS = 9,           /* a = 0 vertical / 1 horizontal, b = (int64) value * 256 */
     CHAM_INPUT_KEYSYM = 10,        /* a = X keysym (0x01000000 | code point for Unicode), b = 1 / 0 */
-    CHAM_INPUT_KEY = 11,           /* a = evdev key code, b = 1 / 0 */
+    CHAM_INPUT_KEY = 11,           /* a = evdev key code (a hardware keyboard), b = 1 / 0 */
+    CHAM_INPUT_MOUSE_BUTTON = 12,  /* as BUTTON, from a mouse */
+    CHAM_INPUT_MOUSE_WHEEL = 13,   /* a = 0 vertical / 1 horizontal, b = (int64) 1/120ths of a
+                                      notch, as evdev's REL_*WHEEL_HI_RES: + is up / right */
+    CHAM_INPUT_MOUSE_MOTION = 14,  /* b = CHAM_INPUT_DELTA(dx, dy) in the captured mouse's own
+                                      counts (not fractions of the surface) */
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)

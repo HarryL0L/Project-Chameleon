@@ -58,8 +58,8 @@ void input_socket_path(char *out, size_t size);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);
-/* Takes a touch message (input thread) if the touchscreen has a reader. */
-int evdev_touch(const struct cham_msg *m);
+/* Takes an input message (input thread) if its device has a reader. */
+int evdev_input(const struct cham_msg *m);
 
 /* ---- output.c: KWin's screen follows the app's window (input thread) ---- */
 struct wl_proxy;
@@ -88,6 +88,8 @@ struct fake_fd {
     struct fake_fd *next;
 };
 void kms_init_once(void);
+/* The screen's physical size, as the connector reports it. */
+void kms_physical_size(uint32_t *mm_width, uint32_t *mm_height);
 /* Size of the mode KWin has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The buffer on KWin's screen, or NULL if the screen shows none. */

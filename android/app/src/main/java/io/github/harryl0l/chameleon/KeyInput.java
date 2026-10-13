@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package io.github.harryl0l.chameleon;
 
+import android.view.InputDevice;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 
@@ -8,9 +9,12 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * Keyboard input as X keysyms: KWin's fake-input keyboard_keysym looks the
- * keysym up in its keymap (adding Shift as needed) or maps it to a spare key,
- * so any Unicode text works whatever the layout.
+ * Keyboard input. A hardware keyboard's keys go by their Linux key codes
+ * (Android's scan codes), as from a real keyboard: the desktop's own layout
+ * applies. Everything else (the soft keyboard, the extra keys) goes as X
+ * keysyms: KWin's fake-input keyboard_keysym looks the keysym up in its
+ * keymap (adding Shift as needed) or maps it to a spare key, so any Unicode
+ * text works whatever the layout.
  *
  * Ctrl and Alt can be latched from the extra-keys row; a latched modifier
  * applies to the next key or character and is then released.
@@ -166,6 +170,15 @@ final class KeyInput {
         return 0;
     }
 
+    /** The Linux key code of a hardware keyboard's key, else 0. */
+    private static int scanCode(KeyEvent event) {
+        InputDevice device = event.getDevice();
+        if (device == null || device.isVirtual() || device.getKeyboardType() != InputDevice.KEYBOARD_TYPE_ALPHABETIC)
+            return 0;
+        int code = event.getScanCode();
+        return code > 0 && code <= 248 ? code : 0; // KEY_ESC .. KEY_MICMUTE
+    }
+
     private static boolean isModifier(int keyCode) {
         return KeyEvent.isModifierKey(keyCode) || keyCode == KeyEvent.KEYCODE_CAPS_LOCK;
     }
@@ -188,13 +201,22 @@ final class KeyInput {
             int meta = event.getMetaState()
                     & ~(KeyEvent.META_CTRL_MASK | KeyEvent.META_ALT_MASK | KeyEvent.META_META_MASK);
             int ch = event.getUnicodeChar(meta);
-            if (ch == 0 || (ch & KeyCharacterMap.COMBINING_ACCENT) != 0)
-                return ch != 0; // dead keys: swallow, the IME composes them
-            keysym = keysymForChar(ch);
+            if (ch == 0)
+                return false;
+            if ((ch & KeyCharacterMap.COMBINING_ACCENT) == 0)
+                keysym = keysymForChar(ch);
         }
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         if (down && event.getRepeatCount() > 0)
             return true; // Wayland clients repeat held keys themselves
+        int scan = scanCode(event);
+        // with Ctrl / Alt latched, a key is tapped with them as a keysym (below)
+        if (scan != 0 && !mTapped.contains(code) && (isModifier(code) || !down || !(mCtrl || mAlt))) {
+            InputSender.key(scan, down);
+            return true;
+        }
+        if (keysym == 0)
+            return true; // a dead key from the soft keyboard: swallow, the IME composes it
         if (isModifier(code)) {
             InputSender.keysym(keysym, down);
             return true;

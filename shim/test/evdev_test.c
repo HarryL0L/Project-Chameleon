@@ -1,9 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The touchscreen libchameleon.so serves, seen by the system's real libinput
- * through libchameleon_udev.so: a stub presenter sends touch messages, and
- * libinput's udev backend must find "Chameleon touchscreen" and report the
- * touches. Run with LD_PRELOAD=libchameleon.so:libchameleon_udev.so, as
+ * The input devices libchameleon.so serves, seen by the system's real
+ * libinput through libchameleon_udev.so: a stub presenter sends touch, key
+ * and mouse messages, and libinput's udev backend must find the Chameleon
+ * touchscreen, keyboard and mouse and report the input. Run with LD_PRELOAD=libchameleon.so:libchameleon_udev.so, as
  * kwin_wayland is.
  */
 #define _GNU_SOURCE
@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <libinput.h>
 #include <libudev.h>
+#include <linux/input.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -111,13 +112,21 @@ int main(void)
     printf("libinput\n");
     struct libinput *li = libinput_udev_create_context(&iface, NULL, udev);
     CHECK(li && libinput_udev_assign_seat(li, "seat0") == 0, "libinput_udev_assign_seat");
-    struct libinput_event *ev = li ? wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED) : NULL;
-    struct libinput_device *dev = ev ? libinput_event_get_device(ev) : NULL;
-    CHECK(dev && strcmp(libinput_device_get_name(dev), "Chameleon touchscreen") == 0 &&
-              libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_TOUCH),
-          "libinput adds \"%s\" as a touch device", dev ? libinput_device_get_name(dev) : "nothing");
-    if (ev)
+    int touchscreen = 0, keyboard = 0, mouse = 0;
+    struct libinput_event *ev;
+    for (int i = 0; li && i < 3 && (ev = wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED)); i++) {
+        struct libinput_device *dev = libinput_event_get_device(ev);
+        const char *name = libinput_device_get_name(dev);
+        touchscreen |= !strcmp(name, "Chameleon touchscreen") &&
+                       libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_TOUCH);
+        keyboard |= !strcmp(name, "Chameleon keyboard") &&
+                    libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_KEYBOARD);
+        mouse |= !strcmp(name, "Chameleon mouse") && libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER);
         libinput_event_destroy(ev);
+    }
+    CHECK(touchscreen, "libinput adds the touchscreen as a touch device");
+    CHECK(keyboard, "libinput adds the keyboard as a keyboard");
+    CHECK(mouse, "libinput adds the mouse as a pointer");
 
     send_input(c, CHAM_INPUT_TOUCH_DOWN, 3, CHAM_INPUT_POS(32768, 16384)); /* (0.5, 0.25) */
     send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
@@ -156,6 +165,46 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(ups == 2, "both fingers up (%d)", ups);
+
+    send_input(c, CHAM_INPUT_KEY, KEY_A, 1);
+    send_input(c, CHAM_INPUT_KEY, KEY_A, 0);
+    int key = -1, pressed = 0, released = 0;
+    for (int i = 0; li && i < 2 && (ev = wait_event(li, LIBINPUT_EVENT_KEYBOARD_KEY)); i++) {
+        struct libinput_event_keyboard *k = libinput_event_get_keyboard_event(ev);
+        key = (int)libinput_event_keyboard_get_key(k);
+        if (libinput_event_keyboard_get_key_state(k) == LIBINPUT_KEY_STATE_PRESSED)
+            pressed++;
+        else
+            released++;
+        libinput_event_destroy(ev);
+    }
+    CHECK(key == KEY_A && pressed == 1 && released == 1, "key A pressed and released (key %d)", key);
+
+    send_input(c, CHAM_INPUT_MOUSE_MOTION, 0, CHAM_INPUT_DELTA(7, -3));
+    send_input(c, CHAM_INPUT_MOUSE_BUTTON, BTN_RIGHT, 1);
+    send_input(c, CHAM_INPUT_MOUSE_BUTTON, BTN_RIGHT, 0);
+    send_input(c, CHAM_INPUT_MOUSE_WHEEL, 0, 120); /* a notch up */
+    x = y = 0;
+    if (li && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_MOTION))) {
+        struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
+        x = libinput_event_pointer_get_dx_unaccelerated(p);
+        y = libinput_event_pointer_get_dy_unaccelerated(p);
+        libinput_event_destroy(ev);
+    }
+    CHECK(x == 7 && y == -3, "mouse moved %.1f,%.1f (want 7,-3)", x, y);
+    int button = -1;
+    if (li && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_BUTTON))) {
+        button = (int)libinput_event_pointer_get_button(libinput_event_get_pointer_event(ev));
+        libinput_event_destroy(ev);
+    }
+    CHECK(button == BTN_RIGHT, "right button (button 0x%x)", button);
+    double v120 = 0;
+    if (li && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_SCROLL_WHEEL))) {
+        v120 = libinput_event_pointer_get_scroll_value_v120(libinput_event_get_pointer_event(ev),
+                                                            LIBINPUT_POINTER_AXIS_SCROLL_VERTICAL);
+        libinput_event_destroy(ev);
+    }
+    CHECK(v120 == -120, "wheel a notch up (v120 %.0f, want -120)", v120);
 
     if (li)
         libinput_unref(li);

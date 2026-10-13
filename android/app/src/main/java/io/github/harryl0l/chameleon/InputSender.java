@@ -3,7 +3,8 @@ package io.github.harryl0l.chameleon;
 
 /**
  * Sends CHAM_INPUT messages (common/chameleon_proto.h) to the connected
- * producer; the KWin shim turns them into org_kde_kwin_fake_input requests.
+ * producer; the KWin shim serves touch, hardware keys and the mouse as evdev
+ * devices and turns the rest into org_kde_kwin_fake_input requests.
  */
 final class InputSender {
     static {
@@ -20,12 +21,15 @@ final class InputSender {
     static final int BUTTON = 8;
     static final int AXIS = 9;
     static final int KEYSYM = 10;
+    static final int KEY = 11;
+    static final int MOUSE_BUTTON = 12;
+    static final int MOUSE_WHEEL = 13;
+    static final int MOUSE_MOTION = 14;
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
     static final int BTN_RIGHT = 0x111;
     static final int BTN_MIDDLE = 0x112;
-    static final int BTN_SIDE = 0x113;
     static final int BTN_EXTRA = 0x114;
 
     static final int AXIS_VERTICAL = 0;
@@ -85,6 +89,26 @@ final class InputSender {
     /** Scroll by {@code value} (wl_pointer axis units, ~15 per wheel notch). */
     static void axis(int axis, float value) {
         nativeSendInput(AXIS, axis, (long) (value * 256f));
+    }
+
+    /** Captured mouse movement, in the mouse's own counts. */
+    static void mouseMotion(int dx, int dy) {
+        nativeSendInput(MOUSE_MOTION, 0, (dx & 0xffffffffL) | ((long) dy << 32));
+    }
+
+    /** A mouse button. */
+    static void mouseButton(int button, boolean pressed) {
+        nativeSendInput(MOUSE_BUTTON, button, pressed ? 1 : 0);
+    }
+
+    /** Mouse wheel movement in notches, + up / right. */
+    static void mouseWheel(int axis, float notches) {
+        nativeSendInput(MOUSE_WHEEL, axis, Math.round(notches * 120f));
+    }
+
+    /** A hardware keyboard's key, by its Linux key code. */
+    static void key(int code, boolean pressed) {
+        nativeSendInput(KEY, code, pressed ? 1 : 0);
     }
 
     static void keysym(int keysym, boolean pressed) {

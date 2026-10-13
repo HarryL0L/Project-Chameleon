@@ -177,6 +177,10 @@ public class PresenterActivity extends Activity
             return true;
         });
         mImeView = new ImeView(this, mKeys);
+        // A captured mouse goes to the focused view: the soft keyboard's
+        // view usually holds the focus, else the surface.
+        view.setOnCapturedPointerListener(mTouch);
+        mImeView.setOnCapturedPointerListener(mTouch);
         FrameLayout root = new FrameLayout(this);
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -365,6 +369,8 @@ public class PresenterActivity extends Activity
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (TouchInput.mouseBackKey(event))
+            return true;
         int code = event.getKeyCode();
         switch (code) {
             case KeyEvent.KEYCODE_VOLUME_UP:

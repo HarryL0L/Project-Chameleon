@@ -60,11 +60,19 @@ screen keeps its first size instead of following the app's window).
 
 ## Status / limits
 
-- Input: touch (direct or trackpad), mouse and keyboard from the app, injected
-  through KWin's fake-input protocol (`core/input.c`). Direct touch also
-  appears as an evdev touchscreen (`core/evdev.c`, served on
-  `$XDG_RUNTIME_DIR/chameleon-evdev`); while a program such as KWin's
-  libinput reads it, touches go there instead of to fake input.
+- Input: direct touch, hardware keyboards (by Linux key code, so the
+  desktop's keyboard layout applies) and the mouse (relative: the app
+  captures it with Android's pointer capture, as games do) appear as evdev
+  devices (`core/evdev.c`, served on
+  `$XDG_RUNTIME_DIR/chameleon-evdev`). While a program such as KWin's
+  libinput reads a device, its input goes there; otherwise, and for trackpad
+  mode, the soft keyboard and a mouse not captured yet, input goes through
+  KWin's fake-input protocol
+  (`core/input.c`). Many phones report the right mouse button as Back: a
+  Back key from a mouse is taken as the right button (so a real side Back
+  button is one too). Some also turn the middle button into Home, which no
+  app receives. While the mouse is captured, a touchpad is captured with it
+  and not used yet.
 - udev: `libchameleon_udev.so`, preloaded into KWin, is the device manager:
   every udev monitor is Chameleon's own, since an Android app can't open the
   kernel's uevent socket (`udev/udev.c`), enumerations list Chameleon's input
@@ -98,8 +106,9 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one;
 - the input path against a real libwayland-server fake-input global;
-- the evdev touchscreen seen by the system's real libinput through
-  `libchameleon_udev.so`: listing, nodes, multitouch (`evdev_test`);
+- the evdev touchscreen, keyboard and mouse seen by the system's real
+  libinput through `libchameleon_udev.so`: listing, nodes, multitouch, keys,
+  relative motion, buttons, wheel (`evdev_test`);
 - the screen following the app's window and refresh rate, against a
   stand-in for KWin's output management (`output_test`);
 - udev monitors and libinput's udev backend starting on them, with the

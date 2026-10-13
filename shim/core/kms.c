@@ -562,6 +562,13 @@ static uint32_t mode_mhz(const struct drm_mode_modeinfo *m)
     return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : g_mode_mhz;
 }
 
+void kms_physical_size(uint32_t *mm_width, uint32_t *mm_height)
+{
+    kms_init_once();
+    *mm_width = g_mm_width;
+    *mm_height = g_mm_height;
+}
+
 void kms_mode_size(uint32_t *width, uint32_t *height)
 {
     pthread_mutex_lock(&g_lock);
