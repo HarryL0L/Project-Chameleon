@@ -2,7 +2,8 @@
 /*
  * libchameleon_udev.so against the system's real libudev and libinput:
  * udev monitors are Chameleon's own (KWin's GpuManager uses one
- * unchecked), and libinput's udev backend starts on them.
+ * unchecked), and libinput's udev backend starts on them. Subsystems other
+ * than "input" are the real system's.
  * Run with LD_PRELOAD=libchameleon_udev.so.
  */
 #include <errno.h>
@@ -59,6 +60,29 @@ int main(void)
     CHECK(fcntl(fd, F_GETFD) != -1, "still open after unref with a ref left");
     udev_monitor_unref(m);
     CHECK(fcntl(fd, F_GETFD) == -1, "closed after the last unref");
+
+    printf("udev enumerate\n");
+    struct udev_enumerate *e = udev_enumerate_new(udev);
+    CHECK(e && udev_enumerate_add_match_subsystem(e, "mem") == 0 && udev_enumerate_scan_devices(e) == 0,
+          "enumerate subsystem mem");
+    int found = 0;
+    struct udev_list_entry *entry;
+    udev_list_entry_foreach(entry, e ? udev_enumerate_get_list_entry(e) : NULL)
+        found |= strcmp(udev_list_entry_get_name(entry), "/sys/devices/virtual/mem/null") == 0;
+    CHECK(found, "the real /dev/null's device is listed");
+    udev_enumerate_unref(e);
+    e = udev_enumerate_new(udev);
+    CHECK(e && udev_enumerate_scan_devices(e) == 0, "enumerate everything");
+    int all = 0, input = 0;
+    udev_list_entry_foreach(entry, e ? udev_enumerate_get_list_entry(e) : NULL) {
+        struct udev_device *d = udev_device_new_from_syspath(udev, udev_list_entry_get_name(entry));
+        const char *subsystem = d ? udev_device_get_subsystem(d) : NULL;
+        all++;
+        input += subsystem && strcmp(subsystem, "input") == 0;
+        udev_device_unref(d);
+    }
+    CHECK(all > 0 && input == 0, "real devices, none of the real input ones (%d listed, %d input)", all, input);
+    udev_enumerate_unref(e);
 
     printf("libinput's udev backend\n");
     struct libinput *li = libinput_udev_create_context(&iface, NULL, udev);

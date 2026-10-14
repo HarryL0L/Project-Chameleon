@@ -8,10 +8,12 @@
  *  - every udev monitor is Chameleon's own: an eventfd only Chameleon will
  *    signal (nothing does yet). KWin's GpuManager and libinput both need a
  *    working monitor to start at all.
- *  - enumerations list Chameleon's devices only: the input devices KWin's
- *    libchameleon.so serves (common/chameleon_evdev.h), as subsystem
- *    "input" devices eventN with node /dev/input/eventN (evdev.c answers
- *    for those nodes).
+ *  - subsystem "input" is Chameleon's: the input devices KWin's
+ *    libchameleon.so serves (common/chameleon_evdev.h), as devices eventN
+ *    with node /dev/input/eventN (evdev.c answers for those nodes).
+ *    Enumerations list them, followed by the real libudev's devices of
+ *    every other subsystem (power_supply, backlight, ...), so a program
+ *    can run with this library preloaded whatever it looks for.
  *  - devices and property lists that aren't Chameleon's (looked up by a
  *    path of the real system) pass through to the real libudev. Chameleon's
  *    objects start with a magic number to tell them apart.
@@ -357,21 +359,21 @@ EXPORT const char *udev_list_entry_get_value(struct udev_list_entry *entry)
 
 EXPORT struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entry *entry, const char *name)
 {
-    if (is_entry(entry)) {
-        for (struct entry *e = (struct entry *)entry; e; e = e->next)
-            if (name && strcmp(e->name, name) == 0)
-                return (struct udev_list_entry *)e;
+    for (; is_entry(entry); entry = (struct udev_list_entry *)((struct entry *)entry)->next)
+        if (name && strcmp(((struct entry *)entry)->name, name) == 0)
+            return entry;
+    if (!entry)
         return NULL;
-    }
-    NEXT(udev_list_entry_get_by_name);
+    NEXT(udev_list_entry_get_by_name); /* the real entries after Chameleon's */
     return next_udev_list_entry_get_by_name(entry, name);
 }
 
-/* ---- udev_enumerate: Chameleon's devices only ---- */
+/* ---- udev_enumerate: Chameleon's input devices, the real system's others ---- */
 
 struct udev_enumerate {
     int refs;
     struct udev *udev;
+    struct udev_enumerate *real; /* the real libudev's, which never lists "input" */
     const char *subsystem[MAX_FILTERS], *nosubsystem[MAX_FILTERS], *sysname[MAX_FILTERS];
     const char *prop_key[MAX_FILTERS], *prop_value[MAX_FILTERS];
     int nsubsystem, nnosubsystem, nsysname, nprop;
@@ -380,6 +382,22 @@ struct udev_enumerate {
     struct entry entries[CHAM_EVDEV_MAX_DEVICES];
     int n;
 };
+
+EXPORT struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *e);
+EXPORT int udev_enumerate_add_nomatch_subsystem(struct udev_enumerate *e, const char *subsystem);
+
+/* The real libudev's `name`(e->real, ...), or 0 without a real enumerate. */
+#define REAL(name, ...)                                                        \
+    ({                                                                         \
+        NEXT(name);                                                            \
+        e->real && next_##name ? next_##name(e->real, ##__VA_ARGS__) : 0;      \
+    })
+
+/* Chameleon's result, unless the real libudev failed. */
+static int both(int real, int ours)
+{
+    return real < 0 ? real : ours;
+}
 
 static int add_filter(const char **list, int *n, const char *value)
 {
@@ -394,9 +412,17 @@ EXPORT struct udev_enumerate *udev_enumerate_new(struct udev *udev)
     if (!udev)
         return NULL;
     struct udev_enumerate *e = calloc(1, sizeof *e);
-    if (e) {
-        e->refs = 1;
-        e->udev = udev;
+    if (!e)
+        return NULL;
+    e->refs = 1;
+    e->udev = udev;
+    NEXT(udev_enumerate_new);
+    e->real = next_udev_enumerate_new ? next_udev_enumerate_new(udev) : NULL;
+    /* The system's own input devices: their nodes aren't Chameleon's. */
+    if (REAL(udev_enumerate_add_nomatch_subsystem, "input") < 0) {
+        NEXT(udev_enumerate_unref);
+        next_udev_enumerate_unref(e->real);
+        e->real = NULL;
     }
     return e;
 }
@@ -411,6 +437,7 @@ EXPORT struct udev_enumerate *udev_enumerate_ref(struct udev_enumerate *e)
 EXPORT struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *e)
 {
     if (e && --e->refs == 0) {
+        REAL(udev_enumerate_unref);
         for (int i = 0; i < MAX_FILTERS; i++) {
             free((void *)e->subsystem[i]);
             free((void *)e->nosubsystem[i]);
@@ -430,49 +457,88 @@ EXPORT struct udev *udev_enumerate_get_udev(struct udev_enumerate *e)
 
 EXPORT int udev_enumerate_add_match_subsystem(struct udev_enumerate *e, const char *subsystem)
 {
-    return e ? add_filter(e->subsystem, &e->nsubsystem, subsystem) : -EINVAL;
+    if (!e)
+        return -EINVAL;
+    return both(REAL(udev_enumerate_add_match_subsystem, subsystem), add_filter(e->subsystem, &e->nsubsystem, subsystem));
 }
 
 EXPORT int udev_enumerate_add_nomatch_subsystem(struct udev_enumerate *e, const char *subsystem)
 {
-    return e ? add_filter(e->nosubsystem, &e->nnosubsystem, subsystem) : -EINVAL;
+    if (!e)
+        return -EINVAL;
+    return both(REAL(udev_enumerate_add_nomatch_subsystem, subsystem),
+                add_filter(e->nosubsystem, &e->nnosubsystem, subsystem));
 }
 
 EXPORT int udev_enumerate_add_match_sysname(struct udev_enumerate *e, const char *sysname)
 {
-    return e ? add_filter(e->sysname, &e->nsysname, sysname) : -EINVAL;
+    if (!e)
+        return -EINVAL;
+    return both(REAL(udev_enumerate_add_match_sysname, sysname), add_filter(e->sysname, &e->nsysname, sysname));
 }
 
 EXPORT int udev_enumerate_add_match_property(struct udev_enumerate *e, const char *key, const char *value)
 {
-    if (!e || !key || add_filter(e->prop_key, &e->nprop, key) != 0)
+    if (!e || !key)
         return -EINVAL;
+    int r = REAL(udev_enumerate_add_match_property, key, value);
+    if (r < 0 || add_filter(e->prop_key, &e->nprop, key) != 0)
+        return r < 0 ? r : -EINVAL;
     e->prop_value[e->nprop - 1] = value ? strdup(value) : NULL;
     return 0;
 }
 
 EXPORT int udev_enumerate_add_match_is_initialized(struct udev_enumerate *e)
 {
-    return e ? 0 : -EINVAL; /* all of Chameleon's devices are */
+    if (!e)
+        return -EINVAL;
+    return both(REAL(udev_enumerate_add_match_is_initialized), 0); /* all of Chameleon's devices are */
 }
 
-#define UNUSED __attribute__((unused))
-#define UNSUPPORTED_FILTER(name, ...)                     \
-    EXPORT int name(struct udev_enumerate *e, __VA_ARGS__) \
-    {                                                      \
-        if (!e)                                            \
-            return -EINVAL;                                \
-        e->unsupported = 1;                                \
-        return 0;                                          \
+EXPORT int udev_enumerate_add_match_sysattr(struct udev_enumerate *e, const char *sysattr, const char *value)
+{
+    if (!e)
+        return -EINVAL;
+    e->unsupported = 1;
+    return both(REAL(udev_enumerate_add_match_sysattr, sysattr, value), 0);
+}
+
+EXPORT int udev_enumerate_add_nomatch_sysattr(struct udev_enumerate *e, const char *sysattr, const char *value)
+{
+    if (!e)
+        return -EINVAL;
+    e->unsupported = 1;
+    return both(REAL(udev_enumerate_add_nomatch_sysattr, sysattr, value), 0);
+}
+
+EXPORT int udev_enumerate_add_match_tag(struct udev_enumerate *e, const char *tag)
+{
+    if (!e)
+        return -EINVAL;
+    e->unsupported = 1;
+    return both(REAL(udev_enumerate_add_match_tag, tag), 0);
+}
+
+EXPORT int udev_enumerate_add_match_parent(struct udev_enumerate *e, struct udev_device *parent)
+{
+    if (!e)
+        return -EINVAL;
+    e->unsupported = 1;
+    if (is_dev(parent)) { /* Chameleon's devices have no children, real ones included */
+        REAL(udev_enumerate_unref);
+        e->real = NULL;
+        return 0;
     }
-UNSUPPORTED_FILTER(udev_enumerate_add_match_sysattr, const char *sysattr UNUSED, const char *value UNUSED)
-UNSUPPORTED_FILTER(udev_enumerate_add_nomatch_sysattr, const char *sysattr UNUSED, const char *value UNUSED)
-UNSUPPORTED_FILTER(udev_enumerate_add_match_tag, const char *tag UNUSED)
-UNSUPPORTED_FILTER(udev_enumerate_add_match_parent, struct udev_device *parent UNUSED)
+    return both(REAL(udev_enumerate_add_match_parent, parent), 0);
+}
 
 EXPORT int udev_enumerate_add_syspath(struct udev_enumerate *e, const char *syspath)
 {
-    if (!e || index_of_syspath(syspath) < 0 || e->n >= CHAM_EVDEV_MAX_DEVICES)
+    if (!e)
+        return -EINVAL;
+    if (index_of_syspath(syspath) < 0)
+        return e->real ? REAL(udev_enumerate_add_syspath, syspath) : -EINVAL;
+    if (e->n >= CHAM_EVDEV_MAX_DEVICES)
         return -EINVAL;
     snprintf(e->paths[e->n], sizeof e->paths[e->n], "%s", syspath);
     e->entries[e->n] = (struct entry){MAGIC_ENTRY, e->paths[e->n], NULL, NULL};
@@ -515,7 +581,7 @@ EXPORT int udev_enumerate_scan_devices(struct udev_enumerate *e)
         e->n++;
     }
     link_entries(e->entries, e->n);
-    return 0;
+    return both(REAL(udev_enumerate_scan_devices), 0);
 }
 
 EXPORT int udev_enumerate_scan_subsystems(struct udev_enumerate *e)
@@ -523,12 +589,19 @@ EXPORT int udev_enumerate_scan_subsystems(struct udev_enumerate *e)
     if (!e)
         return -EINVAL;
     e->n = 0;
-    return 0;
+    return REAL(udev_enumerate_scan_subsystems);
 }
 
+/* Chameleon's entries, then the real ones (udev_list_entry_get_next tells them apart). */
 EXPORT struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumerate *e)
 {
-    return e && e->n ? (struct udev_list_entry *)e->entries : NULL;
+    if (!e)
+        return NULL;
+    struct udev_list_entry *real = REAL(udev_enumerate_get_list_entry);
+    if (!e->n)
+        return real;
+    e->entries[e->n - 1].next = (struct entry *)real;
+    return (struct udev_list_entry *)e->entries;
 }
 
 /* ---- udev_monitor: Chameleon's events only ---- */

@@ -108,6 +108,23 @@ int main(void)
     if (d)
         udev_device_unref(d);
     udev_enumerate_unref(e);
+    e = udev_enumerate_new(udev);
+    udev_enumerate_add_match_subsystem(e, "input");
+    udev_enumerate_add_match_subsystem(e, "mem");
+    udev_enumerate_scan_devices(e);
+    first = udev_enumerate_get_list_entry(e);
+    int ours = 0, real = 0;
+    struct udev_list_entry *entry;
+    udev_list_entry_foreach(entry, first) {
+        const char *name = udev_list_entry_get_name(entry);
+        if (strncmp(name, "/sys/devices/virtual/input/", 27) == 0)
+            ours += !real; /* all before the real ones */
+        else
+            real++;
+    }
+    CHECK(ours == 4 && real > 0 && udev_list_entry_get_by_name(first, "/sys/devices/virtual/input/input3/event3"),
+          "with another subsystem: Chameleon's devices, then the real ones (%d, %d)", ours, real);
+    udev_enumerate_unref(e);
 
     printf("libinput\n");
     struct libinput *li = libinput_udev_create_context(&iface, NULL, udev);

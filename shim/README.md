@@ -73,13 +73,15 @@ screen keeps its first size instead of following the app's window).
   button is one too). Some also turn the middle button into Home, which no
   app receives. While the mouse is captured, a touchpad is captured with it
   and not used yet.
-- udev: `libchameleon_udev.so`, preloaded into KWin, is the device manager:
+- udev: `libchameleon_udev.so`, preloaded into the whole session by
+  `chameleon`, is the device manager:
   every udev monitor is Chameleon's own, since an Android app can't open the
-  kernel's uevent socket (`udev/udev.c`), enumerations list Chameleon's input
-  devices, and their `/dev/input/eventN` nodes open, stat and answer evdev
-  ioctls like the kernel's (`udev/evdev.c`). Preloaded into any other
-  program with the same `XDG_RUNTIME_DIR` (`libinput debug-events`), it
-  shows the same devices while KWin runs.
+  kernel's uevent socket (`udev/udev.c`), subsystem `input` is Chameleon's
+  input devices, and their `/dev/input/eventN` nodes open, stat and answer
+  evdev ioctls like the kernel's (`udev/evdev.c`). Enumerations of other
+  subsystems (`power_supply`, `backlight`, ...) pass through to the real
+  libudev, without its monitor events. Any program in the session
+  (`libinput debug-events`) sees the same devices while KWin runs.
 - KWin's screen follows the app's window (rotation, keyboard) and the
   display's refresh rate (battery saver): the shim
   switches KWin's mode over `kde_output_management_v2`, adding a custom mode
@@ -112,8 +114,9 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   (`evdev_test`);
 - the screen following the app's window and refresh rate, against a
   stand-in for KWin's output management (`output_test`);
-- udev monitors and libinput's udev backend starting on them, with the
-  system's real libudev and libinput (`udev_test`);
+- udev monitors and libinput's udev backend starting on them, and other
+  subsystems passing through, with the system's real libudev and libinput
+  (`udev_test`);
 - the GLSL fix-ups (`glsl_fix_test`);
 - the EGL vendor through the system's real glvnd, with a stand-in for
   Android's driver, both as any program and as KWin;
