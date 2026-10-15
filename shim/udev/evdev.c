@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "internal.h"
@@ -248,7 +249,7 @@ EXPORT int fstat64(int fd, struct stat64 *st)
 
 /* ---- evdev ioctls ---- */
 
-/* Copies up to `size` bytes of a bitmap or string, as the kernel does. */
+/* Copies up to `size` bytes of a string, as the kernel does. */
 static int copy_out(void *arg, unsigned size, const void *src, unsigned len)
 {
     unsigned n = len < size ? len : size;
@@ -256,24 +257,45 @@ static int copy_out(void *arg, unsigned size, const void *src, unsigned len)
     return (int)n;
 }
 
+/* A bitmap of codes up to `max`, as the kernel copies it: whole longs (the
+ * bitmap's own size), at most `size` bytes; returns the bytes copied. */
+static int bits_out(void *arg, unsigned size, const uint8_t *bits, unsigned bits_len, unsigned max)
+{
+    unsigned char buf[CHAM_BITS(KEY_CNT) + sizeof(long)] = {0};
+    unsigned len = (max + 8 * sizeof(long) - 1) / (8 * sizeof(long)) * sizeof(long); /* BITS_TO_LONGS */
+    if (bits)
+        memcpy(buf, bits, bits_len < len ? bits_len : len);
+    return copy_out(arg, size, buf, len);
+}
+
+static int has_abs(const struct cham_evdev_info *d)
+{
+    return cham_bit_test(d->ev, EV_ABS);
+}
+
 static int evdev_ioctl(const struct cham_evdev_info *d, unsigned req, void *arg)
 {
-    static const uint8_t none[CHAM_BITS(KEY_CNT)];
     unsigned nr = _IOC_NR(req), size = _IOC_SIZE(req);
     if (_IOC_DIR(req) == _IOC_READ) {
-        if (nr >= 0x20 && nr < 0x20 + EV_CNT) { /* EVIOCGBIT */
+        if (nr >= 0x20 && nr < 0x20 + EV_CNT) { /* EVIOCGBIT: the types evdev knows */
             switch (nr - 0x20) {
-            case 0: return copy_out(arg, size, d->ev, sizeof d->ev);
-            case EV_KEY: return copy_out(arg, size, d->key, sizeof d->key);
-            case EV_REL: return copy_out(arg, size, d->rel, sizeof d->rel);
-            case EV_ABS: return copy_out(arg, size, d->abs, sizeof d->abs);
-            default: return copy_out(arg, size, none, size < sizeof none ? size : sizeof none);
+            case 0: return bits_out(arg, size, d->ev, sizeof d->ev, EV_MAX);
+            case EV_KEY: return bits_out(arg, size, d->key, sizeof d->key, KEY_MAX);
+            case EV_REL: return bits_out(arg, size, d->rel, sizeof d->rel, REL_MAX);
+            case EV_ABS: return bits_out(arg, size, d->abs, sizeof d->abs, ABS_MAX);
+            case EV_MSC: return bits_out(arg, size, NULL, 0, MSC_MAX);
+            case EV_LED: return bits_out(arg, size, NULL, 0, LED_MAX);
+            case EV_SND: return bits_out(arg, size, NULL, 0, SND_MAX);
+            case EV_FF: return bits_out(arg, size, NULL, 0, FF_MAX);
+            case EV_SW: return bits_out(arg, size, NULL, 0, SW_MAX);
             }
+            return -EINVAL;
         }
-        if (nr >= 0x40 && nr < 0x40 + ABS_CNT) { /* EVIOCGABS */
-            if (size < sizeof(struct input_absinfo))
+        if (nr >= 0x40 && nr < 0x40 + ABS_CNT) { /* EVIOCGABS: zeros for an axis it lacks */
+            if (!has_abs(d))
                 return -EINVAL;
-            memcpy(arg, &d->absinfo[nr - 0x40], sizeof(struct input_absinfo));
+            memcpy(arg, &d->absinfo[nr - 0x40],
+                   size < sizeof(struct input_absinfo) ? size : sizeof(struct input_absinfo));
             return 0;
         }
         switch (nr) {
@@ -289,22 +311,28 @@ static int evdev_ioctl(const struct cham_evdev_info *d, unsigned req, void *arg)
         case _IOC_NR(EVIOCGUNIQ(0)):
             return -ENOENT;
         case _IOC_NR(EVIOCGPROP(0)):
-            return copy_out(arg, size, d->prop, sizeof d->prop);
+            return bits_out(arg, size, d->prop, sizeof d->prop, INPUT_PROP_MAX);
         case _IOC_NR(EVIOCGMTSLOTS(0)): { /* nothing touching: every slot free */
-            if (size < sizeof(uint32_t))
+            uint32_t code = size >= sizeof code ? *(uint32_t *)arg : 0;
+            if (size < sizeof code || !cham_bit_test(d->abs, ABS_MT_SLOT) || code < ABS_MT_TOUCH_MAJOR ||
+                code > ABS_MT_TOOL_Y) /* the MT axes */
                 return -EINVAL;
-            uint32_t code = *(uint32_t *)arg;
             int32_t *values = (int32_t *)arg + 1;
-            for (unsigned i = 0; i < (size - sizeof code) / sizeof *values; i++)
+            unsigned slots = (unsigned)d->absinfo[ABS_MT_SLOT].maximum + 1, n = (size - sizeof code) / sizeof *values;
+            for (unsigned i = 0; i < n && i < slots; i++)
                 values[i] = code == ABS_MT_TRACKING_ID ? -1 : 0;
             return 0;
         }
         case _IOC_NR(EVIOCGKEY(0)): /* nothing held */
+            return bits_out(arg, size, NULL, 0, KEY_MAX);
         case _IOC_NR(EVIOCGLED(0)):
+            return bits_out(arg, size, NULL, 0, LED_MAX);
         case _IOC_NR(EVIOCGSND(0)):
+            return bits_out(arg, size, NULL, 0, SND_MAX);
         case _IOC_NR(EVIOCGSW(0)):
-            memset(arg, 0, size);
-            return (int)size;
+            return bits_out(arg, size, NULL, 0, SW_MAX);
+        case _IOC_NR(EVIOCGREP):
+            return -ENOSYS; /* no key repeat (EV_REP) */
         case _IOC_NR(EVIOCGEFFECTS):
             *(int *)arg = 0;
             return 0;
@@ -313,12 +341,15 @@ static int evdev_ioctl(const struct cham_evdev_info *d, unsigned req, void *arg)
     }
     if (_IOC_DIR(req) == _IOC_WRITE) {
         if (nr >= 0xc0 && nr < 0xc0 + ABS_CNT) /* EVIOCSABS: the axes are fixed */
-            return 0;
+            return !has_abs(d) || nr - 0xc0 == ABS_MT_SLOT ? -EINVAL : 0;
         switch (nr) {
         case _IOC_NR(EVIOCGRAB):
         case _IOC_NR(EVIOCREVOKE):
-        case _IOC_NR(EVIOCSCLOCKID): /* timestamps are CLOCK_MONOTONIC, libinput's choice */
             return 0;
+        case _IOC_NR(EVIOCSCLOCKID): { /* timestamps are CLOCK_MONOTONIC, libinput's choice */
+            int clk = *(const int *)arg;
+            return clk == CLOCK_REALTIME || clk == CLOCK_MONOTONIC || clk == CLOCK_BOOTTIME ? 0 : -EINVAL;
+        }
         }
     }
     return -EINVAL;
