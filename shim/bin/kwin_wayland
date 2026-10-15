@@ -79,8 +79,6 @@ if [ -n "$socket" ]; then
     esac
 fi
 
-export CHAMELEON_DRM_PATH=${CHAMELEON_DRM_PATH:-$PREFIX/tmp/chameleon-card0}
-export KWIN_DRM_DEVICES=$CHAMELEON_DRM_PATH  # a name only; the shim answers for it
 export KWIN_COMPOSE=O2ES                     # Android EGL is GLES-only
 export KWIN_DISABLE_VULKAN=1
 export KWIN_DRM_USE_MODIFIERS=0              # gralloc picks buffer layouts

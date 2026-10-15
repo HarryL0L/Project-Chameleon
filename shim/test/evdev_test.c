@@ -95,17 +95,36 @@ int main(void)
 
     printf("udev\n");
     struct udev *udev = udev_new();
+    /* The card, as a compositor looks for GPUs. */
     struct udev_enumerate *e = udev_enumerate_new(udev);
-    udev_enumerate_add_match_subsystem(e, "input");
-    udev_enumerate_add_match_property(e, "ID_INPUT_TOUCHSCREEN", "1");
+    udev_enumerate_add_match_subsystem(e, "drm");
+    udev_enumerate_add_match_sysname(e, "card[0-9]");
     udev_enumerate_scan_devices(e);
     struct udev_list_entry *first = udev_enumerate_get_list_entry(e);
     const char *syspath = first ? udev_list_entry_get_name(first) : NULL;
-    CHECK(syspath && !udev_list_entry_get_next(first), "one touchscreen listed (%s)", syspath ? syspath : "none");
+    CHECK(syspath && !udev_list_entry_get_next(first), "one card listed (%s)", syspath ? syspath : "none");
     struct udev_device *d = syspath ? udev_device_new_from_syspath(udev, syspath) : NULL;
     const char *node = d ? udev_device_get_devnode(d) : NULL;
-    CHECK(node && strcmp(node, "/dev/input/event0") == 0, "its node is /dev/input/event0");
     struct stat st;
+    CHECK(node && strcmp(node, dev_path) == 0 && stat(node, &st) == 0 && S_ISCHR(st.st_mode) &&
+              st.st_rdev == udev_device_get_devnum(d),
+          "its node is the card the shim answers for, with the same number");
+    CHECK(d && udev_device_has_tag(d, "master-of-seat") && strcmp(udev_device_get_devtype(d), "drm_minor") == 0,
+          "a drm_minor tagged master-of-seat");
+    if (d)
+        udev_device_unref(d);
+    udev_enumerate_unref(e);
+
+    e = udev_enumerate_new(udev);
+    udev_enumerate_add_match_subsystem(e, "input");
+    udev_enumerate_add_match_property(e, "ID_INPUT_TOUCHSCREEN", "1");
+    udev_enumerate_scan_devices(e);
+    first = udev_enumerate_get_list_entry(e);
+    syspath = first ? udev_list_entry_get_name(first) : NULL;
+    CHECK(syspath && !udev_list_entry_get_next(first), "one touchscreen listed (%s)", syspath ? syspath : "none");
+    d = syspath ? udev_device_new_from_syspath(udev, syspath) : NULL;
+    node = d ? udev_device_get_devnode(d) : NULL;
+    CHECK(node && strcmp(node, "/dev/input/event0") == 0, "its node is /dev/input/event0");
     CHECK(node && stat(node, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == udev_device_get_devnum(d),
           "stat: a character device with udev's number");
     int nfd = node ? open(node, O_RDONLY | O_NONBLOCK) : -1;

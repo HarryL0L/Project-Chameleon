@@ -226,6 +226,26 @@ int main(void)
     CHECK(drmModeGetConnectorTypeName(conn->connector_type) &&
               strcmp(drmModeGetConnectorTypeName(conn->connector_type), "DSI") == 0,
           "connector name DSI-%u", conn->connector_type_id);
+    /* An EDID block a compositor can parse: header, checksum, name, timing. */
+    uint32_t p_edid = prop_id(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR, "EDID", NULL);
+    drmModeObjectProperties *cprops = drmModeObjectGetProperties(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+    uint64_t edid_id = 0;
+    for (uint32_t i = 0; cprops && i < cprops->count_props; i++)
+        if (cprops->props[i] == p_edid)
+            edid_id = cprops->prop_values[i];
+    drmModeFreeObjectProperties(cprops);
+    drmModePropertyBlobRes *edid = edid_id ? drmModeGetPropertyBlob(fd, (uint32_t)edid_id) : NULL;
+    const uint8_t *eb = edid ? edid->data : NULL;
+    uint8_t sum = 0;
+    for (int i = 0; eb && i < 128; i++)
+        sum = (uint8_t)(sum + eb[i]);
+    CHECK(edid && edid->length == 128 && eb[0] == 0 && eb[1] == 0xff && eb[7] == 0 && sum == 0,
+          "EDID: a valid 128-byte block");
+    CHECK(eb && eb[75] == 0xfc && memcmp(eb + 77, "Chameleon\n", 10) == 0, "EDID: named Chameleon");
+    CHECK(eb && (eb[56] | (eb[58] >> 4) << 8) == mode.hdisplay && (eb[59] | (eb[61] >> 4) << 8) == mode.vdisplay &&
+              (uint32_t)(eb[54] | eb[55] << 8) == mode.clock / 10,
+          "EDID: the mode is its preferred timing");
+    drmModeFreePropertyBlob(edid);
     drmModeFreeConnector(conn);
     drmModeCrtc *crtc = drmModeGetCrtc(fd, crtc_id);
     CHECK(crtc && !crtc->mode_valid, "crtc initially off");

@@ -9,7 +9,9 @@
  * the app's FRAME_DONE becomes the page-flip event.
  *
  * The connector's one mode is the app's surface size and refresh rate when
- * the device is first opened. KWin may set any other mode (output.c adds
+ * the device is first opened, and its EDID describes that panel (a
+ * standard EDID 1.4 block: name, physical size, the mode as its preferred
+ * timing), so the compositor identifies it like any monitor. KWin may set any other mode (output.c adds
  * custom modes to follow the app's window as it rotates or resizes); the app
  * scales or crops whatever size arrives.
  */
@@ -29,11 +31,13 @@
 #define ID_ENCODER 32
 #define ID_CRTC 33
 #define ID_PLANE 34
+#define ID_EDID_BLOB 35
 
 enum {
     P_CONN_CRTC_ID = 100,
     P_CONN_DPMS,
     P_CONN_NON_DESKTOP,
+    P_CONN_EDID,
     P_CRTC_ACTIVE,
     P_CRTC_MODE_ID,
     P_PLANE_TYPE,
@@ -71,6 +75,7 @@ static const struct propdef k_props[P_END - 100] = {
     [P_CONN_CRTC_ID - 100] = {"CRTC_ID", DRM_MODE_PROP_OBJECT | ATOMIC, {DRM_MODE_OBJECT_CRTC}, 1},
     [P_CONN_DPMS - 100] = {"DPMS", DRM_MODE_PROP_ENUM, {0}, 0, k_dpms, 4},
     [P_CONN_NON_DESKTOP - 100] = {"non-desktop", DRM_MODE_PROP_IMMUTABLE | RANGE(0, 1)},
+    [P_CONN_EDID - 100] = {"EDID", DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE, {0}, 0},
     [P_CRTC_ACTIVE - 100] = {"ACTIVE", ATOMIC | RANGE(0, 1)},
     [P_CRTC_MODE_ID - 100] = {"MODE_ID", DRM_MODE_PROP_BLOB | ATOMIC, {0}, 0},
     [P_PLANE_TYPE - 100] = {"type", DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE, {0}, 0, k_plane_type, 3},
@@ -87,7 +92,7 @@ static const struct propdef k_props[P_END - 100] = {
     [P_IN_FENCE_FD - 100] = {"IN_FENCE_FD", ATOMIC | SRANGE(-1, INT32_MAX)},
 };
 
-static const uint32_t k_conn_props[] = {P_CONN_CRTC_ID, P_CONN_DPMS, P_CONN_NON_DESKTOP};
+static const uint32_t k_conn_props[] = {P_CONN_CRTC_ID, P_CONN_DPMS, P_CONN_NON_DESKTOP, P_CONN_EDID};
 static const uint32_t k_crtc_props[] = {P_CRTC_ACTIVE, P_CRTC_MODE_ID};
 static const uint32_t k_plane_props[] = {P_PLANE_TYPE, P_PLANE_FB_ID, P_PLANE_CRTC_ID, P_SRC_X, P_SRC_Y,
                                          P_SRC_W, P_SRC_H, P_CRTC_X, P_CRTC_Y, P_CRTC_W, P_CRTC_H,
@@ -131,6 +136,8 @@ static uint64_t g_frame;
 
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
+static uint8_t g_edid[128];
+static struct blob g_edid_blob = {ID_EDID_BLOB, sizeof g_edid, g_edid, NULL};
 static uint32_t g_screen_width, g_screen_height, g_mm_width, g_mm_height;
 
 /* ---- setup ---- */
@@ -153,6 +160,60 @@ static void make_mode(uint32_t w, uint32_t h, uint32_t mhz)
     m->type = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
     snprintf(m->name, sizeof m->name, "%ux%u", w, h);
     g_mode_mhz = mhz;
+}
+
+/* An EDID 1.4 base block for the panel: vendor "CML" (not a registered PNP
+ * ID), name "Chameleon", physical size, sRGB, and g_mode as the preferred
+ * detailed timing. */
+static void make_edid(uint32_t mm_w, uint32_t mm_h)
+{
+    static const uint8_t header[] = {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
+    static const uint8_t srgb[] = {0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54};
+    const struct drm_mode_modeinfo *m = &g_mode;
+    uint8_t *e = g_edid;
+    memset(e, 0, sizeof g_edid);
+    memcpy(e, header, sizeof header);
+    uint16_t vendor = (uint16_t)(('C' - '@') << 10 | ('M' - '@') << 5 | ('L' - '@'));
+    e[8] = (uint8_t)(vendor >> 8);
+    e[9] = (uint8_t)vendor;
+    e[10] = 1;                /* product code */
+    e[17] = 2026 - 1990;      /* model year */
+    e[18] = 1, e[19] = 4;     /* EDID 1.4 */
+    e[20] = 0x80;             /* digital input */
+    e[21] = (uint8_t)(mm_w + 5 < 2550 ? (mm_w + 5) / 10 : 255); /* cm */
+    e[22] = (uint8_t)(mm_h + 5 < 2550 ? (mm_h + 5) / 10 : 255);
+    e[23] = 120;              /* gamma 2.2 */
+    e[24] = 0x06;             /* sRGB, RGB 4:4:4, preferred timing is native */
+    memcpy(e + 25, srgb, sizeof srgb);
+    memset(e + 38, 0x01, 16); /* no standard timings */
+
+    uint8_t *t = e + 54;      /* detailed timing: the mode */
+    uint32_t clock = m->clock / 10 < 0xffff ? m->clock / 10 : 0xffff; /* 10 kHz */
+    uint32_t hblank = m->htotal - m->hdisplay, vblank = m->vtotal - m->vdisplay;
+    uint32_t hso = m->hsync_start - m->hdisplay, hsw = m->hsync_end - m->hsync_start;
+    uint32_t vso = m->vsync_start - m->vdisplay, vsw = m->vsync_end - m->vsync_start;
+    t[0] = (uint8_t)clock, t[1] = (uint8_t)(clock >> 8);
+    t[2] = (uint8_t)m->hdisplay, t[3] = (uint8_t)hblank;
+    t[4] = (uint8_t)((m->hdisplay >> 8) << 4 | (hblank >> 8));
+    t[5] = (uint8_t)m->vdisplay, t[6] = (uint8_t)vblank;
+    t[7] = (uint8_t)((m->vdisplay >> 8) << 4 | (vblank >> 8));
+    t[8] = (uint8_t)hso, t[9] = (uint8_t)hsw;
+    t[10] = (uint8_t)((vso & 15) << 4 | (vsw & 15));
+    t[11] = (uint8_t)((hso >> 8) << 6 | (hsw >> 8) << 4 | (vso >> 4) << 2 | (vsw >> 4));
+    t[12] = (uint8_t)mm_w, t[13] = (uint8_t)mm_h;
+    t[14] = (uint8_t)((mm_w >> 8) << 4 | (mm_h >> 8));
+    t[17] = 0x1e;             /* digital separate sync, +hsync +vsync */
+
+    static const char name[13] = "Chameleon\n   ";
+    uint8_t *d = e + 72;      /* display name */
+    d[3] = 0xfc;
+    memcpy(d + 5, name, sizeof name);
+    e[90 + 3] = e[108 + 3] = 0x10; /* unused descriptors */
+
+    uint8_t sum = 0;
+    for (int i = 0; i < 127; i++)
+        sum = (uint8_t)(sum + e[i]);
+    e[127] = (uint8_t)-sum;
 }
 
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
@@ -185,6 +246,7 @@ static void kms_init(void)
     g_screen_height = h;
     g_mm_width = (uint32_t)(w * 25.4 / dpi + 0.5);
     g_mm_height = (uint32_t)(h * 25.4 / dpi + 0.5);
+    make_edid(g_mm_width, g_mm_height);
 }
 
 void kms_init_once(void)
@@ -219,6 +281,7 @@ static uint64_t prop_value(uint32_t prop)
     case P_CONN_CRTC_ID: return s->conn_crtc;
     case P_CONN_DPMS: return s->dpms;
     case P_CONN_NON_DESKTOP: return 0;
+    case P_CONN_EDID: return ID_EDID_BLOB;
     case P_CRTC_ACTIVE: return s->active;
     case P_CRTC_MODE_ID: return s->mode_blob;
     case P_PLANE_TYPE: return 1; /* Primary */
@@ -284,12 +347,12 @@ static int get_connector(struct drm_mode_get_connector *c)
     if (c->connector_id != ID_CONNECTOR)
         return -ENOENT;
     static const uint32_t encs[] = {ID_ENCODER};
-    uint64_t values[3];
-    for (int i = 0; i < 3; i++)
+    enum { n = sizeof k_conn_props / sizeof k_conn_props[0] };
+    uint64_t values[n];
+    for (int i = 0; i < n; i++)
         values[i] = prop_value(k_conn_props[i]);
     COPY_OUT(c->modes_ptr, c->count_modes, &g_mode, 1u);
     COPY_OUT(c->encoders_ptr, c->count_encoders, encs, 1u);
-    uint32_t n = 3;
     if (c->props_ptr && c->prop_values_ptr && c->count_props >= n) {
         memcpy(U2P(c->props_ptr), k_conn_props, sizeof k_conn_props);
         memcpy(U2P(c->prop_values_ptr), values, sizeof values);
@@ -404,7 +467,7 @@ static int get_property(struct drm_mode_get_property *p)
 
 static int get_blob(struct drm_mode_get_blob *g)
 {
-    struct blob *b = blob_find(g->blob_id);
+    struct blob *b = g->blob_id == ID_EDID_BLOB ? &g_edid_blob : blob_find(g->blob_id);
     if (!b)
         return -ENOENT;
     if (g->data && g->length >= b->length)

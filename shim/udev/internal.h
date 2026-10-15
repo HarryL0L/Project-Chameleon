@@ -6,6 +6,7 @@
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 
+#include "../../common/chameleon_drm.h"
 #include "../../common/chameleon_evdev.h"
 
 #define EXPORT __attribute__((visibility("default")))

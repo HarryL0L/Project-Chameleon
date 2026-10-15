@@ -8,12 +8,14 @@
  *  - every udev monitor is Chameleon's own: an eventfd only Chameleon will
  *    signal (nothing does yet). KWin's GpuManager and libinput both need a
  *    working monitor to start at all.
- *  - subsystem "input" is Chameleon's: the input devices KWin's
+ *  - subsystems "input" and "drm" are Chameleon's: the input devices KWin's
  *    libchameleon.so serves (common/chameleon_evdev.h), as devices eventN
- *    with node /dev/input/eventN (evdev.c answers for those nodes).
- *    Enumerations list them, followed by the real libudev's devices of
- *    every other subsystem (power_supply, backlight, ...), so a program
- *    can run with this library preloaded whatever it looks for.
+ *    with node /dev/input/eventN (evdev.c answers for those nodes), and
+ *    the fake KMS card it answers for in KWin's process, card0, with its
+ *    node /dev/dri/card0 - all while that server runs. Enumerations list
+ *    them, followed by the real libudev's devices of every other subsystem
+ *    (power_supply, backlight, ...), so a program can run with this
+ *    library preloaded whatever it looks for.
  *  - devices and property lists that aren't Chameleon's (looked up by a
  *    path of the real system) pass through to the real libudev. Chameleon's
  *    objects start with a magic number to tell them apart.
@@ -47,7 +49,11 @@ struct udev_list_entry;
 #define MAGIC_ENTRY 0x43484d4c454e5452ull  /* "CHMLENTR" */
 #define MAGIC_DEVICE 0x43484d4c44455643ull /* "CHMLDEVC" */
 #define MAX_PROPS 10
+#define MAX_TAGS 3
 #define MAX_FILTERS 4
+#define MAX_LISTED (CHAM_EVDEV_MAX_DEVICES + 1) /* the input devices and the card */
+
+#define CARD_SYSPATH "/sys/devices/platform/chameleon/drm/card0"
 
 struct entry {
     uint64_t magic;
@@ -59,10 +65,13 @@ struct dev {
     uint64_t magic;
     int refs;
     struct udev *udev;
-    char sysname[16], syspath[4 + 64], devpath[64], devnode[32], major[8], minor[8], type[32];
+    const char *subsystem, *devtype, *sysnum;
+    char sysname[16], syspath[4 + 64], devpath[64], devnode[108], major[8], minor[8], type[32];
     dev_t devnum;
     struct entry props[MAX_PROPS];
     int nprops;
+    struct entry tags[MAX_TAGS];
+    int ntags;
 };
 
 static int is_entry(const void *p)
@@ -113,6 +122,14 @@ static int read_list(int s, struct cham_evdev_info *out, int max)
             out[i] = info;
     }
     return (int)count < max ? (int)count : max;
+}
+
+static int server_running(void)
+{
+    int s = connect_server();
+    if (s >= 0)
+        close(s);
+    return s >= 0;
 }
 
 int cham_evdev_list(struct cham_evdev_info *out, int max)
@@ -170,8 +187,10 @@ static void describe(struct dev *d, struct udev *udev, int index, const struct c
     d->magic = MAGIC_DEVICE;
     d->refs = 1;
     d->udev = udev;
+    d->subsystem = "input";
     d->devnum = cham_evdev_devnum(index);
     snprintf(d->sysname, sizeof d->sysname, "event%d", index);
+    d->sysnum = d->sysname + 5;
     snprintf(d->devpath, sizeof d->devpath, "/devices/virtual/input/input%d/event%d", index, index);
     snprintf(d->syspath, sizeof d->syspath, "/sys%s", d->devpath);
     snprintf(d->devnode, sizeof d->devnode, "/dev/input/event%d", index);
@@ -189,6 +208,52 @@ static void describe(struct dev *d, struct udev *udev, int index, const struct c
     for (; type && d->nprops < MAX_PROPS; type = strtok_r(NULL, " ", &save))
         p[d->nprops++] = (struct entry){MAGIC_ENTRY, type, "1", NULL};
     link_entries(p, d->nprops);
+}
+
+/* The card, as the kernel and udev describe a GPU's primary node: under its
+ * platform device, tagged for seat0 (logind and libseat look for these). */
+static void describe_card(struct dev *d, struct udev *udev)
+{
+    memset(d, 0, sizeof *d);
+    d->magic = MAGIC_DEVICE;
+    d->refs = 1;
+    d->udev = udev;
+    d->subsystem = "drm";
+    d->devtype = "drm_minor";
+    d->devnum = makedev(226, CHAM_DRM_MINOR);
+    const char *node = getenv("CHAMELEON_DRM_PATH");
+    snprintf(d->devnode, sizeof d->devnode, "%s", node && *node ? node : CHAM_DRM_PATH);
+    snprintf(d->sysname, sizeof d->sysname, "card0");
+    d->sysnum = d->sysname + 4;
+    snprintf(d->syspath, sizeof d->syspath, "%s", CARD_SYSPATH);
+    snprintf(d->devpath, sizeof d->devpath, "%s", &CARD_SYSPATH[4]); /* without "/sys" */
+    snprintf(d->major, sizeof d->major, "%u", major(d->devnum));
+    snprintf(d->minor, sizeof d->minor, "%u", minor(d->devnum));
+    struct entry *p = d->props;
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "DEVPATH", d->devpath, NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "SUBSYSTEM", "drm", NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "DEVNAME", d->devnode, NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "DEVTYPE", "drm_minor", NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MAJOR", d->major, NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MINOR", d->minor, NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_PATH", "platform-chameleon", NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_FOR_SEAT", "drm-platform-chameleon", NULL};
+    p[d->nprops++] = (struct entry){MAGIC_ENTRY, "TAGS", ":seat:master-of-seat:uaccess:", NULL};
+    link_entries(p, d->nprops);
+    static const char *const tags[MAX_TAGS] = {"seat", "master-of-seat", "uaccess"};
+    for (; d->ntags < MAX_TAGS; d->ntags++)
+        d->tags[d->ntags] = (struct entry){MAGIC_ENTRY, tags[d->ntags], NULL, NULL};
+    link_entries(d->tags, d->ntags);
+}
+
+static struct udev_device *new_card(struct udev *udev)
+{
+    if (!server_running())
+        return NULL;
+    struct dev *d = malloc(sizeof *d);
+    if (d)
+        describe_card(d, udev);
+    return (struct udev_device *)d;
 }
 
 /* Device `index` if KWin serves it now, else NULL. */
@@ -215,6 +280,8 @@ static const char *prop(const struct dev *d, const char *key)
 
 EXPORT struct udev_device *udev_device_new_from_syspath(struct udev *udev, const char *syspath)
 {
+    if (syspath && strcmp(syspath, CARD_SYSPATH) == 0)
+        return new_card(udev);
     int i = index_of_syspath(syspath);
     if (i >= 0)
         return new_dev(udev, i);
@@ -227,6 +294,8 @@ EXPORT struct udev_device *udev_device_new_from_devnum(struct udev *udev, char t
     if (type == 'c' && major(devnum) == 13 && minor(devnum) >= CHAM_EVDEV_MINOR_BASE &&
         minor(devnum) < CHAM_EVDEV_MINOR_BASE + CHAM_EVDEV_MAX_DEVICES)
         return new_dev(udev, (int)minor(devnum) - CHAM_EVDEV_MINOR_BASE);
+    if (type == 'c' && devnum == makedev(226, CHAM_DRM_MINOR))
+        return new_card(udev);
     NEXT(udev_device_new_from_devnum);
     return next_udev_device_new_from_devnum ? next_udev_device_new_from_devnum(udev, type, devnum) : NULL;
 }
@@ -237,6 +306,8 @@ EXPORT struct udev_device *udev_device_new_from_subsystem_sysname(struct udev *u
     int i = subsystem && strcmp(subsystem, "input") == 0 ? cham_evdev_index(sysname, "event") : -1;
     if (i >= 0)
         return new_dev(udev, i);
+    if (subsystem && sysname && strcmp(subsystem, "drm") == 0 && strcmp(sysname, "card0") == 0)
+        return new_card(udev);
     NEXT(udev_device_new_from_subsystem_sysname);
     return next_udev_device_new_from_subsystem_sysname
                ? next_udev_device_new_from_subsystem_sysname(udev, subsystem, sysname)
@@ -259,19 +330,20 @@ EXPORT struct udev_device *udev_device_new_from_subsystem_sysname(struct udev *u
 DEVICE_GETTER(struct udev *, udev_device_get_udev, d->udev)
 DEVICE_GETTER(const char *, udev_device_get_syspath, d->syspath)
 DEVICE_GETTER(const char *, udev_device_get_sysname, d->sysname)
-DEVICE_GETTER(const char *, udev_device_get_sysnum, d->sysname + 5)
+DEVICE_GETTER(const char *, udev_device_get_sysnum, d->sysnum)
 DEVICE_GETTER(const char *, udev_device_get_devpath, d->devpath)
 DEVICE_GETTER(const char *, udev_device_get_devnode, d->devnode)
 DEVICE_GETTER(dev_t, udev_device_get_devnum, d->devnum)
-DEVICE_GETTER(const char *, udev_device_get_subsystem, "input")
-DEVICE_GETTER(const char *, udev_device_get_devtype, NULL)
+DEVICE_GETTER(const char *, udev_device_get_subsystem, d->subsystem)
+DEVICE_GETTER(const char *, udev_device_get_devtype, d->devtype)
 DEVICE_GETTER(const char *, udev_device_get_driver, NULL)
 DEVICE_GETTER(const char *, udev_device_get_action, NULL)
 DEVICE_GETTER(struct udev_device *, udev_device_get_parent, NULL)
 DEVICE_GETTER(int, udev_device_get_is_initialized, 1)
 DEVICE_GETTER(struct udev_list_entry *, udev_device_get_properties_list_entry, (struct udev_list_entry *)d->props)
 DEVICE_GETTER(struct udev_list_entry *, udev_device_get_devlinks_list_entry, NULL)
-DEVICE_GETTER(struct udev_list_entry *, udev_device_get_tags_list_entry, NULL)
+DEVICE_GETTER(struct udev_list_entry *, udev_device_get_tags_list_entry,
+              d->ntags ? (struct udev_list_entry *)d->tags : NULL)
 DEVICE_GETTER(struct udev_list_entry *, udev_device_get_sysattr_list_entry, NULL)
 
 EXPORT struct udev_device *udev_device_ref(struct udev_device *device)
@@ -325,8 +397,13 @@ EXPORT const char *udev_device_get_sysattr_value(struct udev_device *device, con
 
 EXPORT int udev_device_has_tag(struct udev_device *device, const char *tag)
 {
-    if (is_dev(device))
+    if (is_dev(device)) {
+        const struct dev *d = (const void *)device;
+        for (int i = 0; tag && i < d->ntags; i++)
+            if (strcmp(d->tags[i].name, tag) == 0)
+                return 1;
         return 0;
+    }
     NEXT(udev_device_has_tag);
     return next_udev_device_has_tag(device, tag);
 }
@@ -368,18 +445,18 @@ EXPORT struct udev_list_entry *udev_list_entry_get_by_name(struct udev_list_entr
     return next_udev_list_entry_get_by_name(entry, name);
 }
 
-/* ---- udev_enumerate: Chameleon's input devices, the real system's others ---- */
+/* ---- udev_enumerate: Chameleon's input devices and card, the real system's others ---- */
 
 struct udev_enumerate {
     int refs;
     struct udev *udev;
-    struct udev_enumerate *real; /* the real libudev's, which never lists "input" */
+    struct udev_enumerate *real; /* the real libudev's, which never lists "input" or "drm" */
     const char *subsystem[MAX_FILTERS], *nosubsystem[MAX_FILTERS], *sysname[MAX_FILTERS];
     const char *prop_key[MAX_FILTERS], *prop_value[MAX_FILTERS];
     int nsubsystem, nnosubsystem, nsysname, nprop;
     int unsupported; /* a filter Chameleon's devices can't pass (tags, attributes, parents) */
-    char paths[CHAM_EVDEV_MAX_DEVICES][sizeof ((struct dev *)0)->syspath];
-    struct entry entries[CHAM_EVDEV_MAX_DEVICES];
+    char paths[MAX_LISTED][sizeof ((struct dev *)0)->syspath];
+    struct entry entries[MAX_LISTED];
     int n;
 };
 
@@ -418,8 +495,9 @@ EXPORT struct udev_enumerate *udev_enumerate_new(struct udev *udev)
     e->udev = udev;
     NEXT(udev_enumerate_new);
     e->real = next_udev_enumerate_new ? next_udev_enumerate_new(udev) : NULL;
-    /* The system's own input devices: their nodes aren't Chameleon's. */
-    if (REAL(udev_enumerate_add_nomatch_subsystem, "input") < 0) {
+    /* The system's own input devices and GPUs: their nodes aren't Chameleon's. */
+    if (REAL(udev_enumerate_add_nomatch_subsystem, "input") < 0 ||
+        REAL(udev_enumerate_add_nomatch_subsystem, "drm") < 0) {
         NEXT(udev_enumerate_unref);
         next_udev_enumerate_unref(e->real);
         e->real = NULL;
@@ -536,9 +614,9 @@ EXPORT int udev_enumerate_add_syspath(struct udev_enumerate *e, const char *sysp
 {
     if (!e)
         return -EINVAL;
-    if (index_of_syspath(syspath) < 0)
+    if (index_of_syspath(syspath) < 0 && !(syspath && strcmp(syspath, CARD_SYSPATH) == 0))
         return e->real ? REAL(udev_enumerate_add_syspath, syspath) : -EINVAL;
-    if (e->n >= CHAM_EVDEV_MAX_DEVICES)
+    if (e->n >= MAX_LISTED)
         return -EINVAL;
     snprintf(e->paths[e->n], sizeof e->paths[e->n], "%s", syspath);
     e->entries[e->n] = (struct entry){MAGIC_ENTRY, e->paths[e->n], NULL, NULL};
@@ -551,9 +629,9 @@ static int matches(const struct udev_enumerate *e, const struct dev *d)
 {
     int ok = !e->nsubsystem;
     for (int i = 0; i < e->nsubsystem; i++)
-        ok |= strcmp(e->subsystem[i], "input") == 0;
+        ok |= strcmp(e->subsystem[i], d->subsystem) == 0;
     for (int i = 0; i < e->nnosubsystem; i++)
-        ok &= strcmp(e->nosubsystem[i], "input") != 0;
+        ok &= strcmp(e->nosubsystem[i], d->subsystem) != 0;
     int named = !e->nsysname;
     for (int i = 0; i < e->nsysname; i++)
         named |= fnmatch(e->sysname[i], d->sysname, 0) == 0;
@@ -570,10 +648,14 @@ EXPORT int udev_enumerate_scan_devices(struct udev_enumerate *e)
         return -EINVAL;
     struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];
     int count = cham_evdev_list(list, CHAM_EVDEV_MAX_DEVICES);
+    int card = server_running();
     e->n = 0;
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count + card; i++) {
         struct dev d;
-        describe(&d, e->udev, i, &list[i]);
+        if (i < count)
+            describe(&d, e->udev, i, &list[i]);
+        else
+            describe_card(&d, e->udev);
         if (!matches(e, &d))
             continue;
         snprintf(e->paths[e->n], sizeof e->paths[e->n], "%s", d.syspath);

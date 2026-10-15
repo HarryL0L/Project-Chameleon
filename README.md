@@ -125,10 +125,12 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
 <summary><b>🖥️ libchameleon.so</b>: a fake KMS display device for KWin</summary>
 
 - Preloaded into `kwin_wayland` only. Opening
-  `$PREFIX/tmp/chameleon-card0` (KWin finds it through `KWIN_DRM_DEVICES`)
+  `/dev/dri/card0` (KWin finds it in udev, like any GPU)
   returns a pipe that behaves like a DRM card: `stat()` says it's a character
   device, and every DRM `ioctl` on it is answered in user space.
-- It offers one connector, one CRTC and one primary plane, with atomic
+- It offers one connector (with an EDID: "Chameleon", the phone's physical
+  size, the app's size and refresh rate as its preferred mode), one CRTC
+  and one primary plane, with atomic
   modesetting, `TEST_ONLY` commits, `EBUSY` while a flip is pending, and
   page-flip events written to the pipe.
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's

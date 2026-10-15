@@ -5,7 +5,7 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 
 | file | replaces | does |
 |---|---|---|
-| `libchameleon.so` (LD_PRELOAD) | the kernel | fake KMS device at `$PREFIX/tmp/chameleon-card0`: one DSI connector sized to the app, one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event |
+| `libchameleon.so` (LD_PRELOAD) | the kernel | fake KMS device at `/dev/dri/card0`: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event |
 | `libgbm.so` (LD_LIBRARY_PATH) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform and dmabuf import (as `AHardwareBuffer`) inside KWin, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden BGRA8888 / timer-query extensions, no robust/priority contexts |
 
@@ -78,7 +78,9 @@ screen keeps its first size instead of following the app's window).
   every udev monitor is Chameleon's own, since an Android app can't open the
   kernel's uevent socket (`udev/udev.c`), subsystem `input` is Chameleon's
   input devices, and their `/dev/input/eventN` nodes open, stat and answer
-  evdev ioctls like the kernel's (`udev/evdev.c`). Enumerations of other
+  evdev ioctls like the kernel's (`udev/evdev.c`), and subsystem `drm` is
+  the fake card, `card0` with node `/dev/dri/card0`, which compositors find
+  the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`). Enumerations of other
   subsystems (`power_supply`, `backlight`, ...) pass through to the real
   libudev, without its monitor events. Any program in the session
   (`libinput debug-events`) sees the same devices while KWin runs.

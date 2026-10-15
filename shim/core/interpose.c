@@ -3,8 +3,9 @@
  * libc / libdrm entry points libchameleon.so overrides when LD_PRELOADed
  * into kwin_wayland.
  *
- * Opening the fake device path ($CHAMELEON_DRM_PATH, what KWIN_DRM_DEVICES
- * points at) returns the read end of a pipe: KWin polls and read()s DRM
+ * Opening the fake card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
+ * libchameleon_udev.so lists it as a drm device) returns the read end of a
+ * pipe: KWin polls and read()s DRM
  * events from it, and every DRM ioctl on it is answered by kms.c. stat() and
  * fstat() make it look like a DRM character device, and libdrm's
  * drmGetDevice*() describe it. bind() is watched to learn KWin's Wayland
@@ -26,10 +27,10 @@
 
 #include <xf86drm.h>
 
+#include "../../common/chameleon_drm.h"
 #include "internal.h"
 
-/* Minor < 64 is a primary node; real Android cards are 226:0. */
-static const dev_t fake_rdev = (dev_t)((226u << 8) | 60u);
+static const dev_t fake_rdev = (dev_t)((226u << 8) | CHAM_DRM_MINOR);
 
 /* The overrides of libc/libdrm symbols below must be exported. */
 #pragma GCC visibility push(default)
@@ -63,7 +64,7 @@ DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 static const char *fake_path(void)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");
-    return p && *p ? p : "/data/data/com.termux/files/usr/tmp/chameleon-card0";
+    return p && *p ? p : CHAM_DRM_PATH;
 }
 
 static int is_fake_path(const char *path)
