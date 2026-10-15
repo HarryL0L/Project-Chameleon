@@ -20,6 +20,7 @@ final class InputSender {
     static final int MOUSE_WHEEL = 13;
     static final int MOUSE_MOTION = 14;
     static final int PAD_DOWN = 15; // .. PAD_FRAME = 19
+    static final int TIME = 20;
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
@@ -49,6 +50,15 @@ final class InputSender {
         long ix = (int) (dx / Math.max(w, 1) * 1048576f);
         long iy = (int) (dy / Math.max(h, 1) * 1048576f);
         return (ix & 0xffffffffL) | (iy << 32);
+    }
+
+    /**
+     * When the events that follow happened: Android's event time in ns
+     * (SystemClock.uptimeMillis()'s clock, CLOCK_MONOTONIC), so the desktop
+     * sees the real time between them, not when they arrived in a batch.
+     */
+    static void time(long nanos) {
+        nativeSendInput(TIME, 0, nanos);
     }
 
     // A finger message: down is TOUCH_DOWN (the touchscreen) or PAD_DOWN (the

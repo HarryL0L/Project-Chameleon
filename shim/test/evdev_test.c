@@ -20,6 +20,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "../../common/cham_io.h"
@@ -40,6 +41,13 @@ static void close_restricted(int fd, void *data)
 }
 
 static const struct libinput_interface iface = {open_restricted, close_restricted};
+
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000 + (uint64_t)ts.tv_nsec;
+}
 
 static void send_input(int c, uint32_t kind, uint64_t a, uint64_t b)
 {
@@ -188,19 +196,27 @@ int main(void)
     }
     CHECK(ups == 2, "both fingers up (%d)", ups);
 
+    uint64_t when = now_ns() - 5000000; /* the app's event time: 5 ms ago */
+    send_input(c, CHAM_INPUT_TIME, 0, when);
     send_input(c, CHAM_INPUT_KEY, KEY_A, 1);
+    send_input(c, CHAM_INPUT_TIME, 0, 0);
     send_input(c, CHAM_INPUT_KEY, KEY_A, 0);
     int key = -1, pressed = 0, released = 0;
+    uint64_t pressed_at = 0;
     for (int i = 0; li && i < 2 && (ev = wait_event(li, LIBINPUT_EVENT_KEYBOARD_KEY)); i++) {
         struct libinput_event_keyboard *k = libinput_event_get_keyboard_event(ev);
         key = (int)libinput_event_keyboard_get_key(k);
-        if (libinput_event_keyboard_get_key_state(k) == LIBINPUT_KEY_STATE_PRESSED)
+        if (libinput_event_keyboard_get_key_state(k) == LIBINPUT_KEY_STATE_PRESSED) {
             pressed++;
-        else
+            pressed_at = libinput_event_keyboard_get_time_usec(k);
+        } else {
             released++;
+        }
         libinput_event_destroy(ev);
     }
     CHECK(key == KEY_A && pressed == 1 && released == 1, "key A pressed and released (key %d)", key);
+    CHECK(pressed_at == when / 1000, "the press carries the app's event time (%llu us, want %llu)",
+          (unsigned long long)pressed_at, (unsigned long long)(when / 1000));
 
     send_input(c, CHAM_INPUT_MOUSE_MOTION, 0, CHAM_INPUT_DELTA(7, -3));
     send_input(c, CHAM_INPUT_MOUSE_BUTTON, BTN_RIGHT, 1);
@@ -229,13 +245,18 @@ int main(void)
     CHECK(v120 == -120, "wheel a notch up (v120 %.0f, want -120)", v120);
 
     /* Touchpad: one finger moves the pointer, a tap clicks. */
+    /* ...sent in one burst, as Android delivers batched moves: their event
+     * times keep them 10 ms apart for libinput. */
+    uint64_t start = now_ns() - 110000000;
+    send_input(c, CHAM_INPUT_TIME, 0, start);
     send_input(c, CHAM_INPUT_PAD_DOWN, 1, CHAM_INPUT_POS(20000, 20000));
     send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
     for (int i = 1; i <= 10; i++) {
-        usleep(10000);
+        send_input(c, CHAM_INPUT_TIME, 0, start + i * 10000000ull);
         send_input(c, CHAM_INPUT_PAD_MOTION, 1, CHAM_INPUT_POS(20000 + i * 600, 20000));
         send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
     }
+    send_input(c, CHAM_INPUT_TIME, 0, 0);
     send_input(c, CHAM_INPUT_PAD_UP, 1, 0);
     send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
     x = 0;

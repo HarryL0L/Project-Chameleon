@@ -54,6 +54,7 @@ static struct device {
     int fresh; /* a reader came: send whole state again, it doesn't know ours */
     struct input_event frame[FRAME_EVENTS]; /* input thread only */
     int frame_len;
+    int64_t last_time; /* ns, of the last frame sent */
 } g_dev[DEV_COUNT];
 static pthread_mutex_t g_evdev_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -68,6 +69,7 @@ static struct mt {         /* a multitouch device (protocol B) */
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
 static uint8_t g_keys_down[CHAM_BITS(KEY_CNT)]; /* keys and buttons pressed on the devices */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
+static int64_t g_event_time; /* ns, from CHAM_INPUT_TIME; 0 = none yet */
 
 static void set_axis(struct cham_evdev_info *d, unsigned axis, int32_t max)
 {
@@ -284,12 +286,18 @@ static void flush(struct device *d)
 {
     if (!d->frame_len)
         return;
+    /* When it happened, by the app's clock (the same CLOCK_MONOTONIC): never
+     * later than now, never earlier than the device's last frame. */
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now = (int64_t)ts.tv_sec * 1000000000 + ts.tv_nsec;
+    int64_t t = g_event_time && g_event_time < now ? g_event_time : now;
+    t = t > d->last_time ? t : d->last_time;
+    d->last_time = t;
     add(d, EV_SYN, SYN_REPORT, 0);
     for (int i = 0; i < d->frame_len; i++) {
-        d->frame[i].input_event_sec = ts.tv_sec;
-        d->frame[i].input_event_usec = ts.tv_nsec / 1000;
+        d->frame[i].input_event_sec = t / 1000000000;
+        d->frame[i].input_event_usec = t % 1000000000 / 1000;
     }
     pthread_mutex_lock(&g_evdev_lock);
     for (int i = 0; i < MAX_READERS; i++) {
@@ -490,6 +498,9 @@ int evdev_input(const struct cham_msg *m)
 {
     struct device *mouse = &g_dev[DEV_MOUSE];
     switch (m->id) {
+    case CHAM_INPUT_TIME:
+        g_event_time = (int64_t)m->b;
+        return 1; /* fake input takes no times */
     case CHAM_INPUT_TOUCH_DOWN:
     case CHAM_INPUT_TOUCH_MOTION:
     case CHAM_INPUT_TOUCH_UP:

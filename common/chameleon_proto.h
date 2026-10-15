@@ -80,6 +80,10 @@ enum cham_input_kind {
     CHAM_INPUT_PAD_UP = 17,        /* fallback) */
     CHAM_INPUT_PAD_CANCEL = 18,
     CHAM_INPUT_PAD_FRAME = 19,
+    CHAM_INPUT_TIME = 20,          /* b = when the events that follow happened: Android's event
+                                      time, CLOCK_MONOTONIC ns (the evdev devices' timestamps,
+                                      as the kernel stamps a device's events), 0 = now; holds
+                                      until the next TIME */
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)

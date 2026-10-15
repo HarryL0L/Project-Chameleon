@@ -212,6 +212,7 @@ final class KeyInput {
         int scan = scanCode(event);
         // with Ctrl / Alt latched, a key is tapped with them as a keysym (below)
         if (scan != 0 && !mTapped.contains(code) && (isModifier(code) || !down || !(mCtrl || mAlt))) {
+            InputSender.time(event.getEventTime() * 1_000_000L);
             InputSender.key(scan, down);
             return true;
         }

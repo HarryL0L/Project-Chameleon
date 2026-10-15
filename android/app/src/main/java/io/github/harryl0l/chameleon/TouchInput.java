@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 package io.github.harryl0l.chameleon;
 
+import android.os.Build;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
@@ -54,10 +55,19 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
         return isMouse(e) && mouse(v, e);
     }
 
+    /** When e's batched sample h happened (h = -1: e itself), in ns. */
+    private static long time(MotionEvent e, int h) {
+        if (Build.VERSION.SDK_INT >= 34)
+            return h < 0 ? e.getEventTimeNanos() : e.getHistoricalEventTimeNanos(h);
+        return (h < 0 ? e.getEventTime() : e.getHistoricalEventTime(h)) * 1_000_000L;
+    }
+
     // ---- touch: every finger where it is, to the touchscreen or touchpad ----
 
     private static void fingers(View v, MotionEvent e, int down) {
         int w = v.getWidth(), h = v.getHeight();
+        if (e.getActionMasked() != MotionEvent.ACTION_MOVE)
+            InputSender.time(time(e, -1));
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_POINTER_DOWN: {
@@ -68,6 +78,15 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                 break;
             }
             case MotionEvent.ACTION_MOVE:
+                // Android batches moves per frame: each sample is a frame of its own, at its time
+                for (int s = 0; s < e.getHistorySize(); s++) {
+                    InputSender.time(time(e, s));
+                    for (int i = 0; i < e.getPointerCount(); i++)
+                        InputSender.finger(down, InputSender.MOTION, e.getPointerId(i),
+                                InputSender.pos(e.getHistoricalX(i, s), e.getHistoricalY(i, s), w, h));
+                    InputSender.fingersFrame(down);
+                }
+                InputSender.time(time(e, -1));
                 for (int i = 0; i < e.getPointerCount(); i++)
                     InputSender.finger(down, InputSender.MOTION, e.getPointerId(i),
                             InputSender.pos(e.getX(i), e.getY(i), w, h));
@@ -103,6 +122,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
 
     /** A mouse the app hasn't captured yet: absolute, then capture it. */
     private boolean mouse(View v, MotionEvent e) {
+        InputSender.time(time(e, -1));
         if (!wheel(e)) {
             InputSender.moveTo(InputSender.pos(e.getX(), e.getY(), v.getWidth(), v.getHeight()));
             buttons(e.getButtonState());
@@ -121,8 +141,10 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
         if (e.getKeyCode() != KeyEvent.KEYCODE_BACK
                 || !(e.isFromSource(InputDevice.SOURCE_MOUSE) || e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE)))
             return false;
-        if (e.getRepeatCount() == 0 && e.getAction() != KeyEvent.ACTION_MULTIPLE)
+        if (e.getRepeatCount() == 0 && e.getAction() != KeyEvent.ACTION_MULTIPLE) {
+            InputSender.time(e.getEventTime() * 1_000_000L);
             InputSender.mouseButton(InputSender.BTN_RIGHT, e.getAction() == KeyEvent.ACTION_DOWN);
+        }
         return true;
     }
 
@@ -130,20 +152,26 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     public boolean onCapturedPointer(View v, MotionEvent e) {
         if (!e.isFromSource(InputDevice.SOURCE_MOUSE_RELATIVE))
             return false;
-        if (wheel(e))
-            return true;
-        float dx = mMouseRestX + e.getX(), dy = mMouseRestY + e.getY();
-        for (int i = 0; i < e.getHistorySize(); i++) {
-            dx += e.getHistoricalX(i);
-            dy += e.getHistoricalY(i);
+        // Android batches moves per frame: each sample at its own time, as the mouse reported it
+        for (int s = 0; s < e.getHistorySize(); s++) {
+            InputSender.time(time(e, s));
+            mouseMotion(e.getHistoricalX(s), e.getHistoricalY(s));
         }
+        InputSender.time(time(e, -1));
+        if (!wheel(e)) {
+            mouseMotion(e.getX(), e.getY());
+            buttons(e.getButtonState());
+        }
+        return true;
+    }
+
+    private void mouseMotion(float x, float y) {
+        float dx = mMouseRestX + x, dy = mMouseRestY + y;
         int ix = (int) dx, iy = (int) dy;
         mMouseRestX = dx - ix;
         mMouseRestY = dy - iy;
         if (ix != 0 || iy != 0)
             InputSender.mouseMotion(ix, iy);
-        buttons(e.getButtonState());
-        return true;
     }
 
     private static boolean wheel(MotionEvent e) {
