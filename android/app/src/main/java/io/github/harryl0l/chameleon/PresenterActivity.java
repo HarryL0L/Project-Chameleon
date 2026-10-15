@@ -23,6 +23,7 @@ import android.util.TypedValue;
 import android.view.Display;
 import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.PointerIcon;
 import android.view.SurfaceHolder;
@@ -198,6 +199,15 @@ public class PresenterActivity extends Activity
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateMenuInsets));
         setContentView(root);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Touches and the mouse as they come, not batched once per frame:
+            // each event carries its own time (TouchInput), so the desktop
+            // gets them sooner and still evenly spaced. Once attached, so the
+            // request reaches the window.
+            int sources = InputDevice.SOURCE_CLASS_POINTER | InputDevice.SOURCE_CLASS_TRACKBALL;
+            view.post(() -> {
+                view.requestUnbufferedDispatch(sources);
+                mImeView.requestUnbufferedDispatch(sources); // the captured mouse, while it has the focus
+            });
             root.setOnApplyWindowInsetsListener((v, insets) -> {
                 onInsets(insets);
                 return insets;
