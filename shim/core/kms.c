@@ -8,12 +8,16 @@
  * commit that puts a framebuffer on the plane becomes a PRESENT to the app;
  * the app's FRAME_DONE becomes the page-flip event.
  *
- * The connector's one mode is the app's surface size and refresh rate when
- * the device is first opened, and its EDID describes that panel (a
- * standard EDID 1.4 block: name, physical size, the mode as its preferred
- * timing), so the compositor identifies it like any monitor. KWin may set any other mode (output.c adds
- * custom modes to follow the app's window as it rotates or resizes); the app
- * scales or crops whatever size arrives.
+ * The connector's one mode is the app's surface: its size and the display's
+ * refresh rate. When the window changes (the phone rotates, the keyboard
+ * opens, battery saver drops to 60 Hz) the mode changes with it and the
+ * card sends a hotplug uevent (HOTPLUG=1), as a monitor's driver does when
+ * the monitor's modes change; the compositor re-reads the connector and
+ * switches to the new mode. The EDID describes the panel as first seen (a
+ * standard EDID 1.4 block: name, physical size, that mode as its preferred
+ * timing) and stays the same, so the compositor keeps seeing the same
+ * monitor. Any other mode may be set too; the app scales or crops whatever
+ * size arrives.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -121,6 +125,7 @@ struct blob {
     uint32_t id;
     uint32_t length;
     void *data;
+    int destroyed; /* the client let go of it; kept while the CRTC uses it, as the kernel does */
     struct blob *next;
 };
 
@@ -137,7 +142,7 @@ static uint64_t g_frame;
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
 static uint8_t g_edid[128];
-static struct blob g_edid_blob = {ID_EDID_BLOB, sizeof g_edid, g_edid, NULL};
+static struct blob g_edid_blob = {.id = ID_EDID_BLOB, .length = sizeof g_edid, .data = g_edid};
 static uint32_t g_screen_width, g_screen_height, g_mm_width, g_mm_height;
 
 /* ---- setup ---- */
@@ -252,6 +257,22 @@ static void kms_init(void)
 void kms_init_once(void)
 {
     pthread_once(&g_init_once, kms_init);
+}
+
+#define REFRESH_SLACK_MHZ 1000 /* the display's rate wobbles a little */
+
+int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+{
+    kms_init_once();
+    pthread_mutex_lock(&g_lock);
+    int changed = width != g_mode.hdisplay || height != g_mode.vdisplay ||
+                  abs((int32_t)refresh_mhz - (int32_t)g_mode_mhz) > REFRESH_SLACK_MHZ;
+    if (changed) {
+        make_mode(width, height, refresh_mhz);
+        cham_log("connector mode now %ux%u @ %.2f Hz", width, height, refresh_mhz / 1000.0);
+    }
+    pthread_mutex_unlock(&g_lock);
+    return changed;
 }
 
 /* ---- helpers ---- */
@@ -492,18 +513,29 @@ static int create_blob(struct drm_mode_create_blob *c)
     return 0;
 }
 
-static int destroy_blob(struct drm_mode_destroy_blob *d)
+/* Frees the blobs the client destroyed that the CRTC no longer uses. */
+static void free_destroyed_blobs(void)
 {
-    for (struct blob **p = &g_blobs; *p; p = &(*p)->next) {
-        if ((*p)->id == d->blob_id) {
-            struct blob *b = *p;
+    for (struct blob **p = &g_blobs; *p;) {
+        struct blob *b = *p;
+        if (b->destroyed && b->id != g_state.mode_blob) {
             *p = b->next;
             free(b->data);
             free(b);
-            return 0;
+        } else {
+            p = &b->next;
         }
     }
-    return -ENOENT;
+}
+
+static int destroy_blob(struct drm_mode_destroy_blob *d)
+{
+    struct blob *b = blob_find(d->blob_id);
+    if (!b || b->destroyed)
+        return -ENOENT;
+    b->destroyed = 1;
+    free_destroyed_blobs();
+    return 0;
 }
 
 /* ---- framebuffers & buffers ---- */
@@ -735,6 +767,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = bo;
     g_state = s;
+    free_destroyed_blobs();
 
     if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
                             mode->vdisplay != old_mode->vdisplay))

@@ -32,15 +32,12 @@ mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
 CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/input_test"
 # ...or, once something reads it, to the evdev touchscreen, through real libinput.
-cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(pkg-config --cflags --libs libinput libudev)
+cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(pkg-config --cflags --libs libinput libudev libdrm)
 mkdir -p "$OUT/runtime-ev" && chmod 700 "$OUT/runtime-ev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
-# KWin's screen follows the app's window (output management).
-cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/output_test" shim/test/output_test.c \
-    $(pkg-config --cflags --libs wayland-server)
-CHAMELEON_DRM_PATH="$OUT/card6" CHAMELEON_SOCKET="$OUT/presenter-output" XDG_RUNTIME_DIR="$OUT/runtime" \
-    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/output_test"
+# (output_test: output.c's KWin output management, unused since the card's
+# hotplug replaced it; both go with the other old paths.)
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
 # with a stand-in for Android's EGL/GLES driver.
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c

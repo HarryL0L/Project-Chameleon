@@ -9,8 +9,9 @@
  * process connects to KWin's Wayland socket as an ordinary client, binds
  * fake input plus xdg_output (for the screen's logical geometry), and turns
  * the app's CHAM_INPUT messages into fake-input requests. The same
- * connection carries output.c's screen-size changes (CHAM_CONFIG) and
- * clipboard.c's clipboard sharing.
+ * connection carries clipboard.c's clipboard sharing. The app's window size
+ * (CHAM_CONFIG) becomes the connector's mode and a card hotplug (kms.c,
+ * evdev.c).
  *
  * The socket path is taken from KWin's own bind() (interpose.c), or from
  * $CHAMELEON_WAYLAND_SOCKET when kwin_wayland_wrapper made the socket, and
@@ -30,6 +31,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include "../../common/chameleon_evdev.h"
 #include "../../common/chameleon_proto.h"
 #include "internal.h"
 #include "wlclient.h"
@@ -406,6 +408,21 @@ static void forward(const struct cham_msg *m)
 
 /* ---- thread ---- */
 
+/* The app's window, as the panel: the compositor follows a hotplug. With
+ * CHAMELEON_RESIZE=0 the panel keeps its first size (the app scales). */
+static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+{
+    static int disabled = -1;
+    if (disabled < 0) {
+        const char *env = getenv("CHAMELEON_RESIZE");
+        disabled = env && strcmp(env, "0") == 0;
+        if (disabled)
+            cham_log("CHAMELEON_RESIZE=0: KWin's screen keeps its size");
+    }
+    if (!disabled && width && height && kms_panel(width, height, refresh_mhz))
+        evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
+}
+
 static void *input_main(void *arg)
 {
     (void)arg;
@@ -443,7 +460,7 @@ static void *input_main(void *arg)
         int have_input = 0;
         for (size_t i = 0; got > 0 && i < (size_t)got / sizeof batch[0]; i++) {
             if (batch[i].type == CHAM_CONFIG)
-                output_config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
+                config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
             else if (batch[i].type == CHAM_INPUT && evdev_input(&batch[i]))
                 batch[i].type = 0; /* went to an evdev device's readers (evdev.c) */
             else

@@ -25,6 +25,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <xf86drmMode.h>
 
 #include "../../common/cham_io.h"
 
@@ -331,6 +332,41 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(button == BTN_LEFT, "touchpad: a tap is a left click (button 0x%x)", button);
+
+    printf("hotplug\n");
+    /* The app's window changes: the connector's mode follows, and a udev
+     * monitor of drm devices sees the card's change uevent (HOTPLUG=1). */
+    struct udev_monitor *drm_mon = udev_monitor_new_from_netlink(udev, "udev");
+    struct udev_monitor *input_mon = udev_monitor_new_from_netlink(udev, "udev");
+    udev_monitor_filter_add_match_subsystem_devtype(drm_mon, "drm", NULL);
+    udev_monitor_filter_add_match_subsystem_devtype(input_mon, "input", NULL);
+    udev_monitor_enable_receiving(drm_mon);
+    udev_monitor_enable_receiving(input_mon);
+    struct cham_msg cfg = {CHAM_CONFIG, 0, 900 | (uint64_t)1600 << 32, 60000};
+    cham_send(c, &cfg, -1);
+    struct pollfd mp = {udev_monitor_get_fd(drm_mon), POLLIN, 0};
+    struct udev_device *uev = poll(&mp, 1, 2000) == 1 ? udev_monitor_receive_device(drm_mon) : NULL;
+    const char *action = uev ? udev_device_get_action(uev) : NULL;
+    const char *hotplug = uev ? udev_device_get_property_value(uev, "HOTPLUG") : NULL;
+    CHECK(uev && action && strcmp(action, "change") == 0 && strcmp(udev_device_get_sysname(uev), "card0") == 0 &&
+              hotplug && strcmp(hotplug, "1") == 0,
+          "window resized: card0 \"change\" with HOTPLUG=1 (%s)", action ? action : "no event");
+    if (uev)
+        udev_device_unref(uev);
+    drmModeRes *res = drmModeGetResources(fd);
+    drmModeConnector *conn = res && res->count_connectors ? drmModeGetConnector(fd, res->connectors[0]) : NULL;
+    CHECK(conn && conn->count_modes == 1 && conn->modes[0].hdisplay == 900 && conn->modes[0].vdisplay == 1600 &&
+              conn->modes[0].vrefresh == 60 && (conn->modes[0].type & DRM_MODE_TYPE_PREFERRED),
+          "the connector's one mode is the window: %dx%d@%d, preferred", conn && conn->count_modes ? conn->modes[0].hdisplay : 0,
+          conn && conn->count_modes ? conn->modes[0].vdisplay : 0, conn && conn->count_modes ? conn->modes[0].vrefresh : 0);
+    drmModeFreeConnector(conn);
+    drmModeFreeResources(res);
+    cham_send(c, &cfg, -1); /* the same window again: nothing changed */
+    CHECK(poll(&mp, 1, 300) == 0, "the same size again: no uevent");
+    struct pollfd ip = {udev_monitor_get_fd(input_mon), POLLIN, 0};
+    CHECK(poll(&ip, 1, 0) == 0, "a monitor of input devices doesn't see the card");
+    udev_monitor_unref(drm_mon);
+    udev_monitor_unref(input_mon);
 
     g_typing = 1;
     pthread_t typist;

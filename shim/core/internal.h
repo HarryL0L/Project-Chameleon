@@ -58,6 +58,8 @@ void input_socket_path(char *out, size_t size);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);
+/* A uevent (struct cham_uevent's what) to every udev monitor. */
+void evdev_uevent(uint32_t what);
 /* Takes an input message (input thread) if its device has a reader. */
 int evdev_input(const struct cham_msg *m);
 
@@ -93,6 +95,8 @@ void kms_init_once(void);
 void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
 /* Size of the mode KWin has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
+/* The app's surface as the connector's mode; 1 if that changed it. */
+int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz);
 /* The buffer on KWin's screen, or NULL if the screen shows none. */
 struct cham_bo *kms_screen_bo_locked(void);
 /* KWin turned its screen off (it wakes on input). */

@@ -212,41 +212,36 @@ Code: [`shim/core/input.c`](shim/core/input.c), [`android/…/TouchInput.java`](
 - Rotating the phone, or opening the keyboard with *Shrink the desktop above
   the keyboard* on, changes the app's surface size, and the app sends a new
   `CONFIG`.
-- Termux's KWin has no udev, so it can't learn about the change as a
-  hotplug. Instead the shim asks KWin the way System Settings does: over the
-  same Wayland connection as input, it uses `kde_output_management_v2`. It
-  picks an existing mode of that size, or adds a custom mode
-  (`set_custom_modes`, replacing the one it added before) and then picks it.
-- KWin then does an ordinary modeset on the fake device, which accepts any
-  mode size, and lays out panels and windows for the new screen.
-- KWin's custom modes have widths in multiples of 8, so the width is rounded
-  up and the app crops the few extra pixels, keeping the image sharp. Input
-  is mapped to the visible part.
+- The fake display behaves like a monitor whose modes changed: the
+  connector's one mode becomes the window's size and the display's refresh
+  rate, and the card sends a hotplug uevent (`HOTPLUG=1`) to udev monitors.
+- KWin re-reads the connector, as it does when a monitor is plugged in or
+  its modes change, finds its mode gone and switches to the new one, then
+  lays out panels and windows for the new screen. Nothing here talks to
+  KWin directly.
 - The refresh rate is followed the same way: when battery saver drops the
-  display from 120 Hz to 60 Hz (or back), KWin switches to a mode at the
-  new rate.
-- Only a change of the window or the rate counts, so a resolution picked by
-  hand in System Settings stays until they change again. Until KWin has
-  switched (or if it can't), the app scales the frame to fit and keeps its
-  aspect ratio. `CHAMELEON_RESIZE=0` keeps KWin's screen at its first size.
+  display from 120 Hz to 60 Hz (or back), the mode changes with it.
+- The EDID stays the one of the first size, so KWin keeps seeing the same
+  monitor (its scale and settings stay). Until KWin has switched, the app
+  scales the frame to fit and keeps its aspect ratio.
+  `CHAMELEON_RESIZE=0` keeps KWin's screen at its first size.
 
 ```mermaid
 sequenceDiagram
     participant A as Chameleon app
     participant S as libchameleon.so (in KWin)
+    participant U as libchameleon_udev.so (KWin's udev monitor)
     participant K as KWin
     A->>S: CONFIG 2340x1080 (rotated)
-    Note over S: acts at once
-    S->>K: set_custom_modes(2344x1080), apply
-    K-->>S: new mode listed, applied
-    S->>K: mode(2344x1080), apply
+    Note over S: connector mode = 2340x1080
+    S->>U: uevent: card0 change, HOTPLUG=1
+    U->>K: udev monitor readable
+    K->>S: GETCONNECTOR: one mode, 2340x1080
     K->>S: atomic modeset (fake KMS device)
-    K-->>S: applied
-    S->>A: PRESENT 2344x1080 frames
-    Note over A: crops 4 px, shows 1:1
+    S->>A: PRESENT 2340x1080 frames
 ```
 
-Code: [`shim/core/output.c`](shim/core/output.c), [`presenter.cpp`](android/app/src/main/cpp/presenter.cpp) (`place()`)
+Code: [`shim/core/kms.c`](shim/core/kms.c), [`shim/udev/udev.c`](shim/udev/udev.c), [`presenter.cpp`](android/app/src/main/cpp/presenter.cpp) (`place()`)
 </details>
 
 <details>

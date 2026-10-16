@@ -15,6 +15,9 @@
  * device, its input goes there; otherwise input.c sends it through KWin's
  * fake input as before (and so does everything else: trackpad mode, the soft
  * keyboard, a mouse the app hasn't captured; the touchpad has no fallback).
+ *
+ * The same socket carries udev monitors' events (evdev_uevent): kms.c's
+ * card hotplug when the app's window changes.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -65,6 +68,12 @@ static struct device {
     int64_t last_time; /* ns, of the last frame sent */
 } g_dev[DEV_COUNT];
 static pthread_mutex_t g_evdev_lock = PTHREAD_MUTEX_INITIALIZER;
+#define MAX_MONITORS 16
+static struct {
+    int fd;              /* 0 = free; closed by the accept thread */
+    uint32_t subsystems; /* CHAM_UEVENT_SUBSYSTEM_* it wants */
+} g_monitors[MAX_MONITORS]; /* under g_evdev_lock */
+static uint64_t g_seqnum;            /* under g_evdev_lock */
 static int g_server_wake[2] = {-1, -1}; /* a reader's socket filled up: the accept thread sends the rest */
 
 /* Device state, on the input thread only. */
@@ -311,10 +320,30 @@ static void serve(int c)
             goto done;
     /* A reader asks for its device right away; a lister just closes. */
     struct pollfd p = {c, POLLIN, 0};
-    if (poll(&p, 1, 1000) != 1 || recv(c, &index, sizeof index, MSG_WAITALL) != (ssize_t)sizeof index ||
-        index >= DEV_COUNT)
+    if (poll(&p, 1, 1000) != 1 || recv(c, &index, sizeof index, MSG_WAITALL) != (ssize_t)sizeof index)
         goto done;
     fcntl(c, F_SETFL, fcntl(c, F_GETFL) | O_NONBLOCK);
+    if (index == CHAM_EVDEV_MONITOR) {
+        uint32_t subsystems;
+        if (poll(&p, 1, 1000) != 1 || recv(c, &subsystems, sizeof subsystems, MSG_WAITALL) != (ssize_t)sizeof subsystems)
+            goto done;
+        pthread_mutex_lock(&g_evdev_lock);
+        for (int i = 0; i < MAX_MONITORS && c >= 0; i++)
+            if (!g_monitors[i].fd) {
+                g_monitors[i].fd = c;
+                g_monitors[i].subsystems = subsystems;
+                c = -1;
+                cham_log("udev: a program watches %s devices",
+                         subsystems == CHAM_UEVENT_SUBSYSTEM_DRM     ? "drm"
+                         : subsystems == CHAM_UEVENT_SUBSYSTEM_INPUT ? "input"
+                         : subsystems                                ? "drm and input"
+                                                                     : "other");
+            }
+        pthread_mutex_unlock(&g_evdev_lock);
+        goto done;
+    }
+    if (index >= DEV_COUNT)
+        goto done;
     struct device *d = &g_dev[index];
     pthread_mutex_lock(&g_evdev_lock);
     for (int i = 0; i < MAX_READERS; i++) {
@@ -343,9 +372,11 @@ static void *server_main(void *arg)
 {
     int s = (int)(intptr_t)arg;
     for (;;) {
-        struct pollfd p[2 + DEV_COUNT * MAX_READERS] = {{s, POLLIN, 0}, {g_server_wake[0], POLLIN, 0}};
+        struct pollfd p[2 + DEV_COUNT * MAX_READERS + MAX_MONITORS] = {{s, POLLIN, 0}, {g_server_wake[0], POLLIN, 0}};
         int n = 2;
         pthread_mutex_lock(&g_evdev_lock);
+        for (int i = 0; i < MAX_MONITORS; i++) /* only their going away */
+            p[n++] = (struct pollfd){g_monitors[i].fd ? g_monitors[i].fd : -1, POLLIN, 0};
         for (int d = 0; d < DEV_COUNT; d++)
             for (int i = 0; i < MAX_READERS; i++) {
                 struct reader *r = &g_dev[d].readers[i];
@@ -364,9 +395,15 @@ static void *server_main(void *arg)
                 serve(c);
         }
         pthread_mutex_lock(&g_evdev_lock);
-        for (int k = 2; k < n; k++) {
-            struct device *d = &g_dev[(k - 2) / MAX_READERS];
-            int i = (k - 2) % MAX_READERS;
+        for (int i = 0; i < MAX_MONITORS; i++) {
+            if (g_monitors[i].fd && p[2 + i].fd == g_monitors[i].fd && p[2 + i].revents) {
+                close(g_monitors[i].fd); /* monitors don't write: readable means gone */
+                g_monitors[i].fd = 0;
+            }
+        }
+        for (int k = 2 + MAX_MONITORS; k < n; k++) {
+            struct device *d = &g_dev[(k - 2 - MAX_MONITORS) / MAX_READERS];
+            int i = (k - 2 - MAX_MONITORS) % MAX_READERS;
             struct reader *r = &d->readers[i];
             if (!r->fd || p[k].fd != r->fd)
                 continue;
@@ -407,7 +444,16 @@ void evdev_start(void)
     if (pipe2(g_server_wake, O_CLOEXEC | O_NONBLOCK) != 0)
         return;
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    unlink(addr.sun_path);
+    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof addr) == 0) {
+        cham_log("evdev: another server already answers at %s", addr.sun_path); /* a second copy of us */
+        close(s);
+        return;
+    }
+    if (s >= 0) { /* a socket can't connect twice */
+        close(s);
+        s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    }
+    unlink(addr.sun_path); /* left by a server that is gone */
     if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(s, 8) != 0) {
         cham_log("evdev: cannot serve input devices at %s: %s", addr.sun_path, strerror(errno));
         if (s >= 0)
@@ -418,6 +464,33 @@ void evdev_start(void)
     pthread_t t;
     if (pthread_create(&t, NULL, server_main, (void *)(intptr_t)s) == 0)
         pthread_detach(t);
+}
+
+/* Sends a uevent to every udev monitor. A monitor that isn't reading misses
+ * it, as a full netlink socket drops uevents. */
+void evdev_uevent(uint32_t what)
+{
+    pthread_mutex_lock(&g_evdev_lock);
+    struct {
+        struct cham_evdev_record h;
+        struct cham_uevent u;
+    } r = {{CHAM_EVDEV_UEVENT, sizeof r.u}, {what, 0, ++g_seqnum}};
+    const uint32_t subsystem = CHAM_UEVENT_SUBSYSTEM_DRM; /* the card's, so far the only uevent */
+    int sent = 0;
+    for (int i = 0; i < MAX_MONITORS; i++) {
+        if (!g_monitors[i].fd || !(g_monitors[i].subsystems & subsystem))
+            continue;
+        ssize_t n = send(g_monitors[i].fd, &r, sizeof r, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n == (ssize_t)sizeof r) {
+            sent++;
+            continue;
+        }
+        cham_log("evdev: a udev monitor missed an event");
+        if (n > 0) /* half a record: its stream is broken, it ends here */
+            shutdown(g_monitors[i].fd, SHUT_RDWR);
+    }
+    cham_log("udev: card hotplug sent to %d monitor%s", sent, sent == 1 ? "" : "s");
+    pthread_mutex_unlock(&g_evdev_lock);
 }
 
 /* ---- events (input thread) ---- */

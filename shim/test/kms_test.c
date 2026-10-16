@@ -341,6 +341,30 @@ int main(void)
     drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, rotated_blob);
 
+    /* A mode blob the CRTC uses outlives its destruction, as in the kernel:
+     * after a hotplug KWin destroys the old mode's blob, then still commits
+     * a frame on it before its modeset. */
+    uint32_t used_blob = 0;
+    drmModeCreatePropertyBlob(fd, &mode, sizeof mode, &used_blob);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, crtc_id, p_mode, used_blob);
+    int used = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0;
+    drmModeAtomicFree(req);
+    used = used && drmModeDestroyPropertyBlob(fd, used_blob) == 0;
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_dst[0], 0);
+    CHECK(used && drmModeAtomicCommit(fd, req, 0, NULL) == 0,
+          "the CRTC's mode blob, destroyed, still holds the mode for the next commit");
+    drmModeAtomicFree(req);
+    crtc = drmModeGetCrtc(fd, crtc_id);
+    CHECK(crtc && crtc->mode_valid && crtc->mode.hdisplay == mode.hdisplay, "...and GETCRTC still shows it");
+    drmModeFreeCrtc(crtc);
+    CHECK(drmModeDestroyPropertyBlob(fd, used_blob) != 0, "destroying it twice fails");
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, crtc_id, p_mode, blob);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0, "back to the first mode blob");
+    drmModeAtomicFree(req);
+
     printf("page flips (presenter at 120 Hz)\n");
     int ok = 1, busy_checked = 0;
     uint64_t t0 = now_ns();

@@ -5,9 +5,10 @@
  *
  * Chameleon is the device manager here. An Android app sees none of the
  * kernel's devices and can't open its uevent socket, so:
- *  - every udev monitor is Chameleon's own: an eventfd only Chameleon will
- *    signal (nothing does yet). KWin's GpuManager and libinput both need a
- *    working monitor to start at all.
+ *  - every udev monitor is Chameleon's own: a connection to the server that
+ *    receives its uevents (so far the card's hotplug when the app's window
+ *    changes), or, while no server runs, an eventfd that stays quiet. KWin's
+ *    GpuManager and libinput both need a working monitor to start at all.
  *  - subsystems "input" and "drm" are Chameleon's: the input devices KWin's
  *    libchameleon.so serves (common/chameleon_evdev.h), as devices eventN
  *    with node /dev/input/eventN (evdev.c answers for those nodes), and
@@ -48,7 +49,7 @@ struct udev_list_entry;
 
 #define MAGIC_ENTRY 0x43484d4c454e5452ull  /* "CHMLENTR" */
 #define MAGIC_DEVICE 0x43484d4c44455643ull /* "CHMLDEVC" */
-#define MAX_PROPS 10
+#define MAX_PROPS 13
 #define MAX_TAGS 3
 #define MAX_FILTERS 4
 #define MAX_LISTED (CHAM_EVDEV_MAX_DEVICES + 1) /* the input devices and the card */
@@ -66,6 +67,9 @@ struct dev {
     int refs;
     struct udev *udev;
     const char *subsystem, *devtype, *sysnum;
+    const char *action; /* a monitor's event, else NULL */
+    unsigned long long seqnum;
+    char seqnum_s[24];
     char sysname[16], syspath[4 + 64], devpath[64], devnode[108], major[8], minor[8], type[32];
     dev_t devnum;
     struct entry props[MAX_PROPS];
@@ -335,7 +339,8 @@ DEVICE_GETTER(dev_t, udev_device_get_devnum, d->devnum)
 DEVICE_GETTER(const char *, udev_device_get_subsystem, d->subsystem)
 DEVICE_GETTER(const char *, udev_device_get_devtype, d->devtype)
 DEVICE_GETTER(const char *, udev_device_get_driver, NULL)
-DEVICE_GETTER(const char *, udev_device_get_action, NULL)
+DEVICE_GETTER(const char *, udev_device_get_action, d->action)
+DEVICE_GETTER(unsigned long long, udev_device_get_seqnum, d->seqnum)
 DEVICE_GETTER(struct udev_device *, udev_device_get_parent, NULL)
 DEVICE_GETTER(int, udev_device_get_is_initialized, 1)
 DEVICE_GETTER(struct udev_list_entry *, udev_device_get_properties_list_entry, (struct udev_list_entry *)d->props)
@@ -688,9 +693,14 @@ EXPORT struct udev_list_entry *udev_enumerate_get_list_entry(struct udev_enumera
 
 struct udev_monitor {
     int refs;
-    int fd;
+    int fd;       /* an eventfd that stays quiet; the server connection from enable_receiving */
+    int server;
     struct udev *udev;
+    const char *subsystems[MAX_FILTERS]; /* none: everything */
+    int nsubsystems;
 };
+
+EXPORT int udev_monitor_filter_remove(struct udev_monitor *m);
 
 EXPORT struct udev_monitor *udev_monitor_new_from_netlink(struct udev *udev, const char *name)
 {
@@ -723,6 +733,7 @@ EXPORT struct udev_monitor *udev_monitor_unref(struct udev_monitor *m)
 {
     if (m && --m->refs == 0) {
         close(m->fd);
+        udev_monitor_filter_remove(m);
         free(m);
     }
     return NULL;
@@ -738,9 +749,32 @@ EXPORT int udev_monitor_get_fd(struct udev_monitor *m)
     return m ? m->fd : -EINVAL;
 }
 
+/* Connects to the server with the subsystems the filters let through; the
+ * connection takes over the fd number the program already has. Filters
+ * changed after this don't apply. */
 EXPORT int udev_monitor_enable_receiving(struct udev_monitor *m)
 {
-    return m ? 0 : -EINVAL;
+    if (!m)
+        return -EINVAL;
+    if (m->server)
+        return 0;
+    uint32_t subsystems = m->nsubsystems ? 0 : CHAM_UEVENT_SUBSYSTEM_DRM | CHAM_UEVENT_SUBSYSTEM_INPUT;
+    for (int i = 0; i < m->nsubsystems; i++)
+        subsystems |= strcmp(m->subsystems[i], "drm") == 0     ? CHAM_UEVENT_SUBSYSTEM_DRM
+                      : strcmp(m->subsystems[i], "input") == 0 ? CHAM_UEVENT_SUBSYSTEM_INPUT
+                                                               : 0;
+    const uint32_t req[2] = {CHAM_EVDEV_MONITOR, subsystems};
+    struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];
+    int s = connect_server(); /* none running: the eventfd stays */
+    if (s < 0)
+        return 0;
+    read_list(s, list, CHAM_EVDEV_MAX_DEVICES); /* the device list comes first */
+    if (send(s, req, sizeof req, MSG_NOSIGNAL) == (ssize_t)sizeof req && dup3(s, m->fd, O_CLOEXEC) == m->fd) {
+        fcntl(m->fd, F_SETFL, fcntl(m->fd, F_GETFL) | O_NONBLOCK);
+        m->server = 1;
+    }
+    close(s);
+    return 0;
 }
 
 EXPORT int udev_monitor_set_receive_buffer_size(struct udev_monitor *m, int size)
@@ -750,11 +784,15 @@ EXPORT int udev_monitor_set_receive_buffer_size(struct udev_monitor *m, int size
 }
 
 /* Filters narrow down Chameleon's events, which are few and all wanted. */
+/* Chameleon's devices have one devtype per subsystem, so the subsystem
+ * decides. */
 EXPORT int udev_monitor_filter_add_match_subsystem_devtype(struct udev_monitor *m, const char *subsystem,
                                                            const char *devtype)
 {
-    (void)subsystem, (void)devtype;
-    return m ? 0 : -EINVAL;
+    (void)devtype;
+    if (!m || !subsystem)
+        return -EINVAL;
+    return add_filter(m->subsystems, &m->nsubsystems, subsystem);
 }
 
 EXPORT int udev_monitor_filter_add_match_tag(struct udev_monitor *m, const char *tag)
@@ -770,12 +808,39 @@ EXPORT int udev_monitor_filter_update(struct udev_monitor *m)
 
 EXPORT int udev_monitor_filter_remove(struct udev_monitor *m)
 {
-    return m ? 0 : -EINVAL;
+    if (!m)
+        return -EINVAL;
+    for (int i = 0; i < m->nsubsystems; i++)
+        free((void *)m->subsystems[i]);
+    m->nsubsystems = 0;
+    return 0;
 }
 
+/* The next event (the server applied the filters), or NULL (EAGAIN) once
+ * none is waiting. */
 EXPORT struct udev_device *udev_monitor_receive_device(struct udev_monitor *m)
 {
-    (void)m;
+    struct cham_evdev_record h;
+    struct cham_uevent u;
+    while (m && m->server && recv(m->fd, &h, sizeof h, 0) == (ssize_t)sizeof h) {
+        if (h.type != CHAM_EVDEV_UEVENT || h.size != sizeof u || recv(m->fd, &u, sizeof u, MSG_WAITALL) != (ssize_t)sizeof u)
+            break; /* not a stream we understand: no more events */
+        if (u.what != CHAM_UEVENT_CARD_HOTPLUG)
+            continue;
+        struct dev *d = malloc(sizeof *d);
+        if (!d)
+            break;
+        describe_card(d, m->udev);
+        d->action = "change";
+        d->seqnum = u.seqnum;
+        snprintf(d->seqnum_s, sizeof d->seqnum_s, "%llu", (unsigned long long)u.seqnum);
+        struct entry *p = d->props;
+        p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ACTION", "change", NULL};
+        p[d->nprops++] = (struct entry){MAGIC_ENTRY, "SEQNUM", d->seqnum_s, NULL};
+        p[d->nprops++] = (struct entry){MAGIC_ENTRY, "HOTPLUG", "1", NULL};
+        link_entries(p, d->nprops);
+        return (struct udev_device *)d;
+    }
     errno = EAGAIN;
     return NULL;
 }

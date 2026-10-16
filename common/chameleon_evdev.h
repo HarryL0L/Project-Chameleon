@@ -10,7 +10,11 @@
  * cham_evdev_info; the client then either closes, or writes a uint32_t
  * device index and from then on exchanges records (struct
  * cham_evdev_record, then `size` bytes) with the server: first a STATE,
- * then the device's frames as they happen.
+ * then the device's frames as they happen. A udev monitor writes
+ * CHAM_EVDEV_MONITOR instead of an index, then a uint32_t of
+ * CHAM_UEVENT_SUBSYSTEM_* bits (the subsystems its filters let through), and
+ * receives UEVENT records, one per uevent that passes, as the netlink
+ * socket of a real monitor would.
  *
  * The server applies the kernel's input core rules (events that change
  * nothing are dropped, ABS_MT_SLOT is held back until a slot's value
@@ -62,9 +66,23 @@ enum cham_evdev_record_type {
     CHAM_EVDEV_FRAME_GRABBED, /* the same while another client holds the grab: state only */
     CHAM_EVDEV_GRAB_RESULT,   /* int32_t: 0 or -errno, for the client's last GRAB */
     CHAM_EVDEV_ABSINFO,       /* uint32_t axis, struct input_absinfo: EVIOCSABS by any client */
+    CHAM_EVDEV_UEVENT,        /* struct cham_uevent, to monitors */
     /* client -> server */
     CHAM_EVDEV_GRAB = 16,     /* int32_t: 1 grab, 0 release (EVIOCGRAB) */
     CHAM_EVDEV_SET_ABS,       /* uint32_t axis, struct input_absinfo (EVIOCSABS) */
+};
+
+/* The "index" a udev monitor connects with. */
+#define CHAM_EVDEV_MONITOR 0x4d4f4e49u /* "MONI" */
+
+/* A uevent: so far only the card's "change" with HOTPLUG=1, which the kernel
+ * sends when a connector's modes or status changed. */
+enum { CHAM_UEVENT_CARD_HOTPLUG = 1 };
+enum { CHAM_UEVENT_SUBSYSTEM_DRM = 1, CHAM_UEVENT_SUBSYSTEM_INPUT = 2 };
+struct cham_uevent {
+    uint32_t what;
+    uint32_t pad;
+    uint64_t seqnum;
 };
 
 static inline void cham_bit_set(uint8_t *bits, unsigned n)

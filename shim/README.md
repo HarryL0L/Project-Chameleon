@@ -87,9 +87,9 @@ screen keeps its first size instead of following the app's window).
   libudev, without its monitor events. Any program in the session
   (`libinput debug-events`) sees the same devices while KWin runs.
 - KWin's screen follows the app's window (rotation, keyboard) and the
-  display's refresh rate (battery saver): the shim
-  switches KWin's mode over `kde_output_management_v2`, adding a custom mode
-  when needed (`core/output.c`).
+  display's refresh rate (battery saver): the connector's one mode becomes
+  the window's, and the card sends a hotplug uevent to udev monitors, which
+  are connections to the same server (`core/kms.c`, `udev/udev.c`).
 - Clipboard: text is shared with Android both ways through KWin's
   `ext_data_control_v1` (KWin 6.4+; `core/clipboard.c`), only in pipes.
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
@@ -116,8 +116,8 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   real libinput through `libchameleon_udev.so`: listing, nodes, multitouch,
   keys, relative motion, buttons, wheel, touchpad motion and tapping
   (`evdev_test`);
-- the screen following the app's window and refresh rate, against a
-  stand-in for KWin's output management (`output_test`);
+- the screen following the app's window: the connector's mode and the
+  card's hotplug uevent, filtered by subsystem (`evdev_test`);
 - udev monitors and libinput's udev backend starting on them, and other
   subsystems passing through, with the system's real libudev and libinput
   (`udev_test`);
