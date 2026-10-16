@@ -77,8 +77,10 @@ screen keeps its first size instead of following the app's window).
   `chameleon`, is the device manager:
   every udev monitor is Chameleon's own, since an Android app can't open the
   kernel's uevent socket (`udev/udev.c`), subsystem `input` is Chameleon's
-  input devices, and their `/dev/input/eventN` nodes open, stat and answer
-  evdev ioctls like the kernel's (`udev/evdev.c`), and subsystem `drm` is
+  input devices, and their `/dev/input/eventN` nodes open, stat, read and
+  answer evdev ioctls like the kernel's (`udev/evdev.c`): each open file has
+  evdev's queue (whole frames, `SYN_DROPPED` when it overflows), live key,
+  axis and touch state, its own clock, grab and revoke, and subsystem `drm` is
   the fake card, `card0` with node `/dev/dri/card0`, which compositors find
   the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`). Enumerations of other
   subsystems (`power_supply`, `backlight`, ...) pass through to the real

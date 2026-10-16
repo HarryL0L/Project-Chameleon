@@ -8,8 +8,14 @@
  * Socket: $XDG_RUNTIME_DIR/chameleon-evdev (SOCK_STREAM). On connect the
  * server writes a uint32_t device count and that many struct
  * cham_evdev_info; the client then either closes, or writes a uint32_t
- * device index and from then on reads that device's struct input_event
- * stream, one whole SYN_REPORT frame per write.
+ * device index and from then on exchanges records (struct
+ * cham_evdev_record, then `size` bytes) with the server: first a STATE,
+ * then the device's frames as they happen.
+ *
+ * The server applies the kernel's input core rules (events that change
+ * nothing are dropped, ABS_MT_SLOT is held back until a slot's value
+ * changes), so the frames are what the kernel's evdev would pass on; the
+ * client keeps each open file's queue the way evdev does.
  */
 #ifndef CHAMELEON_EVDEV_H
 #define CHAMELEON_EVDEV_H
@@ -34,6 +40,33 @@ struct cham_evdev_info {
     struct input_absinfo absinfo[ABS_CNT];
 };
 
+#define CHAM_EVDEV_SLOTS 10 /* multitouch slots at most */
+#define CHAM_MT_CODES (ABS_MT_TOOL_Y - ABS_MT_TOUCH_MAJOR + 1)
+
+/* What evdev's state ioctls report: the device as it is now. */
+struct cham_evdev_state {
+    uint8_t key[CHAM_BITS(KEY_CNT)];        /* keys and buttons held */
+    int32_t abs[ABS_CNT];                   /* axis values; ABS_MT_SLOT's is the current slot */
+    int32_t slot[CHAM_EVDEV_SLOTS][CHAM_MT_CODES]; /* each slot's multitouch values */
+};
+
+struct cham_evdev_record {
+    uint32_t type;
+    uint32_t size; /* bytes after this header */
+};
+
+enum cham_evdev_record_type {
+    /* server -> client */
+    CHAM_EVDEV_STATE = 1,     /* struct cham_evdev_state; again later = events were lost */
+    CHAM_EVDEV_FRAME,         /* struct input_event[], the last a SYN_REPORT */
+    CHAM_EVDEV_FRAME_GRABBED, /* the same while another client holds the grab: state only */
+    CHAM_EVDEV_GRAB_RESULT,   /* int32_t: 0 or -errno, for the client's last GRAB */
+    CHAM_EVDEV_ABSINFO,       /* uint32_t axis, struct input_absinfo: EVIOCSABS by any client */
+    /* client -> server */
+    CHAM_EVDEV_GRAB = 16,     /* int32_t: 1 grab, 0 release (EVIOCGRAB) */
+    CHAM_EVDEV_SET_ABS,       /* uint32_t axis, struct input_absinfo (EVIOCSABS) */
+};
+
 static inline void cham_bit_set(uint8_t *bits, unsigned n)
 {
     bits[n / 8] |= (uint8_t)(1u << (n % 8));
@@ -42,6 +75,58 @@ static inline void cham_bit_set(uint8_t *bits, unsigned n)
 static inline int cham_bit_test(const uint8_t *bits, unsigned n)
 {
     return (bits[n / 8] >> (n % 8)) & 1;
+}
+
+static inline int cham_is_mt_value(unsigned code)
+{
+    return code >= ABS_MT_TOUCH_MAJOR && code <= ABS_MT_TOOL_Y;
+}
+
+static inline void cham_evdev_state_init(struct cham_evdev_state *s)
+{
+    *s = (struct cham_evdev_state){0};
+    for (int i = 0; i < CHAM_EVDEV_SLOTS; i++)
+        s->slot[i][ABS_MT_TRACKING_ID - ABS_MT_TOUCH_MAJOR] = -1; /* no contact */
+}
+
+/* Applies an event the kernel passed on to the device state. */
+static inline void cham_evdev_state_apply(struct cham_evdev_state *s, const struct input_event *e)
+{
+    if (e->type == EV_KEY && e->code < KEY_CNT) {
+        if (e->value == 1)
+            cham_bit_set(s->key, e->code);
+        else if (e->value == 0)
+            s->key[e->code / 8] &= (uint8_t) ~(1u << (e->code % 8));
+    } else if (e->type == EV_ABS && e->code < ABS_CNT) {
+        int32_t slot = s->abs[ABS_MT_SLOT];
+        if (!cham_is_mt_value(e->code))
+            s->abs[e->code] = e->value;
+        else if (slot >= 0 && slot < CHAM_EVDEV_SLOTS)
+            s->slot[slot][e->code - ABS_MT_TOUCH_MAJOR] = e->value;
+    }
+}
+
+/* How many events evdev queues per open file of this device: the kernel's
+ * estimate of a frame's size, times 8 frames, at least 64, rounded up to a
+ * power of two. */
+static inline unsigned cham_evdev_queue_size(const struct cham_evdev_info *d)
+{
+    unsigned slots = 0, events, n = 1;
+    if (cham_bit_test(d->abs, ABS_MT_SLOT))
+        slots = (unsigned)d->absinfo[ABS_MT_SLOT].maximum + 1;
+    events = slots + 1;
+    if (cham_bit_test(d->ev, EV_ABS))
+        for (unsigned a = 0; a < ABS_CNT; a++)
+            if (cham_bit_test(d->abs, a))
+                events += a == ABS_MT_SLOT || cham_is_mt_value(a) ? slots : 1;
+    if (cham_bit_test(d->ev, EV_REL))
+        for (unsigned r = 0; r < REL_CNT; r++)
+            events += cham_bit_test(d->rel, r);
+    events += 7; /* keys and MSC */
+    events = events * 8 > 64 ? events * 8 : 64;
+    while (n < events)
+        n <<= 1;
+    return n;
 }
 
 #endif

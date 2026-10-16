@@ -41,22 +41,31 @@ enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_COUNT };
 #define FRAME_EVENTS (TOUCH_SLOTS * 5 + 4)
 #define AXIS_MAX 65535
 
+#define OUT_MAX 16384 /* bytes queued for a reader whose socket is full */
+
 struct reader {
-    int fd; /* 0 = free */
-    size_t pending; /* bytes of a partly sent frame still to send */
-    char rest[FRAME_EVENTS * sizeof(struct input_event)];
+    int fd;   /* 0 = free; closed by the accept thread only */
+    int dead; /* the program went away; the accept thread closes it */
+    int lost; /* frames didn't fit: it gets a fresh STATE once the queue drains */
+    size_t out_len;
+    char out[OUT_MAX];
+    size_t in_len; /* a request read in part */
+    char in[sizeof(struct cham_evdev_record) + sizeof(uint32_t) + sizeof(struct input_absinfo)];
 };
 
 static struct device {
-    struct cham_evdev_info info;   /* accept thread only, after evdev_start() */
+    struct cham_evdev_info info; /* under g_evdev_lock once served (EVIOCSABS) */
     struct reader readers[MAX_READERS]; /* under g_evdev_lock */
     int reader_count;
-    int fresh; /* a reader came: send whole state again, it doesn't know ours */
+    int grab; /* the reader holding EVIOCGRAB, or -1 */
+    struct cham_evdev_state state; /* under g_evdev_lock: the device as readers' frames left it */
+    int32_t staged_slot; /* input thread: ABS_MT_SLOT not yet passed on */
     struct input_event frame[FRAME_EVENTS]; /* input thread only */
     int frame_len;
     int64_t last_time; /* ns, of the last frame sent */
 } g_dev[DEV_COUNT];
 static pthread_mutex_t g_evdev_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_server_wake[2] = {-1, -1}; /* a reader's socket filled up: the accept thread sends the rest */
 
 /* Device state, on the input thread only. */
 static struct mt {         /* a multitouch device (protocol B) */
@@ -184,6 +193,113 @@ static int write_all(int fd, const void *buf, size_t len)
     return 0;
 }
 
+/* ---- the readers' streams (under g_evdev_lock) ---- */
+
+static void append(struct reader *r, uint32_t type, const void *a, size_t a_len, const void *b, size_t b_len)
+{
+    struct cham_evdev_record h = {type, (uint32_t)(a_len + b_len)};
+    memcpy(r->out + r->out_len, &h, sizeof h);
+    memcpy(r->out + r->out_len + sizeof h, a, a_len);
+    if (b_len)
+        memcpy(r->out + r->out_len + sizeof h + a_len, b, b_len);
+    r->out_len += sizeof h + a_len + b_len;
+}
+
+/* Sends what it can of r's queue; once a reader that lost frames has taken
+ * it all, it gets the device's state again, which tells it events were
+ * lost. A program that went away is marked for the accept thread. */
+static void send_out(struct device *d, struct reader *r)
+{
+    while (r->out_len && !r->dead) {
+        ssize_t n = send(r->fd, r->out, r->out_len, MSG_NOSIGNAL | MSG_DONTWAIT);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0) {
+            r->dead = errno != EAGAIN;
+            return;
+        }
+        r->out_len -= (size_t)n;
+        memmove(r->out, r->out + n, r->out_len);
+        if (!r->out_len && r->lost) {
+            r->lost = 0;
+            append(r, CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
+        }
+    }
+}
+
+/* Queues a record (header, a then b) and sends what it can. A frame that
+ * doesn't fit in the queue is lost; the other records are small and rare,
+ * and a program that can't take even those is given up on. */
+static void queue_record(struct device *d, struct reader *r, uint32_t type, const void *a, size_t a_len,
+                         const void *b, size_t b_len)
+{
+    if (r->dead)
+        return;
+    int frame = type == CHAM_EVDEV_FRAME || type == CHAM_EVDEV_FRAME_GRABBED;
+    int fits = r->out_len + sizeof(struct cham_evdev_record) + a_len + b_len <= sizeof r->out;
+    if (frame && (r->lost || !fits))
+        r->lost = 1;
+    else if (fits)
+        append(r, type, a, a_len, b, b_len);
+    else
+        r->dead = 1;
+    send_out(d, r);
+    if ((r->out_len || r->dead) && write(g_server_wake[1], "", 1) < 0) {
+        /* full: the accept thread is awake anyway */
+    }
+}
+
+/* A request from reader i: EVIOCGRAB or EVIOCSABS, as the kernel answers them. */
+static void request(struct device *d, int i, const struct cham_evdev_record *h, const void *payload)
+{
+    struct reader *r = &d->readers[i];
+    if (h->type == CHAM_EVDEV_GRAB && h->size == sizeof(int32_t)) {
+        int32_t on, result = 0;
+        memcpy(&on, payload, sizeof on);
+        if (on && d->grab >= 0)
+            result = -EBUSY;
+        else if (!on && d->grab != i)
+            result = -EINVAL;
+        else
+            d->grab = on ? i : -1;
+        queue_record(d, r, CHAM_EVDEV_GRAB_RESULT, &result, sizeof result, NULL, 0);
+    } else if (h->type == CHAM_EVDEV_SET_ABS && h->size == sizeof(uint32_t) + sizeof(struct input_absinfo)) {
+        uint32_t axis;
+        struct input_absinfo ai;
+        memcpy(&axis, payload, sizeof axis);
+        memcpy(&ai, (const char *)payload + sizeof axis, sizeof ai);
+        if (axis >= ABS_CNT || axis == ABS_MT_SLOT)
+            return;
+        d->info.absinfo[axis] = ai;
+        d->state.abs[axis] = ai.value;
+        for (int j = 0; j < MAX_READERS; j++)
+            if (d->readers[j].fd)
+                queue_record(d, &d->readers[j], CHAM_EVDEV_ABSINFO, &axis, sizeof axis, &ai, sizeof ai);
+    }
+}
+
+/* Reads reader i's requests; 0 once it has gone away. */
+static int take_requests(struct device *d, int i)
+{
+    struct reader *r = &d->readers[i];
+    for (;;) {
+        ssize_t n = recv(r->fd, r->in + r->in_len, sizeof r->in - r->in_len, MSG_DONTWAIT);
+        if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR))
+            return 0;
+        if (n < 0)
+            return 1;
+        r->in_len += (size_t)n;
+        const struct cham_evdev_record *h = (const void *)r->in;
+        if (r->in_len >= sizeof *h && h->size > sizeof r->in - sizeof *h)
+            return 0; /* not one of ours */
+        if (r->in_len >= sizeof *h && r->in_len >= sizeof *h + h->size) {
+            request(d, i, h, r->in + sizeof *h);
+            r->in_len -= sizeof *h + h->size;
+            memmove(r->in, r->in + sizeof *h + h->size, r->in_len);
+        }
+    }
+}
+
 static void serve(int c)
 {
     uint32_t count = DEV_COUNT, index = UINT32_MAX;
@@ -203,9 +319,10 @@ static void serve(int c)
     pthread_mutex_lock(&g_evdev_lock);
     for (int i = 0; i < MAX_READERS; i++) {
         if (!d->readers[i].fd) {
+            /* It learns the device as it is now; every frame from here on follows. */
             d->readers[i] = (struct reader){.fd = c};
+            queue_record(d, &d->readers[i], CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
             d->reader_count++;
-            d->fresh = 1;
             c = -1;
             break;
         }
@@ -220,15 +337,53 @@ done:
         close(c);
 }
 
+/* New connections, and the readers: their requests, the rest of their
+ * queues, their going away. */
 static void *server_main(void *arg)
 {
     int s = (int)(intptr_t)arg;
     for (;;) {
-        int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
-        if (c >= 0)
-            serve(c);
-        else if (errno != EINTR && errno != ECONNABORTED)
+        struct pollfd p[2 + DEV_COUNT * MAX_READERS] = {{s, POLLIN, 0}, {g_server_wake[0], POLLIN, 0}};
+        int n = 2;
+        pthread_mutex_lock(&g_evdev_lock);
+        for (int d = 0; d < DEV_COUNT; d++)
+            for (int i = 0; i < MAX_READERS; i++) {
+                struct reader *r = &g_dev[d].readers[i];
+                p[n++] = (struct pollfd){r->fd ? r->fd : -1, (short)(POLLIN | (r->out_len ? POLLOUT : 0)), 0};
+            }
+        pthread_mutex_unlock(&g_evdev_lock);
+        if (poll(p, (nfds_t)n, -1) < 0 && errno != EINTR)
             break;
+        char b[64];
+        if (p[1].revents & POLLIN)
+            while (read(g_server_wake[0], b, sizeof b) == (ssize_t)sizeof b)
+                ;
+        if (p[0].revents & POLLIN) {
+            int c = accept4(s, NULL, NULL, SOCK_CLOEXEC);
+            if (c >= 0)
+                serve(c);
+        }
+        pthread_mutex_lock(&g_evdev_lock);
+        for (int k = 2; k < n; k++) {
+            struct device *d = &g_dev[(k - 2) / MAX_READERS];
+            int i = (k - 2) % MAX_READERS;
+            struct reader *r = &d->readers[i];
+            if (!r->fd || p[k].fd != r->fd)
+                continue;
+            if (p[k].revents & POLLOUT)
+                send_out(d, r);
+            if ((p[k].revents & (POLLIN | POLLHUP | POLLERR)) && !take_requests(d, i))
+                r->dead = 1;
+            if (!r->dead)
+                continue;
+            close(r->fd);
+            r->fd = 0;
+            d->reader_count--;
+            if (d->grab == i)
+                d->grab = -1;
+            cham_log("evdev: a program closed the %s", d->info.name + strlen("Chameleon "));
+        }
+        pthread_mutex_unlock(&g_evdev_lock);
     }
     return NULL;
 }
@@ -243,8 +398,14 @@ void evdev_start(void)
     describe();
     for (int i = 0; i < TOUCH_SLOTS; i++)
         g_touch.slot_id[i] = g_pad.slot_id[i] = -1;
+    for (int d = 0; d < DEV_COUNT; d++) {
+        g_dev[d].grab = -1;
+        cham_evdev_state_init(&g_dev[d].state);
+    }
     g_touch.cur_slot = g_touch.abs_x = g_touch.abs_y = -1;
     g_pad.cur_slot = g_pad.abs_x = g_pad.abs_y = -1;
+    if (pipe2(g_server_wake, O_CLOEXEC | O_NONBLOCK) != 0)
+        return;
     int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     unlink(addr.sun_path);
     if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(s, 8) != 0) {
@@ -261,23 +422,44 @@ void evdev_start(void)
 
 /* ---- events (input thread) ---- */
 
-static void add(struct device *d, uint16_t type, uint16_t code, int32_t value)
+static void push(struct device *d, uint16_t type, uint16_t code, int32_t value)
 {
-    if (d->frame_len < FRAME_EVENTS)
-        d->frame[d->frame_len++] = (struct input_event){.type = type, .code = code, .value = value};
+    struct input_event e = {.type = type, .code = code, .value = value};
+    if (d->frame_len < FRAME_EVENTS) {
+        d->frame[d->frame_len++] = e;
+        cham_evdev_state_apply(&d->state, &e);
+    }
 }
 
-/* Sends what it can of buf; keeps the rest for next time so the stream stays
- * whole events. -1 if the reader is gone. */
-static int send_some(struct reader *r, const char *buf, size_t len)
+/* Queues an event for the next frame the way the kernel's input core passes
+ * events on: a key only when it changes, a relative motion only when it
+ * moves, an axis only when its value changes (a multitouch axis: in the
+ * current slot), and ABS_MT_SLOT held back until a value of another slot
+ * than the last one passed on follows. */
+static void add(struct device *d, uint16_t type, uint16_t code, int32_t value)
 {
-    ssize_t n = send(r->fd, buf, len, MSG_NOSIGNAL | MSG_DONTWAIT);
-    if (n < 0 && errno != EAGAIN)
-        return -1;
-    n = n < 0 ? 0 : n;
-    r->pending = len - (size_t)n;
-    memmove(r->rest, buf + n, r->pending);
-    return 0;
+    pthread_mutex_lock(&g_evdev_lock);
+    struct cham_evdev_state *s = &d->state;
+    int pass = 1;
+    if (type == EV_KEY) {
+        pass = code < KEY_CNT && cham_bit_test(d->info.key, code) &&
+               (value == 2 || cham_bit_test(s->key, code) != !!value);
+    } else if (type == EV_REL) {
+        pass = value != 0;
+    } else if (type == EV_ABS && code == ABS_MT_SLOT) {
+        if (value >= 0 && value <= d->info.absinfo[ABS_MT_SLOT].maximum)
+            d->staged_slot = value;
+        pass = 0;
+    } else if (type == EV_ABS && code < ABS_CNT) {
+        int mt = cham_is_mt_value(code) && cham_bit_test(d->info.abs, ABS_MT_SLOT);
+        int32_t old = mt ? s->slot[d->staged_slot][code - ABS_MT_TOUCH_MAJOR] : s->abs[code];
+        pass = old != value;
+        if (pass && mt && d->staged_slot != s->abs[ABS_MT_SLOT])
+            push(d, EV_ABS, ABS_MT_SLOT, d->staged_slot);
+    }
+    if (pass)
+        push(d, type, code, value);
+    pthread_mutex_unlock(&g_evdev_lock);
 }
 
 /* Sends the queued events and a SYN_REPORT to every reader, as one write;
@@ -294,27 +476,17 @@ static void flush(struct device *d)
     int64_t t = g_event_time && g_event_time < now ? g_event_time : now;
     t = t > d->last_time ? t : d->last_time;
     d->last_time = t;
-    add(d, EV_SYN, SYN_REPORT, 0);
+    pthread_mutex_lock(&g_evdev_lock);
+    push(d, EV_SYN, SYN_REPORT, 0);
     for (int i = 0; i < d->frame_len; i++) {
         d->frame[i].input_event_sec = t / 1000000000;
         d->frame[i].input_event_usec = t % 1000000000 / 1000;
     }
-    pthread_mutex_lock(&g_evdev_lock);
-    for (int i = 0; i < MAX_READERS; i++) {
-        struct reader *r = &d->readers[i];
-        if (!r->fd)
-            continue;
-        /* A reader too slow to take a whole frame loses it, like a full evdev buffer. */
-        int ret = r->pending ? send_some(r, r->rest, r->pending) : 0;
-        if (ret == 0 && !r->pending)
-            ret = send_some(r, (const char *)d->frame, d->frame_len * sizeof *d->frame);
-        if (ret < 0) {
-            close(r->fd);
-            r->fd = 0;
-            d->reader_count--;
-            cham_log("evdev: a program closed the %s", d->info.name + strlen("Chameleon "));
-        }
-    }
+    /* While a reader holds the grab, the others' devices still change. */
+    for (int i = 0; i < MAX_READERS; i++)
+        if (d->readers[i].fd)
+            queue_record(d, &d->readers[i], d->grab < 0 || d->grab == i ? CHAM_EVDEV_FRAME : CHAM_EVDEV_FRAME_GRABBED,
+                         d->frame, d->frame_len * sizeof *d->frame, NULL, 0);
     pthread_mutex_unlock(&g_evdev_lock);
     d->frame_len = 0;
 }
@@ -325,15 +497,6 @@ static int has_readers(const struct device *d)
     int n = d->reader_count;
     pthread_mutex_unlock(&g_evdev_lock);
     return n > 0;
-}
-
-static int take_fresh(struct device *d)
-{
-    pthread_mutex_lock(&g_evdev_lock);
-    int fresh = d->fresh;
-    d->fresh = 0;
-    pthread_mutex_unlock(&g_evdev_lock);
-    return fresh;
 }
 
 /* A key or button event, unless it would leave the device stuck: a press
@@ -439,11 +602,6 @@ static int touch(struct device *d, struct mt *t, unsigned kind, const struct cha
 {
     if (!t->touching && !has_readers(d))
         return 0;
-    if (take_fresh(d)) {
-        t->cur_slot = t->abs_x = t->abs_y = -1;
-        for (int i = 0; i < TOUCH_SLOTS; i++)
-            t->x[i] = t->y[i] = -1;
-    }
     int slot;
     switch (kind) {
     case CHAM_INPUT_TOUCH_DOWN:

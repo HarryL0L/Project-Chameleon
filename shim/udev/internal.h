@@ -21,9 +21,10 @@ static inline dev_t cham_evdev_devnum(int index)
 
 /* The devices KWin's libchameleon.so serves; 0 if it isn't running. */
 int cham_evdev_list(struct cham_evdev_info *out, int max);
-/* A reader's socket for device `index` (blocking unless nonblock), or -1;
- * fills *info with the device's description. */
-int cham_evdev_open(int index, int nonblock, struct cham_evdev_info *info);
+/* A connection to the server for device `index` (its records follow:
+ * common/chameleon_evdev.h), or -1; fills *info with the device's
+ * description. */
+int cham_evdev_open(int index, struct cham_evdev_info *info);
 /* N for "/dev/input/eventN" (devnode) or ".../eventN" (syspath), else -1. */
 int cham_evdev_index(const char *path, const char *prefix);
 

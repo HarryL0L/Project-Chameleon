@@ -142,7 +142,7 @@ int cham_evdev_list(struct cham_evdev_info *out, int max)
     return n;
 }
 
-int cham_evdev_open(int index, int nonblock, struct cham_evdev_info *info)
+int cham_evdev_open(int index, struct cham_evdev_info *info)
 {
     struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];
     uint32_t want = (uint32_t)index;
@@ -155,8 +155,6 @@ int cham_evdev_open(int index, int nonblock, struct cham_evdev_info *info)
         return -1;
     }
     *info = list[index];
-    if (nonblock)
-        fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
     return s;
 }
 

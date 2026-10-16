@@ -446,6 +446,19 @@ static void keyboard(const char *path)
     clk = 12345;
     printf("SCLOCKID(bogus) %s\n", err(ioctl(fd, EVIOCSCLOCKID, &clk)));
 
+    /* A dup()ed fd is the same open file: one queue. */
+    int dupfd = dup(fd);
+    key(KEY_H, 1);
+    key(KEY_H, 0);
+    settle();
+    drain(dupfd, "dup", 1);
+    drain(fd, "after dup's read", 0);
+    close(dupfd);
+    key(KEY_H, 1);
+    key(KEY_H, 0);
+    settle();
+    drain(fd, "after closing the dup", 0);
+
     /* Exclusive grab. */
     int fd2 = open_node(path);
     printf("GRAB(fd1) %s\n", err(ioctl(fd, EVIOCGRAB, (void *)1)));

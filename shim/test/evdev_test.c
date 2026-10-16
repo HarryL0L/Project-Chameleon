@@ -13,6 +13,8 @@
 #include <libudev.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <signal.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,7 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -70,6 +73,38 @@ static struct libinput_event *wait_event(struct libinput *li, enum libinput_even
         poll(&p, 1, 20);
     }
     return NULL;
+}
+
+/* Keeps key events coming while the test forks. */
+static volatile int g_typing;
+static void *type_keys(void *arg)
+{
+    int c = *(int *)arg;
+    for (int down = 1; g_typing; down = !down)
+        send_input(c, CHAM_INPUT_KEY, KEY_B, (uint64_t)down);
+    return NULL;
+}
+
+/* A forked child closes every inherited fd, as a process spawn does before
+ * exec; it must not hang on state the parent's helper thread held. */
+static int fork_and_close(void)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        for (int fd = 3; fd < 1024; fd++)
+            close(fd);
+        _exit(0);
+    }
+    for (int i = 0; pid > 0 && i < 200; i++) {
+        if (waitpid(pid, NULL, WNOHANG) == pid)
+            return 1;
+        usleep(10000);
+    }
+    if (pid > 0) {
+        kill(pid, SIGKILL);
+        waitpid(pid, NULL, 0);
+    }
+    return 0;
 }
 
 int main(void)
@@ -296,6 +331,16 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(button == BTN_LEFT, "touchpad: a tap is a left click (button 0x%x)", button);
+
+    g_typing = 1;
+    pthread_t typist;
+    pthread_create(&typist, NULL, type_keys, &c);
+    int forks = 0;
+    while (forks < 300 && fork_and_close())
+        forks++;
+    g_typing = 0;
+    pthread_join(typist, NULL);
+    CHECK(forks == 300, "fork while events arrive: the child closes its fds and exits (%d of 300)", forks);
 
     if (li)
         libinput_unref(li);

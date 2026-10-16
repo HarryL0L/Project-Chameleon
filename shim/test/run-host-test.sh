@@ -32,7 +32,7 @@ mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
 CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/input_test"
 # ...or, once something reads it, to the evdev touchscreen, through real libinput.
-cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c $(pkg-config --cflags --libs libinput libudev)
+cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(pkg-config --cflags --libs libinput libudev)
 mkdir -p "$OUT/runtime-ev" && chmod 700 "$OUT/runtime-ev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
