@@ -54,9 +54,20 @@ int main(void)
     const char *vendor = eglQueryString(dpy, EGL_VENDOR);
     CHECK(vendor && strcmp(vendor, "fake Android") == 0, "display belongs to the Android driver");
     const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);
-    if (kwin)
+    if (kwin) {
         CHECK(exts && strstr(exts, "EGL_EXT_image_dma_buf_import"), "dmabuf import for KWin");
-    else
+        /* Everything gbm allocates is importable, or KWin takes those formats
+         * for external-only and can't render into them. */
+        PFNEGLQUERYDMABUFFORMATSEXTPROC query_formats =
+            (PFNEGLQUERYDMABUFFORMATSEXTPROC)eglGetProcAddress("eglQueryDmaBufFormatsEXT");
+        EGLint formats[16], n = 0;
+        int listed = 0;
+        if (query_formats && query_formats(dpy, 16, formats, &n))
+            for (EGLint i = 0; i < n; i++)
+                listed += formats[i] == 0x34324258 || formats[i] == 0x34324241 || formats[i] == 0x34325258 ||
+                          formats[i] == 0x34325241; /* XB24 AB24 XR24 AR24 */
+        CHECK(listed == 4, "dmabuf import of XBGR/ABGR/XRGB/ARGB8888, gbm's formats (%d of 4)", listed);
+    } else
         CHECK(exts && !strstr(exts, "dma_buf_import"), "no dmabuf import outside KWin");
 
     CHECK(eglBindAPI(EGL_OPENGL_ES_API), "eglBindAPI(GLES)");

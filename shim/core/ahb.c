@@ -173,7 +173,10 @@ static int ahb_load(void)
 }
 #endif
 
-static const uint32_t k_formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888};
+/* Every format gbm allocates (ahb_format below); EGL imports them all, as a
+ * real driver imports what its gbm allocates. */
+static const uint32_t k_formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_XRGB8888,
+                                     DRM_FORMAT_ARGB8888};
 
 const uint32_t *cham_formats(int *count)
 {

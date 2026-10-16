@@ -406,8 +406,9 @@ static int get_plane(struct drm_mode_get_plane *p)
 {
     if (p->plane_id != ID_PLANE)
         return -ENOENT;
-    int n;
-    const uint32_t *formats = cham_formats(&n);
+    /* The formats the app shows: RGBA buffers (gbm's BGRA ones aren't offered for scanout). */
+    static const uint32_t formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888};
+    const int n = (int)(sizeof formats / sizeof formats[0]);
     p->crtc_id = g_state.plane_crtc;
     p->fb_id = g_state.fb;
     p->possible_crtcs = 1;

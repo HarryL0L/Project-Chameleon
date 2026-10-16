@@ -72,7 +72,7 @@ CHAM_EXPORT extern volatile unsigned cham_call_pos;
     (cham_last_gl = (name), cham_call_ring[cham_call_pos++ % CHAM_CALL_RING] = (name))
 CHAM_EXPORT void cham_crash_note(const char *fmt, ...);
 
-/* Formats scanned out and imported by EGL (DRM fourcc). */
+/* Formats gbm allocates and EGL imports (DRM fourcc). */
 CHAM_EXPORT const uint32_t *cham_formats(int *count);
 
 /* AHB -> EGLClientBuffer is done by the EGL shim with the real driver. */
