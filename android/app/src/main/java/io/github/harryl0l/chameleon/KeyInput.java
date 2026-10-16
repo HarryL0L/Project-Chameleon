@@ -179,6 +179,11 @@ final class KeyInput {
         return code > 0 && code <= 248 ? code : 0; // KEY_ESC .. KEY_MICMUTE
     }
 
+    /** Whether the key comes from a hardware keyboard (it has a Linux key code). */
+    static boolean isHardwareKey(KeyEvent event) {
+        return scanCode(event) != 0;
+    }
+
     private static boolean isModifier(int keyCode) {
         return KeyEvent.isModifierKey(keyCode) || keyCode == KeyEvent.KEYCODE_CAPS_LOCK;
     }

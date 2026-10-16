@@ -27,7 +27,9 @@ Plasma session on top of it:
 - Finished frames travel to an Android app as **`AHardwareBuffer`s plus
   fences**. The pixels are never copied through the CPU.
 - Touch (as a touchscreen or a trackpad), mouse, hardware keyboards and the
-  Android on-screen keyboard are fed back into KWin.
+  Android on-screen keyboard are fed back into KWin. Shortcuts Android keeps
+  for itself, like Alt+Tab and Meta, need the app's optional accessibility
+  service.
 
 It works by giving KWin the few things it expects from a Linux PC, a KMS
 display device, GBM buffers and an EGL driver, all backed by Android APIs.

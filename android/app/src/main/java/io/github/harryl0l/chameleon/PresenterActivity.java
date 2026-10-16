@@ -4,6 +4,7 @@ package io.github.harryl0l.chameleon;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
@@ -19,6 +20,7 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.DisplayCutout;
@@ -85,6 +87,9 @@ public class PresenterActivity extends Activity
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
     private static final String PREF_EXTRA_KEYS = "extra_keys";
     private static final String PREF_CLIPBOARD = "clipboard_sharing";
+
+    /** The activity while its window has focus, for KeyService (main thread). */
+    static PresenterActivity sFocused;
 
     private static boolean sStarted;
     private int mWidth, mHeight;
@@ -398,6 +403,27 @@ public class PresenterActivity extends Activity
         return mKeys.onKeyEvent(event) || super.dispatchKeyEvent(event);
     }
 
+    /**
+     * A key KeyService saw before Android's shortcuts: a hardware keyboard's
+     * keys are handled as if delivered to the window, except the ones
+     * Android keeps (volume, power...). Returns true if it was taken.
+     */
+    boolean onShortcutKey(KeyEvent event) {
+        if (!KeyInput.isHardwareKey(event))
+            return false;
+        switch (event.getKeyCode()) {
+            case KeyEvent.KEYCODE_VOLUME_UP:
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+            case KeyEvent.KEYCODE_VOLUME_MUTE:
+            case KeyEvent.KEYCODE_POWER:
+            case KeyEvent.KEYCODE_APP_SWITCH:
+            case KeyEvent.KEYCODE_HOME:
+                return false;
+        }
+        dispatchKeyEvent(event);
+        return true;
+    }
+
     /** Wakes KWin's screen like a mouse would: the pointer a pixel right and back. */
     private void wakeScreen() {
         int w = mSurface.getWidth(), h = mSurface.getHeight();
@@ -607,6 +633,26 @@ public class PresenterActivity extends Activity
                     applySettings();
                 })));
         keys.addView(settingsRow(R.string.extra_keys, settingsSwitch(PREF_EXTRA_KEYS)));
+        Button shortcuts = new Button(this);
+        shortcuts.setText(R.string.shortcuts_open);
+        shortcuts.setAllCaps(false);
+        // Shaped like an unselected choice button.
+        shortcuts.setTextSize(TypedValue.COMPLEX_UNIT_PX, new RadioButton(this).getTextSize());
+        shortcuts.setTextColor(new TextView(this).getCurrentTextColor());
+        shortcuts.setStateListAnimator(null); // no shadow
+        shortcuts.setMinHeight(0);
+        shortcuts.setMinimumHeight(0);
+        shortcuts.setMinWidth(0);
+        shortcuts.setMinimumWidth(0);
+        shortcuts.setPadding(dp(12), dp(6), dp(12), dp(6));
+        GradientDrawable outline = new GradientDrawable();
+        outline.setCornerRadius(dp(16));
+        outline.setStroke(dp(1), accentColor());
+        shortcuts.setBackground(outline);
+        shortcuts.setOnClickListener(v -> startActivity(
+                new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)));
+        keys.addView(settingsRow(R.string.shortcuts, shortcuts));
+        keys.addView(settingsHint(R.string.shortcuts_hint));
 
         LinearLayout screen = settingsCard(box, R.string.screen);
         // Three choices don't fit beside the label: they go below it.
@@ -735,6 +781,10 @@ public class PresenterActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            sFocused = this;
+        else if (sFocused == this)
+            sFocused = null;
         if (hasFocus) {
             hideSystemBars();
             mClipboard.onPrimaryClipChanged(); // copied in another app meanwhile?

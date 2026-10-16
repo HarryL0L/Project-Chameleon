@@ -27,6 +27,11 @@
     <string name="clipboard">Clipboard</string>
     <string name="clipboard_sharing">Share with Android</string>
     <string name="clipboard_hint">Copy on one side, paste on the other. Android\'s copies arrive when Chameleon is in front.</string>
+    <string name="shortcuts">Keyboard shortcuts</string>
+    <string name="shortcuts_open">Open</string>
+    <string name="shortcuts_hint">Android keeps some shortcuts, like Alt+Tab and Meta, for itself. Turn on \"Chameleon keyboard shortcuts\" in Accessibility to send them to the desktop. If it is greyed out, allow restricted settings in Chameleon\'s App info menu first.</string>
+    <string name="key_service">Chameleon keyboard shortcuts</string>
+    <string name="key_service_description">While Chameleon is in front, sends every key of a hardware keyboard to the desktop, including shortcuts Android keeps for itself (Alt+Tab, Meta…). Volume and power keys stay with Android. Nothing is read or sent while another app is in front.</string>
     <string name="close">Close</string>
     <string name="screen_off">The desktop\'s screen is off\nTap to wake it</string>
 </resources>
