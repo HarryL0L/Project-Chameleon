@@ -70,6 +70,6 @@ KWin measures render time with `GL_EXT_disjoint_timer_query`
 (`glGetInteger64v(GL_TIMESTAMP)` / `glQueryCounter`). On Mali-G77 (driver
 r32p1) the next write into texture memory after that dies with SIGBUS
 (NULL+0x29) deep in the driver, whether the pixels come from client memory,
-a PBO or `glTexSubImage2D`. The launcher sets `KWIN_NO_TIMER_QUERY=1` and the
-GLES shim hides the extension by default; KWin then falls back to CPU-side
-render time estimates.
+a PBO or `glTexSubImage2D`. The GLES shim hides the extension by default;
+on OpenGL ES KWin uses timer queries only with it, so it falls back to
+CPU-side render time estimates.

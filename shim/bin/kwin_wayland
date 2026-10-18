@@ -80,9 +80,6 @@ if [ -n "$socket" ]; then
 fi
 
 export KWIN_COMPOSE=O2ES                     # Android EGL is GLES-only
-export KWIN_DISABLE_VULKAN=1
-export KWIN_DRM_USE_MODIFIERS=0              # gralloc picks buffer layouts
-export KWIN_NO_TIMER_QUERY=${KWIN_NO_TIMER_QUERY-1}  # Mali-G77 crashes (SIGBUS) on texture writes after GL_TIMESTAMP queries
 
 # EGL/GLES: glvnd (Termux's libEGL.so.1 / libGLESv2.so.2) with this copy of
 # the Chameleon vendor first and the installed vendors (Mesa) after it. KWin

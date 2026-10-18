@@ -11,7 +11,7 @@
  *    extensions whose driver paths misbehave. Default:
  *    GL_EXT_disjoint_timer_query - after KWin's per-frame GL_TIMESTAMP
  *    query, Mali-G77 (r32p1) dies with SIGBUS (NULL+0x29) in the next write
- *    into texture memory (the launcher also sets KWIN_NO_TIMER_QUERY=1), and
+ *    into texture memory (KWin uses timer queries only with it), and
  *    GL_EXT_texture_format_BGRA8888, so KWin uploads plain RGBA (hidden
  *    while that crash was being hunted, kept as the well-trodden path).
  *    Override with CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
