@@ -3,10 +3,11 @@
  * Connection from KWin's process to the Chameleon presenter app.
  *
  * - One reader thread (re)connects to $PREFIX/tmp/chameleon-0 and handles
- *   CONFIG, RELEASE and FRAME_DONE.
+ *   CONFIG, RELEASE, FRAME_QUEUED and FRAME_DONE.
  * - Buffers are registered with the presenter lazily, on first present.
- * - At most one page flip is pending, as with KMS. It completes on the
- *   presenter's FRAME_DONE (SurfaceFlinger latched the frame), or on a
+ * - At most one page flip is pending, as with KMS. It completes on a vblank
+ *   tick once the presenter copied the previous frame (FRAME_QUEUED) and
+ *   Android latched enough frames (FRAME_DONE), see g_flip; or on a
  *   simulated vblank when nothing is on screen (app closed or paused), so
  *   KWin keeps running either way.
  */
@@ -42,13 +43,40 @@ static struct {
     uint64_t user_data;
     uint32_t crtc_id;
     int event_fd;
-    uint64_t deadline_ns;           /* simulated: when; real: watchdog */
+    uint64_t deadline_ns;           /* simulated: when; real: watchdog, or the vblank tick it completes on */
+    uint64_t queued_ns;             /* when KWin committed */
+    uint64_t period_ns;
+    int on_tick;                    /* completes at deadline_ns, a vblank tick */
+    int held;                       /* waited for a copy or a latch */
+    uint64_t prev_frame, prev2_frame; /* the frames shown before it, if any */
 } g_flip;
+/* Like a display engine, and like VKMS: a flip completes on the first
+ * vblank tick after the commit reached the app, which copies the new front
+ * buffer during the next frame (scanout reading it), while the compositor
+ * leaves that buffer alone until the next flip. So that flip also waits
+ * until the previous copy is done (its buffer is free then), and until
+ * Android latched the frame before, so few frames wait in Android. When
+ * Android keeps every queued frame (back pressure), the one before that is
+ * enough: two may wait. A compositor aims its commit at the vblank, while
+ * Android wants the buffer a few ms before its own latch; the second frame
+ * covers that gap. Ticks follow Android's latch times.
+ * CHAMELEON_ANDROID_QUEUE=1 or 2 overrides the choice;
+ * CHAMELEON_EARLY_FLIP=0: at the latch, as before. */
+static int g_early = 1;
+static int g_android_queue;         /* 0: choose per flip */
+static int g_back_pressure;         /* CHAM_CONFIG_BACK_PRESSURE */
+static uint64_t g_latch_ns;         /* last latch: the vblank grid's phase */
+static uint64_t g_latched_frame;    /* newest frame Android has latched (or skipped) */
+static uint64_t g_copied_frame;     /* newest frame the app has copied (FRAME_QUEUED) */
+static uint64_t g_presented_frame, g_presented_prev; /* newest frames handed to the app */
 static uint32_t g_sequence;
 
 /* Activity counters, logged every 5 s while something happens. */
 static struct {
     unsigned commits, presented, not_shown, flips, simulated;
+    uint64_t wait_sum, wait_max;    /* commit to shown, shown flips */
+    unsigned held;                  /* flips that waited for a copy or a latch */
+    unsigned second;                /* flips only a second frame in Android let through */
     uint64_t since;
 } g_stats;
 
@@ -59,9 +87,14 @@ static void stats_maybe_log_locked(void)
         g_stats.since = now;
     if (now - g_stats.since < 5000000000ull)
         return;
-    if (g_stats.commits || g_stats.flips)
-        cham_log("last 5 s: %u commits, %u presented, %u not shown (no app surface), %u flips (%u simulated)",
-                 g_stats.commits, g_stats.presented, g_stats.not_shown, g_stats.flips, g_stats.simulated);
+    if (g_stats.commits || g_stats.flips) {
+        unsigned shown = g_stats.flips - g_stats.simulated;
+        cham_log("last 5 s: %u commits, %u presented, %u not shown (no app surface), %u flips (%u simulated); "
+                 "commit to shown %.1f ms avg, %.1f max; %u waited for Android, %u used a second frame there",
+                 g_stats.commits, g_stats.presented, g_stats.not_shown, g_stats.flips, g_stats.simulated,
+                 shown ? g_stats.wait_sum / shown / 1e6 : 0.0, g_stats.wait_max / 1e6, g_stats.held,
+                 g_stats.second);
+    }
     memset(&g_stats, 0, sizeof g_stats);
     g_stats.since = now;
 }
@@ -97,14 +130,48 @@ static void emit_flip_locked(uint64_t ts_ns)
     if (write(g_flip.event_fd, &ev, sizeof ev) != (ssize_t)sizeof ev)
         cham_log("cannot deliver page-flip event: %s", strerror(errno));
     g_flip.active = 0;
+    g_flip.on_tick = g_flip.held = 0;
     g_stats.flips++;
     g_stats.simulated += g_flip.simulated;
+    if (!g_flip.simulated) {
+        uint64_t wait = ts_ns > g_flip.queued_ns ? ts_ns - g_flip.queued_ns : 0;
+        g_stats.wait_sum += wait;
+        if (wait > g_stats.wait_max)
+            g_stats.wait_max = wait;
+    }
     pthread_cond_broadcast(&g_cond);
 }
 
 int link_flip_pending_locked(void)
 {
     return g_flip.active;
+}
+
+/* Completes the pending flip on the next vblank tick once the previous
+ * copy is done and Android has latched what it should have by now. */
+static void schedule_tick_locked(void)
+{
+    if (!g_flip.active || g_flip.simulated || g_flip.on_tick)
+        return;
+    uint64_t copied = g_copied_frame > g_latched_frame ? g_copied_frame : g_latched_frame;
+    int queue = g_android_queue ? g_android_queue : g_back_pressure ? 2 : 1;
+    static int logged;
+    if (queue != logged) {
+        cham_log("up to %d frame%s may wait in Android", queue, queue > 1 ? "s" : "");
+        logged = queue;
+    }
+    uint64_t must_latch = queue >= 2 ? g_flip.prev2_frame : g_flip.prev_frame;
+    if (copied < g_flip.prev_frame || g_latched_frame < must_latch) {
+        g_stats.held += !g_flip.held; /* once per flip */
+        g_flip.held = 1;
+        return;
+    }
+    g_stats.second += g_latched_frame < g_flip.prev_frame; /* the previous frame still waits */
+    uint64_t now = now_ns(), p = g_flip.period_ns;
+    uint64_t tick = g_latch_ns && now > g_latch_ns ? g_latch_ns + ((now - g_latch_ns) / p + 1) * p : now;
+    g_flip.on_tick = 1;
+    g_flip.deadline_ns = tick;
+    pthread_cond_broadcast(&g_cond);
 }
 
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
@@ -119,8 +186,19 @@ void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, 
     g_flip.event_fd = event_fd;
     /* Simulated vblank one period out; a real flip gets a generous watchdog
      * in case the presenter stalls (e.g. the app got frozen). */
-    g_flip.deadline_ns = now_ns() + (presented ? 250000000ull : period);
+    g_flip.queued_ns = now_ns();
+    g_flip.deadline_ns = g_flip.queued_ns + (presented ? 250000000ull : period);
+    g_flip.period_ns = period;
+    g_flip.on_tick = g_flip.held = 0;
+    if (presented) {
+        g_flip.prev2_frame = g_presented_prev;
+        g_flip.prev_frame = g_presented_frame;
+        g_presented_prev = g_presented_frame;
+        g_presented_frame = frame;
+    }
     pthread_cond_broadcast(&g_cond);
+    if (g_early)
+        schedule_tick_locked();
 }
 
 static void *vblank_main(void *arg)
@@ -137,6 +215,10 @@ static void *vblank_main(void *arg)
         }
         uint64_t now = now_ns();
         if (now >= g_flip.deadline_ns) {
+            if (g_flip.on_tick) {
+                emit_flip_locked(g_flip.deadline_ns);
+                continue;
+            }
             if (!g_flip.simulated)
                 cham_log("presenter did not report frame %llu, completing the flip anyway",
                          (unsigned long long)g_flip.frame);
@@ -225,6 +307,7 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         int had_surface = g_cfg_w && g_cfg_h;
         g_cfg_w = CHAM_CONFIG_WIDTH(m);
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
+        g_back_pressure = !!(m->id & CHAM_CONFIG_BACK_PRESSURE);
         if (g_cfg_w && g_cfg_h && !g_cfg_seen) {
             g_cfg_seen = 1;
             g_first_w = g_cfg_w;
@@ -253,8 +336,20 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         }
         break;
     case CHAM_FRAME_DONE:
+        if (m->b)
+            g_latch_ns = m->b;
+        if (m->a > g_latched_frame)
+            g_latched_frame = m->a; /* latched, or skipped (b = 0): not waiting in Android */
         if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame)
             emit_flip_locked(m->b ? m->b : now_ns());
+        else if (g_early)
+            schedule_tick_locked(); /* the pending flip may have waited for this latch */
+        break;
+    case CHAM_FRAME_QUEUED:
+        if (m->a > g_copied_frame)
+            g_copied_frame = m->a;
+        if (g_early)
+            schedule_tick_locked(); /* ...or for this copy */
         break;
     case CHAM_BYE:
         if (m->a == CHAM_BYE_REPLACED)
@@ -337,6 +432,10 @@ static void start_threads(void)
     pthread_condattr_init(&attr);
     pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
     pthread_cond_init(&g_cond, &attr);
+    const char *early = getenv("CHAMELEON_EARLY_FLIP");
+    g_early = !(early && *early == '0');
+    const char *queue = getenv("CHAMELEON_ANDROID_QUEUE");
+    g_android_queue = queue && *queue ? (atoi(queue) >= 2 ? 2 : 1) : 0;
 
     pthread_t t;
     pthread_create(&t, NULL, reader_main, NULL);

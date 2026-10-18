@@ -50,7 +50,7 @@ namespace {
 
 constexpr uint32_t kMaxBuffers = 64;
 
-constexpr int kPoolSize = 4;
+constexpr int kPoolSize = 6; // shown + up to two waiting in Android + ones still being released + the new copy
 
 struct Buffer {
     AHardwareBuffer *ahb = nullptr;
@@ -104,6 +104,16 @@ Fn android_sym(const char *name)
     return lib ? (Fn)dlsym(lib, name) : nullptr;
 }
 
+// API 31: with back pressure SurfaceFlinger keeps every buffer we queue
+// (presents each in turn) instead of dropping one that arrives before the
+// previous was latched. The producer may queue its next frame early.
+using SetBackPressureFn = void (*)(ASurfaceTransaction *, ASurfaceControl *, bool);
+SetBackPressureFn set_back_pressure()
+{
+    static SetBackPressureFn fn = android_sym<SetBackPressureFn>("ASurfaceTransaction_setEnableBackPressure");
+    return fn;
+}
+
 // API 30.
 using SetFrameRateFn = void (*)(ASurfaceTransaction *, ASurfaceControl *, float, int8_t);
 SetFrameRateFn set_frame_rate()
@@ -139,7 +149,8 @@ void send_config_locked()
     uint64_t size = (uint64_t)(uint32_t)g_width | ((uint64_t)(uint32_t)g_height << 32);
     if (!g_sc)
         size = 0;
-    send_locked(CHAM_CONFIG, 0, size, (uint64_t)g_refresh_mhz);
+    uint32_t flags = set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0;
+    send_locked(CHAM_CONFIG, flags, size, (uint64_t)g_refresh_mhz);
 }
 
 struct FrameCtx {
@@ -498,6 +509,8 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
 
     ASurfaceTransaction *txn = ASurfaceTransaction_create();
     ASurfaceTransaction_setBuffer(txn, g_sc, p.ahb, blit_fence);  // takes ownership
+    if (set_back_pressure())
+        set_back_pressure()(txn, g_sc, true);
     ARect src{0, 0, p.width, p.height};
     ARect dst{0, 0, g_width, g_height};
     ASurfaceTransaction_setGeometry(txn, g_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
@@ -515,6 +528,9 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
     ASurfaceTransaction_apply(txn);
     ASurfaceTransaction_delete(txn);
+    // Copied and handed over: like a display that took the frame, the
+    // producer may complete its page flip now (FRAME_DONE follows at the latch).
+    send_locked(CHAM_FRAME_QUEUED, 0, frame, (uint64_t)mono_ns());
 }
 
 // Puts the last KWin frame back on a new surface (see g_pool_last).

@@ -103,9 +103,15 @@ in Termux, hands the connection to the app.
   follows the window when it rotates or resizes (see *Screen size* below).
   Settings choose the orientation (rotate with the phone, portrait or
   landscape) and whether the keyboard shrinks the desktop or covers it.
-- **Page flips:** when SurfaceFlinger latches a frame, the app sends
-  `FRAME_DONE`, which the shim turns into KWin's page-flip event. KWin's
-  frame pacing therefore follows the real display.
+- **Page flips:** they complete like on a real display engine (and like
+  VKMS): on the first vblank after the commit, with the vblanks following
+  SurfaceFlinger's latch times. The app copies the frame meanwhile
+  (`FRAME_QUEUED`) and reports each latch (`FRAME_DONE`). A flip also waits
+  until the previous copy is done and Android has latched what it should
+  have by then. On Android 12+ (back pressure, so Android drops no frame)
+  up to two frames may wait in Android: KWin aims its commit at the vblank,
+  while Android wants the buffer a few ms before its own latch, and the
+  second frame covers that gap. Before Android 12, one.
 - **Back from the background:** Android destroys the surface while the app
   is hidden. The app keeps its copy of the last frame and shows it again on
   the new surface, since KWin only draws when something changes.
@@ -290,9 +296,10 @@ sequenceDiagram
     A->>G: copy into the app's own buffer (GPU blit, waits on the fence)
     A->>S: RELEASE(buffer, blit fence): KWin may reuse it
     A->>F: ASurfaceTransaction_setBuffer(copy, blit fence)
+    A->>S: FRAME_QUEUED(frame)
+    S-->>K: next vblank: DRM page-flip event → KWin schedules the next frame
     F-->>A: on commit: frame latched
-    A->>S: FRAME_DONE(frame, latch time)
-    S-->>K: DRM page-flip event → KWin schedules the next frame
+    A->>S: FRAME_DONE(frame, latch time): the vblank grid's phase
 ```
 
 ### Launch flow
@@ -399,6 +406,12 @@ rather than required of the phone.
    buttons: ⌨️ opens the keyboard, and ⚙️ opens the settings: **direct touch** or **trackpad** (tap to click, two-finger tap for right
    click, two-finger drag to scroll, long-press or tap-and-drag to hold, e.g. to
    move a window).
+
+**Smoothness:** some phones slow down apps that aren't on the maker's game
+list (realme's *Games*, for example). Add both **Chameleon** and **Termux**
+(KWin runs in Termux) there: on a realme phone that took dragging a window
+at 120 Hz from 40-80 to about 100 frames per second. The shim logs its
+frame counts every 5 s.
 
 **Optional:** `chameleon-vendor-install` registers the EGL vendor with glvnd
 for all Termux programs (`--remove` undoes it; removing the package does too).

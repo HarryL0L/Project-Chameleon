@@ -105,6 +105,8 @@ static void *presenter_main(void *arg)
             g_buffers_added++;
         } else if (m.type == CHAM_PRESENT) {
             g_presents++;
+            struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
+            cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
             usleep(8333);
             struct cham_msg rel = {CHAM_RELEASE, (uint32_t)m.id, 0, 0};
             cham_send(c, &rel, -1); /* copy mode: released right after the "blit" */

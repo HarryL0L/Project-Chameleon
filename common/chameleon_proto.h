@@ -39,7 +39,7 @@ enum cham_msg_type {
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),
-                               b = refresh rate in mHz */
+                               b = refresh rate in mHz, id = CHAM_CONFIG_* flags */
     CHAM_RELEASE = 101,     /* id; fd = release fence (optional); buffer may be reused
                                once the fence signals */
     CHAM_FRAME_DONE = 102,  /* a = frame number, b = SurfaceFlinger latch time (ns) */
@@ -48,6 +48,9 @@ enum cham_msg_type {
     CHAM_CLIPBOARD_OFFER = 105, /* Android's clipboard has new text: the producer makes it the
                                    desktop's clipboard and asks for it with CLIPBOARD_REQUEST;
                                    a = 1: Android marks it sensitive (a password) */
+    CHAM_FRAME_QUEUED = 106, /* copy mode: frame a is copied and handed to Android (b = when).
+                               The producer's buffer is free (RELEASE carries the copy's
+                               fence); the frame waits in Android until FRAME_DONE. */
 };
 
 /* Input events, presenter -> producer (the KWin shim serves touch, the
@@ -106,6 +109,13 @@ enum cham_input_kind {
  * sends RELEASE (with the blit fence) right after the copy is queued. KWin
  * via the shim uses this. */
 #define CHAM_HELLO_COPY 1u
+
+/* CONFIG flags.
+ *
+ * CHAM_CONFIG_BACK_PRESSURE: SurfaceFlinger keeps every copied frame the
+ * presenter queues (API 31) instead of dropping one that arrives before the
+ * previous was latched, so the producer may have two frames waiting. */
+#define CHAM_CONFIG_BACK_PRESSURE 1u
 
 struct cham_msg {
     uint32_t type;
