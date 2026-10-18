@@ -13,8 +13,8 @@
  * Touch positions are fractions of the screen, so those axes run 0..65535
  * and the compositor maps them onto its output. While a program reads a
  * device, its input goes there; otherwise input.c sends it through KWin's
- * fake input as before (and so does everything else: trackpad mode, the soft
- * keyboard, a mouse the app hasn't captured; the touchpad has no fallback).
+ * fake input as before (and so does everything else: the soft keyboard, a
+ * mouse the app hasn't captured; the touchpad has no fallback).
  *
  * The same socket carries udev monitors' events (evdev_uevent): kms.c's
  * card hotplug when the app's window changes.

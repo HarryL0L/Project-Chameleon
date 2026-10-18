@@ -36,8 +36,6 @@ cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(
 mkdir -p "$OUT/runtime-ev" && chmod 700 "$OUT/runtime-ev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
-# (output_test: output.c's KWin output management, unused since the card's
-# hotplug replaced it; both go with the other old paths.)
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
 # with a stand-in for Android's EGL/GLES driver.
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c

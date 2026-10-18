@@ -316,7 +316,7 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         }
         pthread_cond_broadcast(&g_cond);
         if (g_cfg_w && g_cfg_h)
-            input_post(m); /* output.c: KWin's screen follows the window */
+            input_post(m); /* the connector's mode follows the window (input.c) */
         /* The app's window is back: show it KWin's current frame. KWin may
          * have drawn its last frames while there was no window (e.g. the
          * screen size changed as the app went to the background) and draws

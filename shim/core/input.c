@@ -205,7 +205,6 @@ static void registry_global(void *data, struct wl_proxy *registry, uint32_t name
     } else if (strcmp(iface, "zxdg_output_manager_v1") == 0 && !g_xdg_manager) {
         g_xdg_manager = wl_bind(g_registry, name, &k_xdg_output_manager_iface, 1);
     } else {
-        output_global(g_registry, name, iface, version);
         clipboard_global(g_registry, name, iface, version);
     }
 }
@@ -259,7 +258,6 @@ static void (*k_xdg_output_listener[])(void) = {
 
 static void disconnect_wayland(void)
 {
-    output_disconnected();
     clipboard_disconnected();
     if (g_display)
         wl.disconnect(g_display);
@@ -307,7 +305,6 @@ static int connect_wayland(void)
     }
     wl.roundtrip(g_display);
     cham_log("input: connected to KWin (fake input v%u)", g_fake_input_version);
-    output_connected(g_display);
     clipboard_connected();
     return 1;
 }
@@ -317,13 +314,10 @@ static int connect_wayland(void)
 static void screen_geometry(double *x, double *y, double *w, double *h)
 {
     if (g_logical.known) {
-        /* The app may crop a few pixels off a mode (output.c). */
-        double fx, fy;
-        output_visible(&fx, &fy);
         *x = g_logical.x;
         *y = g_logical.y;
-        *w = g_logical.w * fx;
-        *h = g_logical.h * fy;
+        *w = g_logical.w;
+        *h = g_logical.h;
         return;
     }
     uint32_t mw = 0, mh = 0;
@@ -436,11 +430,7 @@ static void *input_main(void *arg)
             wl.flush(g_display);
             p[1].fd = wl.get_fd(g_display);
         }
-        /* Output work may be waiting for a deadline, or for KWin's socket. */
-        int timeout = output_timeout_ms();
-        if (!g_display && output_pending() && (timeout < 0 || timeout > 1000))
-            timeout = 1000;
-        int n = poll(p, 2, timeout);
+        int n = poll(p, 2, -1);
         if (g_display) {
             if (n > 0 && (p[1].revents & (POLLIN | POLLERR | POLLHUP)))
                 wl.read_events(g_display);
@@ -467,7 +457,7 @@ static void *input_main(void *arg)
                 have_input = 1;
         }
 
-        if (!g_display && (have_input || output_pending()) && now_ns() >= next_connect) {
+        if (!g_display && have_input && now_ns() >= next_connect) {
             if (!connect_wayland()) {
                 next_connect = now_ns() + 1000000000ull;
                 if (have_input && !warned++)
@@ -483,7 +473,6 @@ static void *input_main(void *arg)
             else if (batch[i].type == CHAM_CLIPBOARD_OFFER)
                 clipboard_offer(batch[i].a != 0);
         }
-        output_tick();
         wl.flush(g_display);
     }
     return NULL;

@@ -1,8 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The slice of libwayland-client's ABI used by the shim's own Wayland client
- * connection to KWin (input.c owns the connection and its thread, output.c
- * uses it too). libwayland-client is dlopen()ed, and protocol tables are
+ * connection to KWin (input.c owns the connection and its thread,
+ * clipboard.c uses it too). libwayland-client is dlopen()ed, and protocol tables are
  * written out by hand, so nothing is needed at build time.
  */
 #ifndef CHAM_WLCLIENT_H
