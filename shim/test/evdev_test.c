@@ -128,6 +128,10 @@ int main(void)
     struct pollfd p = {l, POLLIN, 0};
     CHECK(poll(&p, 1, 5000) == 1, "shim connects to the presenter");
     int c = accept(l, NULL, NULL);
+    /* A finger down before any program reads the touchscreen: that gesture
+     * stays on fake input to its end (checked below, once libinput reads). */
+    send_input(c, CHAM_INPUT_TOUCH_DOWN, 1, CHAM_INPUT_POS(0, 0));
+    send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
 
     printf("udev\n");
     struct udev *udev = udev_new();
@@ -213,6 +217,12 @@ int main(void)
     CHECK(mouse, "libinput adds the mouse as a pointer");
     CHECK(touchpad, "libinput adds the touchpad, tapping on by default");
 
+    /* The early gesture goes on: a second finger and both lifting, not for libinput. */
+    send_input(c, CHAM_INPUT_TOUCH_DOWN, 2, CHAM_INPUT_POS(0, 0));
+    send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
+    send_input(c, CHAM_INPUT_TOUCH_UP, 2, 0);
+    send_input(c, CHAM_INPUT_TOUCH_UP, 1, 0);
+    send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
     send_input(c, CHAM_INPUT_TOUCH_DOWN, 3, CHAM_INPUT_POS(32768, 16384)); /* (0.5, 0.25) */
     send_input(c, CHAM_INPUT_TOUCH_FRAME, 0, 0);
     send_input(c, CHAM_INPUT_TOUCH_DOWN, 7, CHAM_INPUT_POS(0, 65535)); /* second finger */
@@ -232,7 +242,8 @@ int main(void)
         slot0 = libinput_event_touch_get_slot(t);
         libinput_event_destroy(ev);
     }
-    CHECK(x > 499 && x < 501 && y > 249 && y < 251, "touch down at %.1f,%.1f (want 500,250)", x, y);
+    CHECK(x > 499 && x < 501 && y > 249 && y < 251,
+          "touch down at %.1f,%.1f (want 500,250; 0,0 = a finger of the gesture begun without a reader)", x, y);
     if (li && (ev = wait_event(li, LIBINPUT_EVENT_TOUCH_DOWN))) {
         slot1 = libinput_event_touch_get_slot(libinput_event_get_touch_event(ev));
         libinput_event_destroy(ev);

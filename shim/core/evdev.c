@@ -82,6 +82,7 @@ static struct mt {         /* a multitouch device (protocol B) */
     int32_t x[TOUCH_SLOTS], y[TOUCH_SLOTS], cur_slot, abs_x, abs_y; /* as last sent */
     int tracking_id;
     int touching;
+    int fake, fake_down; /* a gesture on fake input (no reader at its start): its fingers down */
     int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
 } g_touch, g_pad;
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
@@ -673,8 +674,28 @@ static void tool(struct device *d, struct mt *t)
 /* Touch messages, kind as CHAM_INPUT_TOUCH_* (the touchpad's mapped). */
 static int touch(struct device *d, struct mt *t, unsigned kind, const struct cham_msg *m)
 {
-    if (!t->touching && !has_readers(d))
+    /* A gesture stays where it started: one begun without a reader goes on
+     * to fake input, through the frame after its last finger lifts, even if
+     * a reader opens the device meanwhile. */
+    if (t->fake || (!t->touching && !has_readers(d))) {
+        switch (kind) {
+        case CHAM_INPUT_TOUCH_DOWN:
+            t->fake = 1;
+            t->fake_down++;
+            break;
+        case CHAM_INPUT_TOUCH_UP:
+            if (t->fake_down > 0)
+                t->fake_down--;
+            break;
+        case CHAM_INPUT_TOUCH_CANCEL:
+            t->fake_down = 0;
+            __attribute__((fallthrough));
+        case CHAM_INPUT_TOUCH_FRAME:
+            t->fake = t->fake_down > 0;
+            break;
+        }
         return 0;
+    }
     int slot;
     switch (kind) {
     case CHAM_INPUT_TOUCH_DOWN:
