@@ -47,6 +47,7 @@ final class ImeView extends View {
                 if (common > 0 && Character.isHighSurrogate(text.charAt(common - 1)))
                     common--;
                 int erase = mComposing.codePointCount(common, mComposing.length());
+                // keysyms like the text, so both arrive in order on one channel
                 for (int i = 0; i < erase; i++)
                     mKeys.tap(KeyInput.XK_BACKSPACE);
                 mKeys.sendText(text.substring(common));

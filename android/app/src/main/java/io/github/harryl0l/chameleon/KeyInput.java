@@ -9,15 +9,17 @@ import java.util.HashSet;
 import java.util.Set;
 
 /**
- * Keyboard input. A hardware keyboard's keys go by their Linux key codes
- * (Android's scan codes), as from a real keyboard: the desktop's own layout
- * applies. Everything else (the soft keyboard, the extra keys) goes as X
- * keysyms: KWin's fake-input keyboard_keysym looks the keysym up in its
+ * Keyboard input. Keys go by their Linux key codes to the evdev keyboard,
+ * as from a real keyboard: a hardware keyboard's by Android's scan codes (the
+ * desktop's own layout applies), the extra keys and the soft keyboard's
+ * non-text keys (Enter, Backspace, arrows...) by a table. Typed text goes as
+ * X keysyms: KWin's fake-input keyboard_keysym looks the keysym up in its
  * keymap (adding Shift as needed) or maps it to a spare key, so any Unicode
  * text works whatever the layout.
  *
  * Ctrl and Alt can be latched from the extra-keys row; a latched modifier
- * applies to the next key or character and is then released.
+ * applies to the next key or character and is then released. It goes the
+ * same way as that key: by key code, or as a keysym with typed text.
  */
 final class KeyInput {
     static final int XK_BACKSPACE = 0xff08;
@@ -35,6 +37,29 @@ final class KeyInput {
     static final int XK_DELETE = 0xffff;
     static final int XK_CONTROL_L = 0xffe3;
     static final int XK_ALT_L = 0xffe9;
+
+    // Linux key codes (linux/input-event-codes.h)
+    static final int KEY_ESC = 1;
+    static final int KEY_BACKSPACE = 14;
+    static final int KEY_TAB = 15;
+    static final int KEY_ENTER = 28;
+    static final int KEY_LEFTCTRL = 29;
+    static final int KEY_LEFTALT = 56;
+    static final int KEY_SPACE = 57;
+    static final int KEY_F1 = 59;
+    static final int KEY_F11 = 87;
+    static final int KEY_F12 = 88;
+    static final int KEY_KPENTER = 96;
+    static final int KEY_HOME = 102;
+    static final int KEY_UP = 103;
+    static final int KEY_PAGEUP = 104;
+    static final int KEY_LEFT = 105;
+    static final int KEY_RIGHT = 106;
+    static final int KEY_END = 107;
+    static final int KEY_DOWN = 108;
+    static final int KEY_PAGEDOWN = 109;
+    static final int KEY_INSERT = 110;
+    static final int KEY_DELETE = 111;
 
     interface LatchListener {
         void onLatchChanged(boolean ctrl, boolean alt);
@@ -77,7 +102,31 @@ final class KeyInput {
             InputSender.keysym(XK_ALT_L, false);
         if (ctrl)
             InputSender.keysym(XK_CONTROL_L, false);
-        if (ctrl || alt) {
+        clearLatch();
+    }
+
+    /**
+     * Press and release the key with Linux key code {@code code}, with any
+     * latched modifiers held, at Android time {@code nanos} (0 = now).
+     */
+    void tapKey(int code, long nanos) {
+        boolean ctrl = mCtrl, alt = mAlt;
+        InputSender.time(nanos);
+        if (ctrl)
+            InputSender.key(KEY_LEFTCTRL, true);
+        if (alt)
+            InputSender.key(KEY_LEFTALT, true);
+        InputSender.key(code, true);
+        InputSender.key(code, false);
+        if (alt)
+            InputSender.key(KEY_LEFTALT, false);
+        if (ctrl)
+            InputSender.key(KEY_LEFTCTRL, false);
+        clearLatch();
+    }
+
+    private void clearLatch() {
+        if (mCtrl || mAlt) {
             mCtrl = mAlt = false;
             notifyLatch();
         }
@@ -170,6 +219,51 @@ final class KeyInput {
         return 0;
     }
 
+    /** The Linux key code of a soft keyboard's non-text key, else 0. */
+    private static int linuxCodeForKeyCode(int keyCode) {
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_ENTER:
+                return KEY_ENTER;
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                return KEY_KPENTER;
+            case KeyEvent.KEYCODE_DEL:
+                return KEY_BACKSPACE;
+            case KeyEvent.KEYCODE_FORWARD_DEL:
+                return KEY_DELETE;
+            case KeyEvent.KEYCODE_TAB:
+                return KEY_TAB;
+            case KeyEvent.KEYCODE_ESCAPE:
+                return KEY_ESC;
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                return KEY_LEFT;
+            case KeyEvent.KEYCODE_DPAD_UP:
+                return KEY_UP;
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+                return KEY_RIGHT;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+                return KEY_DOWN;
+            case KeyEvent.KEYCODE_MOVE_HOME:
+                return KEY_HOME;
+            case KeyEvent.KEYCODE_MOVE_END:
+                return KEY_END;
+            case KeyEvent.KEYCODE_PAGE_UP:
+                return KEY_PAGEUP;
+            case KeyEvent.KEYCODE_PAGE_DOWN:
+                return KEY_PAGEDOWN;
+            case KeyEvent.KEYCODE_INSERT:
+                return KEY_INSERT;
+            case KeyEvent.KEYCODE_SPACE:
+                return KEY_SPACE;
+            case KeyEvent.KEYCODE_F11:
+                return KEY_F11;
+            case KeyEvent.KEYCODE_F12:
+                return KEY_F12;
+        }
+        if (keyCode >= KeyEvent.KEYCODE_F1 && keyCode <= KeyEvent.KEYCODE_F10)
+            return KEY_F1 + (keyCode - KeyEvent.KEYCODE_F1);
+        return 0;
+    }
+
     /** The Linux key code of a hardware keyboard's key, else 0. */
     private static int scanCode(KeyEvent event) {
         InputDevice device = event.getDevice();
@@ -214,11 +308,18 @@ final class KeyInput {
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
         if (down && event.getRepeatCount() > 0)
             return true; // Wayland clients repeat held keys themselves
-        int scan = scanCode(event);
-        // with Ctrl / Alt latched, a key is tapped with them as a keysym (below)
-        if (scan != 0 && !mTapped.contains(code) && (isModifier(code) || !down || !(mCtrl || mAlt))) {
-            InputSender.time(event.getEventTime() * 1_000_000L);
-            InputSender.key(scan, down);
+        int linux = scanCode(event);
+        if (linux == 0)
+            linux = linuxCodeForKeyCode(code);
+        if (linux != 0 && !mTapped.contains(code)) {
+            long nanos = event.getEventTime() * 1_000_000L;
+            if (down && !isModifier(code) && (mCtrl || mAlt)) {
+                tapKey(linux, nanos); // with Ctrl / Alt latched, the key is tapped with them
+                mTapped.add(code);
+            } else {
+                InputSender.time(nanos);
+                InputSender.key(linux, down);
+            }
             return true;
         }
         if (keysym == 0)

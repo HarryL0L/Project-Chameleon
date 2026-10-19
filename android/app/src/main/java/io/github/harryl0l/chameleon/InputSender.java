@@ -101,7 +101,7 @@ final class InputSender {
         nativeSendInput(MOUSE_WHEEL, axis, Math.round(notches * 120f));
     }
 
-    /** A hardware keyboard's key, by its Linux key code. */
+    /** A key of the evdev keyboard, by its Linux key code. */
     static void key(int code, boolean pressed) {
         nativeSendInput(KEY, code, pressed ? 1 : 0);
     }

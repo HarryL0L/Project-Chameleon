@@ -271,18 +271,18 @@ public class PresenterActivity extends Activity
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(4), 0, dp(4), 0);
-        extraKey(row, "Esc", () -> mKeys.tap(KeyInput.XK_ESCAPE));
-        extraKey(row, "Tab", () -> mKeys.tap(KeyInput.XK_TAB));
+        extraKey(row, "Esc", () -> mKeys.tapKey(KeyInput.KEY_ESC, 0));
+        extraKey(row, "Tab", () -> mKeys.tapKey(KeyInput.KEY_TAB, 0));
         mCtrlKey = extraKey(row, "Ctrl", mKeys::toggleCtrl);
         mAltKey = extraKey(row, "Alt", mKeys::toggleAlt);
-        extraKey(row, "\u2190", () -> mKeys.tap(KeyInput.XK_LEFT));
-        extraKey(row, "\u2193", () -> mKeys.tap(KeyInput.XK_DOWN));
-        extraKey(row, "\u2191", () -> mKeys.tap(KeyInput.XK_UP));
-        extraKey(row, "\u2192", () -> mKeys.tap(KeyInput.XK_RIGHT));
-        extraKey(row, "Home", () -> mKeys.tap(KeyInput.XK_HOME));
-        extraKey(row, "End", () -> mKeys.tap(KeyInput.XK_END));
-        extraKey(row, "PgUp", () -> mKeys.tap(KeyInput.XK_PAGE_UP));
-        extraKey(row, "PgDn", () -> mKeys.tap(KeyInput.XK_PAGE_DOWN));
+        extraKey(row, "\u2190", () -> mKeys.tapKey(KeyInput.KEY_LEFT, 0));
+        extraKey(row, "\u2193", () -> mKeys.tapKey(KeyInput.KEY_DOWN, 0));
+        extraKey(row, "\u2191", () -> mKeys.tapKey(KeyInput.KEY_UP, 0));
+        extraKey(row, "\u2192", () -> mKeys.tapKey(KeyInput.KEY_RIGHT, 0));
+        extraKey(row, "Home", () -> mKeys.tapKey(KeyInput.KEY_HOME, 0));
+        extraKey(row, "End", () -> mKeys.tapKey(KeyInput.KEY_END, 0));
+        extraKey(row, "PgUp", () -> mKeys.tapKey(KeyInput.KEY_PAGEUP, 0));
+        extraKey(row, "PgDn", () -> mKeys.tapKey(KeyInput.KEY_PAGEDOWN, 0));
         mExtraKeys = new HorizontalScrollView(this);
         mExtraKeys.setBackgroundColor(0xE6202124);
         mExtraKeys.setHorizontalScrollBarEnabled(false);
@@ -393,8 +393,10 @@ public class PresenterActivity extends Activity
                 return super.dispatchKeyEvent(event);
             case KeyEvent.KEYCODE_BACK:
                 if (!backLeavesApp()) {
-                    if (event.getRepeatCount() == 0)
-                        InputSender.keysym(KeyInput.XK_ESCAPE, event.getAction() == KeyEvent.ACTION_DOWN);
+                    if (event.getRepeatCount() == 0) {
+                        InputSender.time(event.getEventTime() * 1_000_000L);
+                        InputSender.key(KeyInput.KEY_ESC, event.getAction() == KeyEvent.ACTION_DOWN);
+                    }
                 } else if (event.getAction() == KeyEvent.ACTION_UP) {
                     moveTaskToBack(true);
                 }
