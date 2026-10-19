@@ -37,7 +37,7 @@
 #include "../../common/chameleon_proto.h"
 #include "internal.h"
 
-enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_COUNT };
+enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_TABLET, DEV_COUNT };
 
 #define TOUCH_SLOTS 10
 #define MAX_READERS 8
@@ -89,6 +89,7 @@ static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in 
 static uint8_t g_keys_down[CHAM_BITS(KEY_CNT)]; /* keys and buttons pressed on the devices */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
 static int64_t g_event_time; /* ns, from CHAM_INPUT_TIME; 0 = none yet */
+static struct device *g_pointer = &g_dev[DEV_MOUSE]; /* the mouse or the tablet, whichever moved last */
 
 static void set_axis(struct cham_evdev_info *d, unsigned axis, int32_t max)
 {
@@ -158,6 +159,25 @@ static void describe(void)
     set_axis(d, ABS_MT_POSITION_X, AXIS_MAX);
     set_axis(d, ABS_MT_POSITION_Y, AXIS_MAX);
     set_axis(d, ABS_MT_TRACKING_ID, 65535);
+
+    /* The mouse while the app hasn't captured it: absolute, like the tablet
+     * a virtual machine gives its guest (QEMU's usb-tablet, virtio-tablet). */
+    d = &g_dev[DEV_TABLET].info;
+    snprintf(d->name, sizeof d->name, "Chameleon tablet");
+    snprintf(d->udev_type, sizeof d->udev_type, "ID_INPUT_MOUSE");
+    d->id.bustype = BUS_VIRTUAL;
+    cham_bit_set(d->ev, EV_SYN);
+    cham_bit_set(d->ev, EV_KEY);
+    cham_bit_set(d->ev, EV_REL);
+    cham_bit_set(d->ev, EV_ABS);
+    for (unsigned b = BTN_LEFT; b <= BTN_EXTRA; b++)
+        cham_bit_set(d->key, b);
+    set_axis(d, ABS_X, AXIS_MAX);
+    set_axis(d, ABS_Y, AXIS_MAX);
+    cham_bit_set(d->rel, REL_WHEEL);
+    cham_bit_set(d->rel, REL_HWHEEL);
+    cham_bit_set(d->rel, REL_WHEEL_HI_RES);
+    cham_bit_set(d->rel, REL_HWHEEL_HI_RES);
 }
 
 /* Units per mm from the size the connector reports, so programs that
@@ -746,6 +766,19 @@ static int wheel(struct device *d, int horizontal, int32_t hi_res)
     return 1;
 }
 
+/* A mouse button: on the pointer device that moved last; a release where
+ * its press went. */
+static struct device *button_device(unsigned code, int down)
+{
+    struct device *t = &g_dev[DEV_TABLET];
+    if (down || code >= KEY_CNT)
+        return g_pointer;
+    pthread_mutex_lock(&g_evdev_lock);
+    int on_tablet = cham_bit_test(t->state.key, code);
+    pthread_mutex_unlock(&g_evdev_lock);
+    return on_tablet ? t : &g_dev[DEV_MOUSE];
+}
+
 int evdev_input(const struct cham_msg *m)
 {
     struct device *mouse = &g_dev[DEV_MOUSE];
@@ -769,12 +802,23 @@ int evdev_input(const struct cham_msg *m)
     case CHAM_INPUT_KEY:
         return key(&g_dev[DEV_KEYBOARD], (unsigned)m->a, m->b != 0);
     case CHAM_INPUT_MOUSE_BUTTON:
-        return key(mouse, (unsigned)m->a, m->b != 0);
+        return key(button_device((unsigned)m->a, m->b != 0), (unsigned)m->a, m->b != 0);
     case CHAM_INPUT_MOUSE_WHEEL:
-        return wheel(mouse, m->a != 0, (int32_t)(int64_t)m->b);
+        return wheel(g_pointer, m->a != 0, (int32_t)(int64_t)m->b);
+    case CHAM_INPUT_POINTER_ABS: {
+        struct device *t = &g_dev[DEV_TABLET];
+        if (!has_readers(t))
+            return 0;
+        g_pointer = t;
+        add(t, EV_ABS, ABS_X, (int32_t)CHAM_INPUT_X(m->b));
+        add(t, EV_ABS, ABS_Y, (int32_t)CHAM_INPUT_Y(m->b));
+        flush(t);
+        return 1;
+    }
     case CHAM_INPUT_MOUSE_MOTION:
         if (!has_readers(mouse))
             return 0;
+        g_pointer = mouse;
         if (CHAM_INPUT_DX(m->b))
             add(mouse, EV_REL, REL_X, CHAM_INPUT_DX(m->b));
         if (CHAM_INPUT_DY(m->b))

@@ -12,7 +12,6 @@ final class InputSender {
     }
 
     static final int TOUCH_DOWN = 1; // .. TOUCH_FRAME = 5
-    static final int POINTER_MOTION = 6;
     static final int POINTER_ABS = 7;
     static final int KEYSYM = 10;
     static final int KEY = 11;
@@ -45,13 +44,6 @@ final class InputSender {
         return clampFraction(x, w) | clampFraction(y, h) << 32;
     }
 
-    /** Movement in surface pixels, as signed 12.20 fractions of the surface. */
-    static long delta(float dx, float dy, int w, int h) {
-        long ix = (int) (dx / Math.max(w, 1) * 1048576f);
-        long iy = (int) (dy / Math.max(h, 1) * 1048576f);
-        return (ix & 0xffffffffL) | (iy << 32);
-    }
-
     /**
      * When the events that follow happened: Android's event time in ns
      * (SystemClock.uptimeMillis()'s clock, CLOCK_MONOTONIC), so the desktop
@@ -76,10 +68,6 @@ final class InputSender {
     static void fingersCancel(int down) {
         nativeSendInput(down + CANCEL, 0, 0);
         nativeSendInput(down + FRAME, 0, 0);
-    }
-
-    static void motion(long delta) {
-        nativeSendInput(POINTER_MOTION, 0, delta);
     }
 
     static void moveTo(long pos) {

@@ -189,16 +189,16 @@ int main(void)
         else
             real++;
     }
-    CHECK(ours == 4 && real > 0 && udev_list_entry_get_by_name(first, "/sys/devices/virtual/input/input3/event3"),
+    CHECK(ours == 5 && real > 0 && udev_list_entry_get_by_name(first, "/sys/devices/virtual/input/input3/event3"),
           "with another subsystem: Chameleon's devices, then the real ones (%d, %d)", ours, real);
     udev_enumerate_unref(e);
 
     printf("libinput\n");
     struct libinput *li = libinput_udev_create_context(&iface, NULL, udev);
     CHECK(li && libinput_udev_assign_seat(li, "seat0") == 0, "libinput_udev_assign_seat");
-    int touchscreen = 0, keyboard = 0, mouse = 0, touchpad = 0;
+    int touchscreen = 0, keyboard = 0, mouse = 0, touchpad = 0, tablet = 0;
     struct libinput_event *ev;
-    for (int i = 0; li && i < 4 && (ev = wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED)); i++) {
+    for (int i = 0; li && i < 5 && (ev = wait_event(li, LIBINPUT_EVENT_DEVICE_ADDED)); i++) {
         struct libinput_device *dev = libinput_event_get_device(ev);
         const char *name = libinput_device_get_name(dev);
         touchscreen |= !strcmp(name, "Chameleon touchscreen") &&
@@ -210,8 +210,10 @@ int main(void)
                     libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER) &&
                     libinput_device_config_tap_get_finger_count(dev) > 0 &&
                     libinput_device_config_tap_get_default_enabled(dev) == LIBINPUT_CONFIG_TAP_ENABLED;
+        tablet |= !strcmp(name, "Chameleon tablet") && libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_POINTER);
         libinput_event_destroy(ev);
     }
+    CHECK(tablet, "libinput adds the tablet as a pointer");
     CHECK(touchscreen, "libinput adds the touchscreen as a touch device");
     CHECK(keyboard, "libinput adds the keyboard as a keyboard");
     CHECK(mouse, "libinput adds the mouse as a pointer");
@@ -309,6 +311,32 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(v120 == -120, "wheel a notch up (v120 %.0f, want -120)", v120);
+
+    /* The mouse before the app captures it: the tablet, absolute; its
+     * buttons follow, and a release goes where its press went. */
+    send_input(c, CHAM_INPUT_POINTER_ABS, 0, CHAM_INPUT_POS(16384, 32768)); /* (0.25, 0.5) */
+    send_input(c, CHAM_INPUT_MOUSE_BUTTON, BTN_LEFT, 1);
+    send_input(c, CHAM_INPUT_MOUSE_MOTION, 0, CHAM_INPUT_DELTA(1, 0)); /* captured meanwhile */
+    send_input(c, CHAM_INPUT_MOUSE_BUTTON, BTN_LEFT, 0);
+    x = y = -1;
+    if (li && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_MOTION_ABSOLUTE))) {
+        struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
+        x = libinput_event_pointer_get_absolute_x_transformed(p, 1000);
+        y = libinput_event_pointer_get_absolute_y_transformed(p, 1000);
+        libinput_event_destroy(ev);
+    }
+    CHECK(x > 249 && x < 251 && y > 499 && y < 501, "tablet: pointer at %.1f,%.1f (want 250,500)", x, y);
+    const char *press_dev = "", *release_dev = "";
+    /* (libinput's debounce may hold the mouse's right button release until now) */
+    for (int i = 0; li && i < 4 && !*release_dev && (ev = wait_event(li, LIBINPUT_EVENT_POINTER_BUTTON)); i++) {
+        struct libinput_event_pointer *p = libinput_event_get_pointer_event(ev);
+        if (libinput_event_pointer_get_button(p) == BTN_LEFT)
+            *(libinput_event_pointer_get_button_state(p) ? &press_dev : &release_dev) =
+                libinput_device_get_name(libinput_event_get_device(ev));
+        libinput_event_destroy(ev);
+    }
+    CHECK(!strcmp(press_dev, "Chameleon tablet") && !strcmp(release_dev, "Chameleon tablet"),
+          "tablet: left button pressed and released there (%s, %s)", press_dev, release_dev);
 
     /* Touchpad: one finger moves the pointer, a tap clicks. */
     /* ...sent in one burst, as Android delivers batched moves: their event

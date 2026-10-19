@@ -428,9 +428,9 @@ public class PresenterActivity extends Activity
 
     /** Wakes KWin's screen like a mouse would: the pointer a pixel right and back. */
     private void wakeScreen() {
-        int w = mSurface.getWidth(), h = mSurface.getHeight();
-        InputSender.motion(InputSender.delta(1, 0, w, h));
-        InputSender.motion(InputSender.delta(-1, 0, w, h));
+        InputSender.time(0);
+        InputSender.mouseMotion(1, 0);
+        InputSender.mouseMotion(-1, 0);
         mWakeHint.setVisibility(View.GONE); // back if the screen stays off
     }
 
