@@ -194,6 +194,8 @@ int main(void)
     send_input(c, CHAM_INPUT_KEYSYM, 0x010003bb, 0);
     send_input(c, CHAM_INPUT_KEYSYM, 'A', 1);
     send_input(c, CHAM_INPUT_KEYSYM, 'A', 0);
+    send_input(c, CHAM_INPUT_KEYSYM, '$', 1);
+    send_input(c, CHAM_INPUT_KEYSYM, '$', 0);
     char got[96] = "";
     struct input_event ev;
     for (int i = 0; i < 50 && strlen(got) < sizeof got - 8; i++) {
@@ -203,7 +205,8 @@ int main(void)
             if (ev.type == EV_KEY)
                 snprintf(got + strlen(got), sizeof got - strlen(got), "%d=%d ", ev.code, ev.value);
     }
-    CHECK(strcmp(got, "42=1 30=1 30=0 42=0 ") == 0, "'A' typed as Shift+A, no key for the lambda (%s)", got);
+    CHECK(strcmp(got, "42=1 30=1 30=0 42=0 42=1 5=1 5=0 42=0 ") == 0,
+          "'A' typed as Shift+A, '$' as Shift+4 (not KEY_DOLLAR), no key for the lambda (%s)", got);
 
     /* Chameleon's input method, started the way KWin starts one: with a
      * private connection that offers zwp_input_method_v1. While a text field

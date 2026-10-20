@@ -600,6 +600,11 @@ static int key(struct device *d, unsigned code, int down)
     return 1;
 }
 
+int evdev_keyboard_has(unsigned code)
+{
+    return code < KEY_CNT && cham_bit_test(g_dev[DEV_KEYBOARD].info.key, code);
+}
+
 static void abs_value(struct device *d, uint16_t code, int32_t value, int32_t *last)
 {
     if (value != *last)

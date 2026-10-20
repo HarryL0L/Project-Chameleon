@@ -60,6 +60,8 @@ void evdev_start(void);
 void evdev_uevent(uint32_t what);
 /* Takes an input message for a device (input thread); 0 if none. */
 int evdev_input(const struct cham_msg *m);
+/* Whether the keyboard device has this Linux key code. */
+int evdev_keyboard_has(unsigned code);
 
 /* ---- clipboard.c: the desktop's clipboard <-> Android's (input thread) ---- */
 struct wl_proxy;

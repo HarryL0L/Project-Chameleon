@@ -157,14 +157,16 @@ static struct {
 } g_down[8]; /* keysyms pressed and not yet released */
 
 /* The key and modifiers producing `sym`: the lowest level of the first group
- * reachable with Shift and AltGr only. */
+ * reachable with Shift and AltGr only, on a key the evdev keyboard has (the
+ * US layout also puts $ on KEY_DOLLAR, which it lacks). */
 static int lookup(uint32_t sym, unsigned *key, int *shift, int *level3)
 {
     int best = 3;
     for (uint32_t k = xkb.min_keycode(g_keymap); best && k <= xkb.max_keycode(g_keymap); k++) {
         for (uint32_t lv = 0; lv < xkb.num_levels_for_key(g_keymap, k, 0); lv++) {
             const uint32_t *syms;
-            if (xkb.key_get_syms_by_level(g_keymap, k, 0, lv, &syms) != 1 || syms[0] != sym)
+            if (xkb.key_get_syms_by_level(g_keymap, k, 0, lv, &syms) != 1 || syms[0] != sym ||
+                !evdev_keyboard_has(k - 8))
                 continue;
             uint32_t masks[8];
             size_t n = xkb.key_get_mods_for_level(g_keymap, k, 0, lv, masks, 8);
