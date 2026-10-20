@@ -70,6 +70,13 @@ void clipboard_connected(void);
 void clipboard_disconnected(void);
 void clipboard_offer(int secret); /* Android's clipboard has new text */
 
+/* ---- keymap.c: typed text as keys of the desktop's layout (input thread) ---- */
+void keymap_global(struct wl_proxy *registry, uint32_t name, const char *iface);
+void keymap_disconnected(void);
+/* Presses or releases the keys typing `sym` on the evdev keyboard; 0 if the
+ * layout has no key for it or nothing reads the keyboard. */
+int keymap_type(uint32_t sym, int down);
+
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {
     dev_t dev;

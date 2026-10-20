@@ -13,9 +13,9 @@ import java.util.Set;
  * as from a real keyboard: a hardware keyboard's by Android's scan codes (the
  * desktop's own layout applies), the extra keys and the soft keyboard's
  * non-text keys (Enter, Backspace, arrows...) by a table. Typed text goes as
- * X keysyms: KWin's fake-input keyboard_keysym looks the keysym up in its
- * keymap (adding Shift as needed) or maps it to a spare key, so any Unicode
- * text works whatever the layout.
+ * X keysyms: the shim types each one on the evdev keyboard with the keys
+ * (and Shift / AltGr) that produce it in the desktop's layout, like a real
+ * keyboard; one the layout lacks goes to KWin's fake input for now.
  *
  * Ctrl and Alt can be latched from the extra-keys row; a latched modifier
  * applies to the next key or character and is then released. It goes the
@@ -92,6 +92,7 @@ final class KeyInput {
     /** Press and release {@code keysym}, with any latched modifiers held. */
     void tap(int keysym) {
         boolean ctrl = mCtrl, alt = mAlt;
+        InputSender.time(0);
         if (ctrl)
             InputSender.keysym(XK_CONTROL_L, true);
         if (alt)
@@ -324,6 +325,7 @@ final class KeyInput {
         }
         if (keysym == 0)
             return true; // a dead key from the soft keyboard: swallow, the IME composes it
+        InputSender.time(event.getEventTime() * 1_000_000L);
         if (isModifier(code)) {
             InputSender.keysym(keysym, down);
             return true;

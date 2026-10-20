@@ -9,7 +9,8 @@
  * process connects to KWin's Wayland socket as an ordinary client, binds
  * fake input plus xdg_output (for the screen's logical geometry), and turns
  * the app's CHAM_INPUT messages into fake-input requests. The same
- * connection carries clipboard.c's clipboard sharing. The app's window size
+ * connection carries clipboard.c's clipboard sharing and keymap.c's view of
+ * the desktop's keyboard layout. The app's window size
  * (CHAM_CONFIG) becomes the connector's mode and a card hotplug (kms.c,
  * evdev.c).
  *
@@ -180,6 +181,7 @@ static int load_wayland(void)
     W(registry_iface, "wl_registry_interface");
     W(output_iface, "wl_output_interface");
     W(seat_iface, "wl_seat_interface");
+    W(keyboard_iface, "wl_keyboard_interface");
 #undef W
     if (!wl.connect_to_fd || !wl.marshal_flags || !wl.add_listener || !wl.registry_iface || !wl.output_iface ||
         !wl.prepare_read || !wl.get_version || !wl.get_user_data || !wl.proxy_destroy) {
@@ -206,6 +208,7 @@ static void registry_global(void *data, struct wl_proxy *registry, uint32_t name
         g_xdg_manager = wl_bind(g_registry, name, &k_xdg_output_manager_iface, 1);
     } else {
         clipboard_global(g_registry, name, iface, version);
+        keymap_global(g_registry, name, iface);
     }
 }
 
@@ -259,6 +262,7 @@ static void (*k_xdg_output_listener[])(void) = {
 static void disconnect_wayland(void)
 {
     clipboard_disconnected();
+    keymap_disconnected();
     if (g_display)
         wl.disconnect(g_display);
     g_display = NULL;
@@ -453,6 +457,9 @@ static void *input_main(void *arg)
                 config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
             else if (batch[i].type == CHAM_INPUT && evdev_input(&batch[i]))
                 batch[i].type = 0; /* went to an evdev device's readers (evdev.c) */
+            else if (batch[i].type == CHAM_INPUT && batch[i].id == CHAM_INPUT_KEYSYM &&
+                     keymap_type((uint32_t)batch[i].a, batch[i].b != 0))
+                batch[i].type = 0; /* typed on the evdev keyboard (keymap.c) */
             else
                 have_input = 1;
         }

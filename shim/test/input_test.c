@@ -6,11 +6,14 @@
  * inside kwin_wayland, whose socket it learns from bind().
  */
 #define _GNU_SOURCE
+#include <dlfcn.h>
 #include <fcntl.h>
+#include <linux/input.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -160,6 +163,47 @@ static void bind_fake_input(struct wl_client *client, void *data, uint32_t versi
     wl_resource_set_implementation(r, &k_impl, NULL, NULL);
 }
 
+/* ---- a seat whose keyboard has a US layout ---- */
+
+static void get_keyboard(struct wl_client *client, struct wl_resource *seat, uint32_t id)
+{
+    struct wl_resource *kb = wl_resource_create(client, &wl_keyboard_interface, wl_resource_get_version(seat), id);
+    void *lib = dlopen("libxkbcommon.so.0", RTLD_NOW);
+    void *(*context_new)(int) = lib ? dlsym(lib, "xkb_context_new") : NULL;
+    void *(*from_names)(void *, const void *, int) = lib ? dlsym(lib, "xkb_keymap_new_from_names") : NULL;
+    char *(*as_string)(void *, int) = lib ? dlsym(lib, "xkb_keymap_get_as_string") : NULL;
+    void *km = context_new && from_names ? from_names(context_new(0), NULL, 0) : NULL; /* evdev rules, us */
+    char *text = km && as_string ? as_string(km, 1) : NULL;
+    if (!text) {
+        fprintf(stderr, "no libxkbcommon keymap\n");
+        return;
+    }
+    int fd = memfd_create("keymap", MFD_CLOEXEC);
+    size_t size = strlen(text) + 1;
+    if (fd >= 0 && write(fd, text, size) == (ssize_t)size)
+        wl_keyboard_send_keymap(kb, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
+    if (fd >= 0)
+        close(fd);
+}
+
+static void get_none(struct wl_client *client, struct wl_resource *seat, uint32_t id)
+{
+    (void)client;
+    (void)seat;
+    (void)id;
+}
+
+static const struct {
+    void *fns[3];
+} k_seat_impl = {{get_none, get_keyboard, get_none}};
+
+static void bind_seat(struct wl_client *client, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(client, &wl_seat_interface, (int)version, id);
+    wl_resource_set_implementation(r, &k_seat_impl, NULL, NULL);
+}
+
 /* ---- stub presenter ---- */
 
 static void send_input(int c, uint32_t kind, uint64_t a, uint64_t b)
@@ -180,6 +224,7 @@ int main(void)
     struct wl_display *display = wl_display_create();
     CHECK(wl_display_add_socket(display, "wayland-chameleon-test") == 0, "Wayland socket");
     wl_global_create(display, &k_fake_input, 6, NULL, bind_fake_input);
+    wl_global_create(display, &wl_seat_interface, 1, NULL, bind_seat);
     struct wl_event_loop *loop = wl_display_get_event_loop(display);
 
     int l = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -227,6 +272,32 @@ int main(void)
     CHECK(g.button == 0x110 && g.button_state == 1, "left button pressed");
     CHECK(g.axis == 0 && g.axis_value == -15, "vertical scroll %.2f (want -15)", g.axis_value);
     CHECK(g.keysym == 0x010003bb && g.keysym_state == 1, "unicode keysym 0x%x", g.keysym);
+
+    /* Once something reads the keyboard, text goes there as the keys that
+     * type it in the desktop's layout (a keysym the layout lacks, as above,
+     * stays on fake input). */
+    printf("typed text on the evdev keyboard\n");
+    int kfd = open("/dev/input/event1", O_RDONLY | O_NONBLOCK);
+    CHECK(kfd >= 0, "keyboard opened");
+    for (int i = 0; i < 10; i++) { /* the reader registers with the shim */
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    send_input(c, CHAM_INPUT_KEYSYM, 'A', 1);
+    send_input(c, CHAM_INPUT_KEYSYM, 'A', 0);
+    char got[64] = "";
+    struct input_event ev;
+    for (int i = 0; i < 50 && strlen(got) < sizeof got - 8; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+        while (kfd >= 0 && read(kfd, &ev, sizeof ev) == (ssize_t)sizeof ev)
+            if (ev.type == EV_KEY)
+                snprintf(got + strlen(got), sizeof got - strlen(got), "%d=%d ", ev.code, ev.value);
+    }
+    CHECK(strcmp(got, "42=1 30=1 30=0 42=0 ") == 0, "'A' typed as Shift+A (%s)", got);
+    CHECK(g.keysym == 0x010003bb, "...not through fake input (last keysym 0x%x)", g.keysym);
+    if (kfd >= 0)
+        close(kfd);
 
     close(c);
     close(fd);
