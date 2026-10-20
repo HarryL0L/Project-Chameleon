@@ -253,6 +253,90 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
     return 0;
 }
 
+/* A bo for `buffer` (whose reference it takes over on success). */
+static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t format)
+{
+    int src = nh ? find_dmabuf_fd(nh) : -1;
+    int fd = src >= 0 ? fcntl(src, F_DUPFD_CLOEXEC, 0) : -1;
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0) {
+        cham_log("gralloc handle has no usable dmabuf fd");
+        if (fd >= 0)
+            close(fd);
+        errno = ENODEV;
+        return NULL;
+    }
+
+    struct cham_bo *bo = calloc(1, sizeof *bo);
+    bo->width = width;
+    bo->height = height;
+    bo->format = format;
+    bo->stride = stride;
+    bo->ahb = buffer;
+    bo->dmabuf_fd = fd;
+    bo->dmabuf_dev = st.st_dev;
+    bo->dmabuf_ino = st.st_ino;
+    bo->refs = 1;
+    bo->slot = -1;
+    bo->release_fence = -1;
+
+    pthread_mutex_lock(&g_lock);
+    bo->handle = g_next_handle++;
+    bo->next = g_bos;
+    g_bos = bo;
+    pthread_mutex_unlock(&g_lock);
+    return bo;
+}
+
+struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width, uint32_t height,
+                             uint32_t stride, uint32_t format, void (*release)(AHardwareBuffer *))
+{
+    struct cham_bo *bo = bo_new(ahb, native_handle, width, height, stride, format);
+    if (bo)
+        bo->release = release;
+    return bo;
+}
+
+#define MAX_GBM_WINDOWS 16
+static struct {
+    void *surface, *window;
+    uint32_t format;
+} g_gbm_windows[MAX_GBM_WINDOWS]; /* under g_lock */
+
+void cham_gbm_window_set(void *surface, void *window, uint32_t format)
+{
+    pthread_mutex_lock(&g_lock);
+    int i = 0;
+    while (i < MAX_GBM_WINDOWS && g_gbm_windows[i].surface != surface)
+        i++;
+    if (i == MAX_GBM_WINDOWS && window) { /* new: a free entry */
+        i = 0;
+        while (i < MAX_GBM_WINDOWS && g_gbm_windows[i].surface)
+            i++;
+    }
+    if (i < MAX_GBM_WINDOWS) {
+        g_gbm_windows[i].surface = window ? surface : NULL;
+        g_gbm_windows[i].window = window;
+        g_gbm_windows[i].format = format;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void *cham_gbm_window_get(void *surface, uint32_t *format)
+{
+    void *window = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; surface && i < MAX_GBM_WINDOWS; i++) {
+        if (g_gbm_windows[i].surface == surface) {
+            window = g_gbm_windows[i].window;
+            *format = g_gbm_windows[i].format;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return window;
+}
+
 struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)
 {
     uint32_t afmt = ahb_format(format);
@@ -273,37 +357,9 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     }
     ahb.describe(buffer, &desc);
 
-    const native_handle *nh = ahb.get_native_handle(buffer);
-    int src = nh ? find_dmabuf_fd(nh) : -1;
-    int fd = src >= 0 ? fcntl(src, F_DUPFD_CLOEXEC, 0) : -1;
-    struct stat st;
-    if (fd < 0 || real_fstat(fd, &st) != 0) {
-        cham_log("gralloc handle has no usable dmabuf fd");
-        if (fd >= 0)
-            close(fd);
+    struct cham_bo *bo = bo_new(buffer, ahb.get_native_handle(buffer), width, height, desc.stride * 4, format);
+    if (!bo)
         ahb.release(buffer);
-        errno = ENODEV;
-        return NULL;
-    }
-
-    struct cham_bo *bo = calloc(1, sizeof *bo);
-    bo->width = width;
-    bo->height = height;
-    bo->format = format;
-    bo->stride = desc.stride * 4;
-    bo->ahb = buffer;
-    bo->dmabuf_fd = fd;
-    bo->dmabuf_dev = st.st_dev;
-    bo->dmabuf_ino = st.st_ino;
-    bo->refs = 1;
-    bo->slot = -1;
-    bo->release_fence = -1;
-
-    pthread_mutex_lock(&g_lock);
-    bo->handle = g_next_handle++;
-    bo->next = g_bos;
-    g_bos = bo;
-    pthread_mutex_unlock(&g_lock);
     return bo;
 }
 
@@ -326,7 +382,10 @@ void bo_unref_locked(struct cham_bo *bo)
     if (bo->release_fence >= 0)
         close(bo->release_fence);
     close(bo->dmabuf_fd);
-    ahb.release(bo->ahb);
+    if (bo->release)
+        bo->release(bo->ahb);
+    else
+        ahb.release(bo->ahb);
     free(bo);
 }
 

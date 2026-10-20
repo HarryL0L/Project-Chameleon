@@ -52,7 +52,8 @@ __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EG
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" \
     CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_KWIN=1 \
-    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
+    CHAMELEON_ANDROID_NATIVEWINDOW="$OUT/fake_android_gl.so" CHAMELEON_ANDROID_MEDIANDK="$OUT/fake_android_gl.so" \
+    VENDOR_TEST_GBM="$OUT/libgbm.so" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
 # GPU rendering for Wayland apps: the vendor's Wayland platform against a
 # real libwayland-server compositor, buffers registered with libchameleon.so.
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers $(pkg-config --cflags libdrm) -o "$OUT/wayland_client_test" \

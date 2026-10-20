@@ -33,6 +33,7 @@ struct cham_bo {
     int slot;          /* presenter buffer id, -1 if not registered */
     uint64_t slot_gen; /* presenter connection the slot belongs to */
     int release_fence; /* last RELEASE fence from the presenter */
+    void (*release)(AHardwareBuffer *); /* for cham_bo_wrap()'s buffers */
     struct cham_bo *next;
 };
 
@@ -45,6 +46,12 @@ struct cham_bo {
 
 CHAM_EXPORT struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage);
 CHAM_EXPORT void cham_bo_unref(struct cham_bo *bo);
+/* A buffer someone else allocated (an AImageReader's, for gbm_surface), with
+ * its native handle and size; the bo takes over one reference, which it
+ * drops with `release`. */
+CHAM_EXPORT struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width,
+                                         uint32_t height, uint32_t stride, uint32_t format,
+                                         void (*release)(AHardwareBuffer *));
 /* Finds the buffer whose dmabuf `fd` refers to (any dup of it). No new ref. */
 CHAM_EXPORT struct cham_bo *cham_bo_from_fd(int fd);
 /* New fd (dup) of the buffer's dmabuf, caller owns it. */
@@ -71,6 +78,13 @@ CHAM_EXPORT extern volatile unsigned cham_call_pos;
 #define CHAM_NOTE_CALL(name) \
     (cham_last_gl = (name), cham_call_ring[cham_call_pos++ % CHAM_CALL_RING] = (name))
 CHAM_EXPORT void cham_crash_note(const char *fmt, ...);
+
+/* gbm surfaces (libgbm.so) and the Android windows behind them, for the
+ * EGL vendor: libgbm may be loaded privately (a compositor's backend
+ * module), so they are kept here. window NULL forgets the surface. */
+CHAM_EXPORT void cham_gbm_window_set(void *surface, void *window, uint32_t format);
+/* The window behind `surface` and its DRM format; NULL if not a gbm surface. */
+CHAM_EXPORT void *cham_gbm_window_get(void *surface, uint32_t *format);
 
 /* Formats gbm allocates and EGL imports (DRM fourcc). */
 CHAM_EXPORT const uint32_t *cham_formats(int *count);

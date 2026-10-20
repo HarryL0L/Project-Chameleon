@@ -8,6 +8,8 @@
  *    Chameleon gbm_bo is imported as its AHardwareBuffer
  *    (EGL_NATIVE_BUFFER_ANDROID)
  *  - eglTerminate is a no-op, because the Android display is process-wide
+ *  - on the GBM platform a config's EGL_NATIVE_VISUAL_ID is a GBM (DRM)
+ *    format, as EGL_KHR_platform_gbm says, not an Android one
  *
  * Nothing here is exported: glvnd's libEGL.so.1 gets every entry point
  * through cham_egl_get_proc(), and displays through vendor/vendor.c's
@@ -19,6 +21,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
+#include <drm_fourcc.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -82,7 +85,6 @@ FWD(EGLSync, eglCreateSync, (EGLDisplay d, EGLenum t, const EGLAttrib *a), (d, t
 FWD(EGLBoolean, eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c), EGL_FALSE)
 FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
-FWD(EGLBoolean, eglGetConfigAttrib, (EGLDisplay d, EGLConfig c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor), EGL_FALSE)
@@ -150,9 +152,44 @@ void *cham_egl_real(const char *name)
 /* ---- surfaces ----
  * Window surfaces on a Wayland display are ours (vendor/wayland.c): the
  * Android surface behind one is what the driver gets wherever a surface is
- * passed. Everything else goes straight through. */
+ * passed. A gbm_surface (gbm/gbm.c) is an Android window already, so its
+ * surface is the driver's own. Everything else goes straight through. */
 
 #define SURF(s) cham_wl_android_surface(s)
+
+/* A gbm_surface's window surface, if `native` is one (*handled). As with
+ * Mesa, the config's GBM format must be the surface's. */
+static EGLSurface gbm_window_surface(EGLDisplay dpy, EGLConfig config, void *native, const EGLint *attribs,
+                                     int *handled)
+{
+    uint32_t format = 0;
+    void *window = cham_gbm_window(native, &format);
+    *handled = window != NULL;
+    if (!window)
+        return EGL_NO_SURFACE;
+    EGLint visual = 0;
+    if (!eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID, &visual) || (uint32_t)visual != format) {
+        t_error = EGL_BAD_MATCH;
+        return EGL_NO_SURFACE;
+    }
+    REAL(EGLSurface, eglCreateWindowSurface, (EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *))
+    return p_eglCreateWindowSurface ? p_eglCreateWindowSurface(dpy, config, (EGLNativeWindowType)window, attribs)
+                                    : EGL_NO_SURFACE;
+}
+
+/* EGLAttrib attributes as EGLint ones (all window surface values fit). */
+static const EGLint *int_attribs(const EGLAttrib *attribs, EGLint *out, int size)
+{
+    if (!attribs)
+        return NULL;
+    int n = 0;
+    for (; attribs[n] != EGL_NONE && n + 2 < size; n += 2) {
+        out[n] = (EGLint)attribs[n];
+        out[n + 1] = (EGLint)attribs[n + 1];
+    }
+    out[n] = EGL_NONE;
+    return out;
+}
 
 EGLAPI EGLSurface EGLAPIENTRY eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, EGLNativeWindowType win,
                                                      const EGLint *attribs)
@@ -160,6 +197,8 @@ EGLAPI EGLSurface EGLAPIENTRY eglCreateWindowSurface(EGLDisplay dpy, EGLConfig c
     CHAM_NOTE_CALL("eglCreateWindowSurface");
     int handled;
     EGLSurface s = cham_wl_create_window_surface(dpy, config, (void *)win, &handled);
+    if (!handled)
+        s = gbm_window_surface(dpy, config, (void *)win, attribs, &handled);
     if (handled)
         return s;
     REAL(EGLSurface, eglCreateWindowSurface, (EGLDisplay, EGLConfig, EGLNativeWindowType, const EGLint *))
@@ -171,7 +210,10 @@ EGLAPI EGLSurface EGLAPIENTRY eglCreatePlatformWindowSurface(EGLDisplay dpy, EGL
 {
     CHAM_NOTE_CALL("eglCreatePlatformWindowSurface");
     int handled;
+    EGLint ints[64];
     EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
+    if (!handled)
+        s = gbm_window_surface(dpy, config, win, int_attribs(attribs, ints, 64), &handled);
     if (handled)
         return s;
     REAL(EGLSurface, eglCreatePlatformWindowSurface, (EGLDisplay, EGLConfig, void *, const EGLAttrib *))
@@ -185,6 +227,8 @@ static EGLSurface EGLAPIENTRY shim_eglCreatePlatformWindowSurfaceEXT(EGLDisplay 
     CHAM_NOTE_CALL("eglCreatePlatformWindowSurfaceEXT");
     int handled;
     EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
+    if (!handled)
+        s = gbm_window_surface(dpy, config, win, attribs, &handled);
     if (handled)
         return s;
     REAL(EGLSurface, eglCreatePlatformWindowSurfaceEXT, (EGLDisplay, EGLConfig, void *, const EGLint *))
@@ -300,6 +344,49 @@ EGLAPI EGLint EGLAPIENTRY eglGetError(void)
         return e;
     }
     return real_error;
+}
+
+/* ---- configs ---- */
+
+/* The DRM format of an Android config's buffers (AHARDWAREBUFFER_FORMAT_*), 0
+ * if none matches. */
+static EGLint drm_format(EGLint android, EGLint alpha)
+{
+    switch (android) {
+    case 1: /* R8G8B8A8_UNORM */
+        return alpha ? DRM_FORMAT_ABGR8888 : DRM_FORMAT_XBGR8888;
+    case 2: /* R8G8B8X8_UNORM */
+        return DRM_FORMAT_XBGR8888;
+    case 3: /* R8G8B8_UNORM */
+        return DRM_FORMAT_BGR888;
+    case 4: /* R5G6B5_UNORM */
+        return DRM_FORMAT_RGB565;
+    case 5: /* B8G8R8A8_UNORM */
+        return alpha ? DRM_FORMAT_ARGB8888 : DRM_FORMAT_XRGB8888;
+    case 0x16: /* R16G16B16A16_FLOAT */
+        return alpha ? DRM_FORMAT_ABGR16161616F : DRM_FORMAT_XBGR16161616F;
+    case 0x2b: /* R10G10B10A2_UNORM */
+        return alpha ? DRM_FORMAT_ABGR2101010 : DRM_FORMAT_XBGR2101010;
+    }
+    return 0;
+}
+
+/* A compositor on the fake card (the only process with the GBM platform)
+ * picks configs by their GBM format, which its window surfaces render in. */
+EGLAPI EGLBoolean EGLAPIENTRY eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value)
+{
+    REAL(EGLBoolean, eglGetConfigAttrib, (EGLDisplay, EGLConfig, EGLint, EGLint *))
+    CHAM_NOTE_CALL("eglGetConfigAttrib");
+    if (!p_eglGetConfigAttrib)
+        return EGL_FALSE;
+    if (!p_eglGetConfigAttrib(dpy, config, attribute, value))
+        return EGL_FALSE;
+    if (attribute == EGL_NATIVE_VISUAL_ID && cham_core_present()) {
+        EGLint alpha = 0;
+        p_eglGetConfigAttrib(dpy, config, EGL_ALPHA_SIZE, &alpha);
+        *value = drm_format(*value, alpha);
+    }
+    return EGL_TRUE;
 }
 
 /* ---- displays ---- */

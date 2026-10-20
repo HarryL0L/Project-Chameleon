@@ -4,6 +4,7 @@
 #define CHAM_VENDOR_H
 
 #include <EGL/egl.h>
+#include <stdint.h>
 
 /* egl/egl.c */
 void *cham_egl_get_proc(const char *name);
@@ -32,5 +33,8 @@ void *cham_gl_get_proc(const char *name);
 
 /* bridge.c: is libchameleon.so (KWin's fake KMS device) in this process? */
 int cham_core_present(void);
+/* bridge.c: the Android window behind one of Chameleon's gbm surfaces (and
+ * its DRM format), NULL for any other native window. */
+void *cham_gbm_window(void *native, uint32_t *format);
 
 #endif

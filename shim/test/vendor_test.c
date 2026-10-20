@@ -10,6 +10,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -23,6 +24,72 @@ struct fake_state {
     int create_image_target;
     int query_counter_calls;
 };
+
+/* Chameleon's libgbm (VENDOR_TEST_GBM), by hand: no gbm.h here. */
+static struct {
+    void *(*create_device)(int);
+    void *(*surface_create)(void *, uint32_t, uint32_t, uint32_t, uint32_t);
+    void *(*lock)(void *);
+    void (*release)(void *, void *);
+    int (*has_free)(void *);
+    void (*surface_destroy)(void *);
+    uint32_t (*bo_width)(void *), (*bo_format)(void *);
+    union { uint32_t u32; uint64_t u64; } (*bo_handle)(void *);
+} gbm;
+
+/* EGL on the GBM platform the way Weston's GL renderer uses it: a window
+ * surface on a gbm_surface, swaps, and the swapped buffer locked for KMS. */
+static void gbm_surface_checks(EGLDisplay dpy, EGLConfig config)
+{
+    printf("gbm surface\n");
+    void *lib = dlopen(getenv("VENDOR_TEST_GBM"), RTLD_NOW | RTLD_LOCAL); /* as Weston's drm-backend.so brings it */
+#define G(field, name) (*(void **)&gbm.field = lib ? dlsym(lib, name) : NULL)
+    G(create_device, "gbm_create_device");
+    G(surface_create, "gbm_surface_create");
+    G(lock, "gbm_surface_lock_front_buffer");
+    G(release, "gbm_surface_release_buffer");
+    G(has_free, "gbm_surface_has_free_buffers");
+    G(surface_destroy, "gbm_surface_destroy");
+    G(bo_width, "gbm_bo_get_width");
+    G(bo_format, "gbm_bo_get_format");
+    G(bo_handle, "gbm_bo_get_handle");
+#undef G
+    CHECK(gbm.create_device && gbm.bo_handle, "Chameleon's libgbm");
+    if (!gbm.create_device || !gbm.bo_handle)
+        return;
+    void *dev = gbm.create_device(-1);
+    void *surface = gbm.surface_create(dev, 64, 32, 0x34324241 /* AB24 */, 5 /* SCANOUT | RENDERING */);
+    void *other = gbm.surface_create(dev, 64, 32, 0x34324258 /* XB24 */, 5);
+    CHECK(surface && other, "gbm_surface_create");
+    EGLSurface es = eglCreatePlatformWindowSurface(dpy, config, surface, NULL);
+    CHECK(es != EGL_NO_SURFACE, "window surface on a gbm surface of the config's format");
+    CHECK(eglCreatePlatformWindowSurface(dpy, config, other, NULL) == EGL_NO_SURFACE && eglGetError() == EGL_BAD_MATCH,
+          "...EGL_BAD_MATCH for one of another format");
+    CHECK(gbm.lock(surface) == NULL, "nothing to lock before a swap");
+
+    eglSwapBuffers(dpy, es);
+    void *first = gbm.lock(surface);
+    CHECK(first && gbm.bo_width(first) == 64 && gbm.bo_format(first) == 0x34324241 && gbm.bo_handle(first).u32,
+          "the swapped buffer locked as a gbm_bo with a GEM handle");
+    eglSwapBuffers(dpy, es);
+    void *second = gbm.lock(surface);
+    CHECK(second && second != first, "the next swap, another buffer");
+    CHECK(gbm.has_free(surface), "free buffers left while two are locked");
+    gbm.release(surface, first);
+    gbm.release(surface, second);
+    int same = 0;
+    for (int i = 0; i < 8; i++) {
+        eglSwapBuffers(dpy, es);
+        void *bo = gbm.lock(surface);
+        same |= bo == first;
+        if (bo)
+            gbm.release(surface, bo);
+    }
+    CHECK(same, "a buffer coming round again is the same gbm_bo");
+    eglDestroySurface(dpy, es);
+    gbm.surface_destroy(surface);
+    gbm.surface_destroy(other);
+}
 
 int main(void)
 {
@@ -69,6 +136,16 @@ int main(void)
         CHECK(listed == 4, "dmabuf import of XBGR/ABGR/XRGB/ARGB8888, gbm's formats (%d of 4)", listed);
     } else
         CHECK(exts && !strstr(exts, "dma_buf_import"), "no dmabuf import outside KWin");
+    /* EGL_KHR_platform_gbm: a config's native visual is its GBM format (the
+     * stand-in's config is Android's RGBA_8888 with alpha). */
+    EGLConfig config;
+    EGLint nconfigs = 0, visual = 0;
+    eglChooseConfig(dpy, (const EGLint[]){EGL_NONE}, &config, 1, &nconfigs);
+    eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID, &visual);
+    if (kwin)
+        CHECK(visual == 0x34324241, "native visual of an RGBA_8888 config: ABGR8888 for GBM (0x%x)", visual);
+    else
+        CHECK(visual == 1, "native visual left Android's outside KWin (0x%x)", visual);
 
     CHECK(eglBindAPI(EGL_OPENGL_ES_API), "eglBindAPI(GLES)");
     const EGLint attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT, EGL_TRUE, EGL_NONE};
@@ -109,6 +186,9 @@ int main(void)
 
     GLenum (*reset_arb)(void) = (GLenum(*)(void))eglGetProcAddress("glGetGraphicsResetStatusARB");
     CHECK(reset_arb && reset_arb() == GL_NO_ERROR, "glGetGraphicsResetStatusARB (Qt) answers GL_NO_ERROR");
+
+    if (kwin)
+        gbm_surface_checks(dpy, config);
 
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);

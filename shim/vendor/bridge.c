@@ -50,6 +50,7 @@ static struct {
     AHardwareBuffer *(*bo_ahb)(struct cham_bo *);
     const uint32_t *(*formats)(int *);
     AHardwareBuffer *(*client_ahb_from_fd)(int);
+    void *(*gbm_window_get)(void *, uint32_t *);
 } core;
 
 static void resolve(void)
@@ -58,6 +59,7 @@ static void resolve(void)
     *(void **)&core.bo_ahb = dlsym(RTLD_DEFAULT, "cham_bo_ahb");
     *(void **)&core.formats = dlsym(RTLD_DEFAULT, "cham_formats");
     *(void **)&core.client_ahb_from_fd = dlsym(RTLD_DEFAULT, "cham_client_ahb_from_fd");
+    *(void **)&core.gbm_window_get = dlsym(RTLD_DEFAULT, "cham_gbm_window_get");
     if (!core.bo_from_fd || !core.bo_ahb || !core.formats)
         memset(&core, 0, sizeof core);
 
@@ -99,6 +101,11 @@ AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo)
 AHardwareBuffer *cham_client_ahb_from_fd(int fd)
 {
     return cham_core_present() && core.client_ahb_from_fd ? core.client_ahb_from_fd(fd) : NULL;
+}
+
+void *cham_gbm_window(void *native, uint32_t *format)
+{
+    return cham_core_present() && core.gbm_window_get ? core.gbm_window_get(native, format) : NULL;
 }
 
 const uint32_t *cham_formats(int *count)
