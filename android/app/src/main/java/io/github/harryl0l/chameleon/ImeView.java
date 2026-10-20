@@ -9,10 +9,10 @@ import android.view.inputmethod.EditorInfo;
 import android.view.inputmethod.InputConnection;
 
 /**
- * Invisible text editor the Android keyboard types into. Text is forwarded
- * as keysyms as it arrives; suggestions are turned off (as in Termux), and
- * any composing text a keyboard still uses is replaced with backspaces as it
- * changes, so what KWin sees always matches what the keyboard shows.
+ * Invisible text editor the Android keyboard types into. Its text, the word
+ * being composed and deletions go to the shim as they arrive, which gives
+ * them to the desktop app's text field like a Linux on-screen keyboard (or
+ * types them as keys).
  */
 final class ImeView extends View {
     private final KeyInput mKeys;
@@ -31,54 +31,39 @@ final class ImeView extends View {
 
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
-                | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        // A plain text field: the keyboard composes, suggests and offers emoji
+        // (the shim handles composing text); Enter stays a key.
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT;
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
-                | EditorInfo.IME_ACTION_NONE;
+                | EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_ENTER_ACTION;
         return new BaseInputConnection(this, false) {
             private String mComposing = "";
 
-            private void replaceComposing(String text) {
-                int common = 0;
-                int max = Math.min(mComposing.length(), text.length());
-                while (common < max && mComposing.charAt(common) == text.charAt(common))
-                    common++;
-                // Never split a surrogate pair (emoji that share a high half).
-                if (common > 0 && Character.isHighSurrogate(text.charAt(common - 1)))
-                    common--;
-                int erase = mComposing.codePointCount(common, mComposing.length());
-                // keysyms like the text, so both arrive in order on one channel
-                for (int i = 0; i < erase; i++)
-                    mKeys.tap(KeyInput.XK_BACKSPACE);
-                mKeys.sendText(text.substring(common));
-            }
-
             @Override
             public boolean commitText(CharSequence text, int newCursorPosition) {
-                replaceComposing(text.toString());
+                mKeys.sendText(text);
                 mComposing = "";
                 return true;
             }
 
             @Override
             public boolean setComposingText(CharSequence text, int newCursorPosition) {
-                replaceComposing(text.toString());
                 mComposing = text.toString();
+                InputSender.text(mComposing, false);
                 return true;
             }
 
             @Override
             public boolean finishComposingText() {
+                if (!mComposing.isEmpty())
+                    InputSender.text(mComposing, true); /* keeps the word as it is */
                 mComposing = "";
                 return true;
             }
 
             @Override
             public boolean deleteSurroundingText(int beforeLength, int afterLength) {
-                for (int i = 0; i < beforeLength; i++)
-                    mKeys.tap(KeyInput.XK_BACKSPACE);
-                for (int i = 0; i < afterLength; i++)
-                    mKeys.tap(KeyInput.XK_DELETE);
+                InputSender.deleteText(beforeLength, afterLength);
                 return true;
             }
 

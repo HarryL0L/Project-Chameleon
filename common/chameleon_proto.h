@@ -87,6 +87,11 @@ enum cham_input_kind {
                                       time, CLOCK_MONOTONIC ns (the evdev devices' timestamps,
                                       as the kernel stamps a device's events), 0 = now; holds
                                       until the next TIME */
+    CHAM_INPUT_TEXT_CHAR = 21,     /* the Android keyboard's text: a = one code point, appended */
+    CHAM_INPUT_TEXT_COMMIT = 22,   /* the code points since the last COMMIT / PREEDIT are typed
+                                      text (replacing the text being composed, if any) */
+    CHAM_INPUT_TEXT_PREEDIT = 23,  /* ...are the text being composed now (none: no longer) */
+    CHAM_INPUT_TEXT_DELETE = 24,   /* a / b = code points to delete before / after the cursor */
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)

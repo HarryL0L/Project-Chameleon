@@ -15,6 +15,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -204,6 +205,80 @@ static void bind_seat(struct wl_client *client, void *data, uint32_t version, ui
     wl_resource_set_implementation(r, &k_seat_impl, NULL, NULL);
 }
 
+/* ---- an input method global, for chameleon-ime ---- */
+
+static const struct wl_interface k_context;
+static const struct wl_interface *k_context_types[] = {&k_context};
+static const struct wl_message k_im_events[] = {{"activate", "n", k_context_types}, {"deactivate", "o", k_context_types}};
+static const struct wl_interface k_im = {"zwp_input_method_v1", 1, 0, NULL, 2, k_im_events};
+static const struct wl_message k_context_requests[] = {
+    {"destroy", "", k_null},           {"commit_string", "us", k_null},  {"preedit_string", "uss", k_null},
+    {"preedit_styling", "uuu", k_null}, {"preedit_cursor", "i", k_null}, {"delete_surrounding_text", "iu", k_null},
+    {"cursor_position", "ii", k_null}, {"modifiers_map", "a", k_null},   {"keysym", "uuuuu", k_null},
+    {"grab_keyboard", "n", k_null},    {"key", "uuuu", k_null},          {"modifiers", "uuuuu", k_null},
+    {"language", "us", k_null},        {"text_direction", "uu", k_null},
+};
+static const struct wl_message k_context_events[] = {
+    {"surrounding_text", "suu", k_null}, {"reset", "", k_null},       {"content_type", "uu", k_null},
+    {"invoke_button", "uu", k_null},     {"commit_state", "u", k_null}, {"preferred_language", "s", k_null},
+};
+static const struct wl_interface k_context = {"zwp_input_method_context_v1", 1, 14, k_context_requests, 6,
+                                              k_context_events};
+
+static struct {
+    struct wl_resource *im;
+    char commit[64], preedit[64];
+    int delete_index;
+    unsigned delete_length;
+} ime;
+
+static void ctx_destroy(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    wl_resource_destroy(r);
+}
+
+static void ctx_commit_string(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *text)
+{
+    (void)c;
+    (void)r;
+    (void)serial;
+    snprintf(ime.commit, sizeof ime.commit, "%s", text);
+}
+
+static void ctx_preedit_string(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *text,
+                               const char *commit)
+{
+    (void)c;
+    (void)r;
+    (void)serial;
+    (void)commit;
+    snprintf(ime.preedit, sizeof ime.preedit, "%s", text);
+}
+
+static void ctx_delete(struct wl_client *c, struct wl_resource *r, int32_t index, uint32_t length)
+{
+    (void)c;
+    (void)r;
+    ime.delete_index = index;
+    ime.delete_length = length;
+}
+
+static void ctx_other(void)
+{
+}
+
+static const struct {
+    void *fns[14];
+} k_context_impl = {{ctx_destroy, ctx_commit_string, ctx_preedit_string, ctx_other, ctx_other, ctx_delete, ctx_other,
+                     ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other}};
+
+static void bind_im(struct wl_client *client, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    ime.im = wl_resource_create(client, &k_im, (int)version, id);
+}
+
 /* ---- stub presenter ---- */
 
 static void send_input(int c, uint32_t kind, uint64_t a, uint64_t b)
@@ -285,7 +360,7 @@ int main(void)
     }
     send_input(c, CHAM_INPUT_KEYSYM, 'A', 1);
     send_input(c, CHAM_INPUT_KEYSYM, 'A', 0);
-    char got[64] = "";
+    char got[96] = "";
     struct input_event ev;
     for (int i = 0; i < 50 && strlen(got) < sizeof got - 8; i++) {
         wl_event_loop_dispatch(loop, 20);
@@ -296,6 +371,84 @@ int main(void)
     }
     CHECK(strcmp(got, "42=1 30=1 30=0 42=0 ") == 0, "'A' typed as Shift+A (%s)", got);
     CHECK(g.keysym == 0x010003bb, "...not through fake input (last keysym 0x%x)", g.keysym);
+
+    /* Chameleon's input method, started the way KWin starts one: with a
+     * private connection that offers zwp_input_method_v1. While a text field
+     * takes text (a context), the text goes there; without one, as keys. */
+    printf("input method\n");
+    wl_global_create(display, &k_im, 1, NULL, bind_im);
+    int sv[2];
+    socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv);
+    pid_t ime_pid = fork();
+    if (ime_pid == 0) {
+        char fd[16];
+        snprintf(fd, sizeof fd, "%d", sv[1]);
+        fcntl(sv[1], F_SETFD, 0);
+        setenv("WAYLAND_SOCKET", fd, 1);
+        unsetenv("LD_PRELOAD"); /* KWin's children don't get the shim either */
+        execl(getenv("CHAMELEON_IME"), "chameleon-ime", (char *)NULL);
+        _exit(127);
+    }
+    close(sv[1]);
+    struct wl_client *ime_client = wl_client_create(display, sv[0]);
+    for (int i = 0; i < 50 && !ime.im; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    CHECK(ime_client && ime.im, "chameleon-ime binds zwp_input_method_v1");
+    struct wl_resource *ctx = ime.im ? wl_resource_create(ime_client, &k_context, 1, 0) : NULL;
+    if (ctx) {
+        wl_resource_set_implementation(ctx, &k_context_impl, NULL, NULL);
+        wl_resource_post_event(ime.im, 0 /* activate */, ctx);
+    }
+    for (int i = 0; i < 25; i++) { /* it connects to the shim and says a text field takes text */
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    const char *word = "hi";
+    for (const char *p = word; *p; p++)
+        send_input(c, CHAM_INPUT_TEXT_CHAR, (unsigned char)*p, 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 0x00e9, 0); /* é */
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'x', 0);
+    send_input(c, CHAM_INPUT_TEXT_PREEDIT, 0, 0);
+    send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 0);
+    for (int i = 0; i < 25 && !ime.delete_length; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    CHECK(strcmp(ime.commit, "hi") == 0, "committed text reaches the text field (\"%s\")", ime.commit);
+    CHECK(strcmp(ime.preedit, "\xc3\xa9x") == 0, "composing text too (\"%s\")", ime.preedit);
+    CHECK(ime.delete_index == -2 && ime.delete_length == 2, "deleting 2 before the cursor (%d, %u)",
+          ime.delete_index, ime.delete_length);
+    if (ctx)
+        wl_resource_post_event(ime.im, 1 /* deactivate */, ctx);
+    for (int i = 0; i < 25; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    while (kfd >= 0 && read(kfd, &ev, sizeof ev) == (ssize_t)sizeof ev)
+        ;
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'a', 0); /* composing "ab", then "ac" committed */
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'b', 0);
+    send_input(c, CHAM_INPUT_TEXT_PREEDIT, 0, 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'a', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'c', 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    got[0] = 0;
+    for (int i = 0; i < 25 && strlen(got) < sizeof got - 8; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+        while (kfd >= 0 && read(kfd, &ev, sizeof ev) == (ssize_t)sizeof ev)
+            if (ev.type == EV_KEY)
+                snprintf(got + strlen(got), sizeof got - strlen(got), "%d=%d ", ev.code, ev.value);
+    }
+    CHECK(strcmp(got, "30=1 30=0 48=1 48=0 14=1 14=0 46=1 46=0 ") == 0,
+          "without a text field, text is typed as keys, composing text corrected with Backspace (%s)", got);
+    if (ime_client)
+        wl_client_destroy(ime_client);
+    if (ime_pid > 0)
+        waitpid(ime_pid, NULL, 0);
     if (kfd >= 0)
         close(kfd);
 

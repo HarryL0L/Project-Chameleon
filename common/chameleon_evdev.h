@@ -15,6 +15,8 @@
  * CHAM_UEVENT_SUBSYSTEM_* bits (the subsystems its filters let through), and
  * receives UEVENT records, one per uevent that passes, as the netlink
  * socket of a real monitor would.
+ * chameleon-ime writes CHAM_EVDEV_IME, then sends IME_ACTIVE records and
+ * receives IME_TEXT ones.
  *
  * The server applies the kernel's input core rules (events that change
  * nothing are dropped, ABS_MT_SLOT is held back until a slot's value
@@ -67,13 +69,25 @@ enum cham_evdev_record_type {
     CHAM_EVDEV_GRAB_RESULT,   /* int32_t: 0 or -errno, for the client's last GRAB */
     CHAM_EVDEV_ABSINFO,       /* uint32_t axis, struct input_absinfo: EVIOCSABS by any client */
     CHAM_EVDEV_UEVENT,        /* struct cham_uevent, to monitors */
+    CHAM_EVDEV_IME_TEXT,      /* struct cham_ime_text and its UTF-8 text, to chameleon-ime */
     /* client -> server */
     CHAM_EVDEV_GRAB = 16,     /* int32_t: 1 grab, 0 release (EVIOCGRAB) */
     CHAM_EVDEV_SET_ABS,       /* uint32_t axis, struct input_absinfo (EVIOCSABS) */
+    CHAM_EVDEV_IME_ACTIVE,    /* uint32_t: 1 while a text field takes chameleon-ime's text */
 };
 
 /* The "index" a udev monitor connects with. */
 #define CHAM_EVDEV_MONITOR 0x4d4f4e49u /* "MONI" */
+
+/* The "index" chameleon-ime, Chameleon's input method, connects with: it
+ * gets the Android keyboard's text while it says a text field takes text,
+ * and the shim types the text as keys otherwise. */
+#define CHAM_EVDEV_IME 0x494d4531u /* "IME1" */
+enum { CHAM_IME_COMMIT = 1, CHAM_IME_PREEDIT, CHAM_IME_DELETE };
+struct cham_ime_text {
+    uint32_t kind;          /* CHAM_IME_*; COMMIT and PREEDIT: the UTF-8 text follows */
+    uint32_t before, after; /* DELETE: code points before / after the cursor */
+};
 
 /* A uevent: so far only the card's "change" with HOTPLUG=1, which the kernel
  * sends when a connector's modes or status changed. */

@@ -77,6 +77,17 @@ void keymap_disconnected(void);
  * layout has no key for it or nothing reads the keyboard. */
 int keymap_type(uint32_t sym, int down);
 
+/* ---- text.c: the Android keyboard's text (input thread) ---- */
+int text_input(const struct cham_msg *m); /* takes CHAM_INPUT_TEXT_* */
+void text_ime_attach(int fd);             /* chameleon-ime connected (input.c's message) */
+int text_ime_fd(void);                    /* -1 = none */
+void text_ime_readable(void);
+/* input.c: a keysym typed on the evdev keyboard, or through fake input if the
+ * layout lacks it. */
+void input_keysym(uint32_t sym, int down);
+/* evdev.c's server: chameleon-ime connected (any thread). */
+void input_ime_connected(int fd);
+
 /* ---- kms.c: the fake KMS device ---- */
 struct fake_fd {
     dev_t dev;

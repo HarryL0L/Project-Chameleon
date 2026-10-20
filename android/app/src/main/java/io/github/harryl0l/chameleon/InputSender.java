@@ -20,6 +20,10 @@ final class InputSender {
     static final int MOUSE_MOTION = 14;
     static final int PAD_DOWN = 15; // .. PAD_FRAME = 19
     static final int TIME = 20;
+    static final int TEXT_CHAR = 21;
+    static final int TEXT_COMMIT = 22;
+    static final int TEXT_PREEDIT = 23;
+    static final int TEXT_DELETE = 24;
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
@@ -92,6 +96,27 @@ final class InputSender {
     /** A key of the evdev keyboard, by its Linux key code. */
     static void key(int code, boolean pressed) {
         nativeSendInput(KEY, code, pressed ? 1 : 0);
+    }
+
+    /**
+     * Text from the Android keyboard: committed, or the word being composed
+     * (shown as such where the desktop app's text field takes text).
+     */
+    static void text(CharSequence text, boolean commit) {
+        time(0);
+        String s = text.toString();
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            i += Character.charCount(cp);
+            nativeSendInput(TEXT_CHAR, cp, 0);
+        }
+        nativeSendInput(commit ? TEXT_COMMIT : TEXT_PREEDIT, 0, 0);
+    }
+
+    /** Deletes code points before / after the cursor. */
+    static void deleteText(int before, int after) {
+        time(0);
+        nativeSendInput(TEXT_DELETE, before, after);
     }
 
     static void keysym(int keysym, boolean pressed) {

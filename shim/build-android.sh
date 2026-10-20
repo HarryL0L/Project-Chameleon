@@ -17,6 +17,8 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 "$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
+# Chameleon's input method, started by KWin (bin/kwin_wayland).
+"$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
 mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland "$OUT/bin/"
 

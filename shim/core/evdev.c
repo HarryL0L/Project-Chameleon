@@ -363,6 +363,11 @@ static void serve(int c)
         pthread_mutex_unlock(&g_evdev_lock);
         goto done;
     }
+    if (index == CHAM_EVDEV_IME) {
+        input_ime_connected(c); /* the input thread owns it from here */
+        c = -1;
+        goto done;
+    }
     if (index >= DEV_COUNT)
         goto done;
     struct device *d = &g_dev[index];

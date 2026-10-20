@@ -162,29 +162,7 @@ static int load_wayland(void)
         cham_log("input and screen resizing disabled: cannot load libwayland-client: %s", dlerror());
         return loaded = 0;
     }
-#define W(field, name) (*(void **)&wl.field = dlsym(lib, name))
-    W(connect_to_fd, "wl_display_connect_to_fd");
-    W(disconnect, "wl_display_disconnect");
-    W(roundtrip, "wl_display_roundtrip");
-    W(flush, "wl_display_flush");
-    W(get_fd, "wl_display_get_fd");
-    W(prepare_read, "wl_display_prepare_read");
-    W(read_events, "wl_display_read_events");
-    W(cancel_read, "wl_display_cancel_read");
-    W(dispatch_pending, "wl_display_dispatch_pending");
-    W(get_error, "wl_display_get_error");
-    W(marshal_flags, "wl_proxy_marshal_flags");
-    W(add_listener, "wl_proxy_add_listener");
-    W(get_version, "wl_proxy_get_version");
-    W(get_user_data, "wl_proxy_get_user_data");
-    W(proxy_destroy, "wl_proxy_destroy");
-    W(registry_iface, "wl_registry_interface");
-    W(output_iface, "wl_output_interface");
-    W(seat_iface, "wl_seat_interface");
-    W(keyboard_iface, "wl_keyboard_interface");
-#undef W
-    if (!wl.connect_to_fd || !wl.marshal_flags || !wl.add_listener || !wl.registry_iface || !wl.output_iface ||
-        !wl.prepare_read || !wl.get_version || !wl.get_user_data || !wl.proxy_destroy) {
+    if (!cham_wl_load(lib)) {
         cham_log("input and screen resizing disabled: libwayland-client is too old (need 1.20+)");
         return loaded = 0;
     }
@@ -421,20 +399,34 @@ static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
         evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
 }
 
+/* A keysym typed on the evdev keyboard, or through fake input when the
+ * layout has no key for it (or nothing reads the keyboard). */
+void input_keysym(uint32_t sym, int down)
+{
+    struct cham_msg m = {CHAM_INPUT, CHAM_INPUT_KEYSYM, sym, (uint64_t)down};
+    if (!keymap_type(sym, down) && g_display)
+        forward(&m);
+}
+
+/* Not a presenter message: chameleon-ime connected (input_ime_connected). */
+#define IME_CONNECTED 0x494d45u
+
 static void *input_main(void *arg)
 {
     (void)arg;
     int warned = 0;
     uint64_t next_connect = 0;
     for (;;) {
-        struct pollfd p[2] = {{.fd = g_pipe[0], .events = POLLIN}, {.fd = -1, .events = POLLIN}};
+        struct pollfd p[3] = {{.fd = g_pipe[0], .events = POLLIN},
+                              {.fd = -1, .events = POLLIN},
+                              {.fd = text_ime_fd(), .events = POLLIN}};
         if (g_display) {
             while (wl.prepare_read(g_display) != 0)
                 wl.dispatch_pending(g_display);
             wl.flush(g_display);
             p[1].fd = wl.get_fd(g_display);
         }
-        int n = poll(p, 2, -1);
+        int n = poll(p, 3, -1);
         if (g_display) {
             if (n > 0 && (p[1].revents & (POLLIN | POLLERR | POLLHUP)))
                 wl.read_events(g_display);
@@ -446,41 +438,39 @@ static void *input_main(void *arg)
                 disconnect_wayland();
             }
         }
+        if (n > 0 && p[2].fd >= 0 && (p[2].revents & (POLLIN | POLLERR | POLLHUP)))
+            text_ime_readable();
 
         struct cham_msg batch[64];
         ssize_t got = 0;
         if (n > 0 && (p[0].revents & POLLIN))
             got = read(g_pipe[0], batch, sizeof batch);
-        int have_input = 0;
-        for (size_t i = 0; got > 0 && i < (size_t)got / sizeof batch[0]; i++) {
-            if (batch[i].type == CHAM_CONFIG)
-                config(CHAM_CONFIG_WIDTH(&batch[i]), CHAM_CONFIG_HEIGHT(&batch[i]), (uint32_t)batch[i].b);
-            else if (batch[i].type == CHAM_INPUT && evdev_input(&batch[i]))
-                batch[i].type = 0; /* went to an evdev device's readers (evdev.c) */
-            else if (batch[i].type == CHAM_INPUT && batch[i].id == CHAM_INPUT_KEYSYM &&
-                     keymap_type((uint32_t)batch[i].a, batch[i].b != 0))
-                batch[i].type = 0; /* typed on the evdev keyboard (keymap.c) */
-            else
-                have_input = 1;
-        }
-
-        if (!g_display && have_input && now_ns() >= next_connect) {
-            if (!connect_wayland()) {
-                next_connect = now_ns() + 1000000000ull;
-                if (have_input && !warned++)
+        size_t count = got > 0 ? (size_t)got / sizeof batch[0] : 0;
+        /* Text and input the evdev devices don't take need the connection
+         * (keymap.c's layout, fake input). */
+        if (!g_display && count && now_ns() >= next_connect && !connect_wayland())
+            next_connect = now_ns() + 1000000000ull;
+        for (size_t i = 0; i < count; i++) {
+            const struct cham_msg *m = &batch[i];
+            if (m->type == CHAM_CONFIG) {
+                config(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
+            } else if (m->type == IME_CONNECTED) {
+                text_ime_attach((int)m->a);
+            } else if (m->type == CHAM_INPUT && !text_input(m) && !evdev_input(m)) {
+                if (m->id == CHAM_INPUT_KEYSYM)
+                    input_keysym((uint32_t)m->a, m->b != 0);
+                else if (g_display)
+                    forward(m);
+                else if (!warned++)
                     cham_log("input: dropping input until KWin's Wayland socket is reachable");
+            } else if (m->type == CHAM_CLIPBOARD_OFFER && g_display) {
+                clipboard_offer(m->a != 0);
             }
         }
-        if (!g_display)
-            continue;
-        warned = 0;
-        for (size_t i = 0; have_input && i < (size_t)got / sizeof batch[0]; i++) {
-            if (batch[i].type == CHAM_INPUT)
-                forward(&batch[i]);
-            else if (batch[i].type == CHAM_CLIPBOARD_OFFER)
-                clipboard_offer(batch[i].a != 0);
+        if (g_display) {
+            warned = 0;
+            wl.flush(g_display);
         }
-        wl.flush(g_display);
     }
     return NULL;
 }
@@ -496,6 +486,12 @@ static void start(void)
     pthread_t t;
     if (pthread_create(&t, NULL, input_main, NULL) == 0)
         pthread_detach(t);
+}
+
+void input_ime_connected(int fd)
+{
+    struct cham_msg m = {IME_CONNECTED, 0, (uint64_t)fd, 0};
+    input_post(&m);
 }
 
 /* CHAM_INPUT, CHAM_CONFIG and CHAM_CLIPBOARD_OFFER messages, from the

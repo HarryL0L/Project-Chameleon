@@ -13,9 +13,9 @@ import java.util.Set;
  * as from a real keyboard: a hardware keyboard's by Android's scan codes (the
  * desktop's own layout applies), the extra keys and the soft keyboard's
  * non-text keys (Enter, Backspace, arrows...) by a table. Typed text goes as
- * X keysyms: the shim types each one on the evdev keyboard with the keys
- * (and Shift / AltGr) that produce it in the desktop's layout, like a real
- * keyboard; one the layout lacks goes to KWin's fake input for now.
+ * text (InputSender.text): the shim hands it to Chameleon's input method for
+ * a text field that takes text, or types it as the keys (and Shift / AltGr)
+ * that produce it in the desktop's layout, like a real keyboard.
  *
  * Ctrl and Alt can be latched from the extra-keys row; a latched modifier
  * applies to the next key or character and is then released. It goes the
@@ -133,8 +133,15 @@ final class KeyInput {
         }
     }
 
-    /** Types {@code text} (from the soft keyboard). */
+    /**
+     * Types {@code text} (from the soft keyboard): as text, or as keysyms
+     * with a latched modifier, which applies to the next character.
+     */
     void sendText(CharSequence text) {
+        if (!mCtrl && !mAlt) {
+            InputSender.text(text, true);
+            return;
+        }
         String s = text.toString();
         for (int i = 0; i < s.length(); ) {
             int cp = s.codePointAt(i);
