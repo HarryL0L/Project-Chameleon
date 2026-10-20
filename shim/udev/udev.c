@@ -56,6 +56,10 @@ struct udev_list_entry;
 
 #define CARD_SYSPATH "/sys/devices/platform/chameleon/drm/card0"
 
+/* The card's tags, as systemd's rules give a GPU's card node (71-seat,
+ * 70-uaccess); its rules tag no keyboard, mouse or touch event node. */
+static const char *const k_card_tags[MAX_TAGS] = {"seat", "master-of-seat", "uaccess"};
+
 struct entry {
     uint64_t magic;
     const char *name, *value;
@@ -242,9 +246,8 @@ static void describe_card(struct dev *d, struct udev *udev)
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_FOR_SEAT", "drm-platform-chameleon", NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "TAGS", ":seat:master-of-seat:uaccess:", NULL};
     link_entries(p, d->nprops);
-    static const char *const tags[MAX_TAGS] = {"seat", "master-of-seat", "uaccess"};
     for (; d->ntags < MAX_TAGS; d->ntags++)
-        d->tags[d->ntags] = (struct entry){MAGIC_ENTRY, tags[d->ntags], NULL, NULL};
+        d->tags[d->ntags] = (struct entry){MAGIC_ENTRY, k_card_tags[d->ntags], NULL, NULL};
     link_entries(d->tags, d->ntags);
 }
 
@@ -455,9 +458,9 @@ struct udev_enumerate {
     struct udev *udev;
     struct udev_enumerate *real; /* the real libudev's, which never lists "input" or "drm" */
     const char *subsystem[MAX_FILTERS], *nosubsystem[MAX_FILTERS], *sysname[MAX_FILTERS];
-    const char *prop_key[MAX_FILTERS], *prop_value[MAX_FILTERS];
-    int nsubsystem, nnosubsystem, nsysname, nprop;
-    int unsupported; /* a filter Chameleon's devices can't pass (tags, attributes, parents) */
+    const char *prop_key[MAX_FILTERS], *prop_value[MAX_FILTERS], *tag[MAX_FILTERS];
+    int nsubsystem, nnosubsystem, nsysname, nprop, ntag;
+    int unsupported; /* a filter Chameleon's devices can't pass (attributes, parents) */
     char paths[MAX_LISTED][sizeof ((struct dev *)0)->syspath];
     struct entry entries[MAX_LISTED];
     int n;
@@ -525,6 +528,7 @@ EXPORT struct udev_enumerate *udev_enumerate_unref(struct udev_enumerate *e)
             free((void *)e->sysname[i]);
             free((void *)e->prop_key[i]);
             free((void *)e->prop_value[i]);
+            free((void *)e->tag[i]);
         }
         free(e);
     }
@@ -596,8 +600,7 @@ EXPORT int udev_enumerate_add_match_tag(struct udev_enumerate *e, const char *ta
 {
     if (!e)
         return -EINVAL;
-    e->unsupported = 1;
-    return both(REAL(udev_enumerate_add_match_tag, tag), 0);
+    return both(REAL(udev_enumerate_add_match_tag, tag), add_filter(e->tag, &e->ntag, tag));
 }
 
 EXPORT int udev_enumerate_add_match_parent(struct udev_enumerate *e, struct udev_device *parent)
@@ -642,6 +645,8 @@ static int matches(const struct udev_enumerate *e, const struct dev *d)
         const char *v = prop(d, e->prop_key[i]);
         ok &= v && (!e->prop_value[i] || fnmatch(e->prop_value[i], v, 0) == 0);
     }
+    for (int i = 0; i < e->ntag; i++) /* every tag, as with systemd's libudev */
+        ok &= udev_device_has_tag((struct udev_device *)d, e->tag[i]);
     return ok && named && !e->unsupported;
 }
 
@@ -666,7 +671,10 @@ EXPORT int udev_enumerate_scan_devices(struct udev_enumerate *e)
         e->n++;
     }
     link_entries(e->entries, e->n);
-    return both(REAL(udev_enumerate_scan_devices), 0);
+    /* libudev-zero fails on the parts of /sys Android hides; a real system
+     * can read them all and succeeds, keeping what it found. */
+    REAL(udev_enumerate_scan_devices);
+    return 0;
 }
 
 EXPORT int udev_enumerate_scan_subsystems(struct udev_enumerate *e)
@@ -697,7 +705,8 @@ struct udev_monitor {
     int server;
     struct udev *udev;
     const char *subsystems[MAX_FILTERS]; /* none: everything */
-    int nsubsystems;
+    const char *tags[MAX_FILTERS];       /* none: everything, else devices with any of them */
+    int nsubsystems, ntags;
 };
 
 EXPORT int udev_monitor_filter_remove(struct udev_monitor *m);
@@ -763,6 +772,12 @@ EXPORT int udev_monitor_enable_receiving(struct udev_monitor *m)
         subsystems |= strcmp(m->subsystems[i], "drm") == 0     ? CHAM_UEVENT_SUBSYSTEM_DRM
                       : strcmp(m->subsystems[i], "input") == 0 ? CHAM_UEVENT_SUBSYSTEM_INPUT
                                                                : 0;
+    int card_tagged = !m->ntags;
+    for (int i = 0; i < m->ntags; i++)
+        for (int t = 0; t < MAX_TAGS; t++)
+            card_tagged |= strcmp(m->tags[i], k_card_tags[t]) == 0;
+    if (m->ntags) /* input devices have no tags */
+        subsystems &= card_tagged ? CHAM_UEVENT_SUBSYSTEM_DRM : 0;
     const uint32_t req[2] = {CHAM_EVDEV_MONITOR, subsystems};
     struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];
     int s = connect_server(); /* none running: the eventfd stays */
@@ -797,8 +812,9 @@ EXPORT int udev_monitor_filter_add_match_subsystem_devtype(struct udev_monitor *
 
 EXPORT int udev_monitor_filter_add_match_tag(struct udev_monitor *m, const char *tag)
 {
-    (void)tag;
-    return m ? 0 : -EINVAL;
+    if (!m || !tag)
+        return -EINVAL;
+    return add_filter(m->tags, &m->ntags, tag);
 }
 
 EXPORT int udev_monitor_filter_update(struct udev_monitor *m)
@@ -812,7 +828,9 @@ EXPORT int udev_monitor_filter_remove(struct udev_monitor *m)
         return -EINVAL;
     for (int i = 0; i < m->nsubsystems; i++)
         free((void *)m->subsystems[i]);
-    m->nsubsystems = 0;
+    for (int i = 0; i < m->ntags; i++)
+        free((void *)m->tags[i]);
+    m->nsubsystems = m->ntags = 0;
     return 0;
 }
 

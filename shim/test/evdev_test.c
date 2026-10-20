@@ -155,6 +155,22 @@ int main(void)
         udev_device_unref(d);
     udev_enumerate_unref(e);
 
+    /* Tag filters as systemd's libudev applies them: a device needs every
+     * tag; the card has seat, the input event nodes none. */
+    e = udev_enumerate_new(udev);
+    udev_enumerate_add_match_subsystem(e, "drm");
+    udev_enumerate_add_match_subsystem(e, "input");
+    udev_enumerate_add_match_tag(e, "seat");
+    CHECK(udev_enumerate_scan_devices(e) == 0, "scan with a tag filter succeeds");
+    first = udev_enumerate_get_list_entry(e);
+    syspath = first ? udev_list_entry_get_name(first) : NULL;
+    CHECK(syspath && strstr(syspath, "/card0") && !udev_list_entry_get_next(first),
+          "tag seat: only the card (%s)", syspath ? syspath : "none");
+    udev_enumerate_add_match_tag(e, "power-switch");
+    udev_enumerate_scan_devices(e);
+    CHECK(!udev_enumerate_get_list_entry(e), "tags seat and power-switch: nothing");
+    udev_enumerate_unref(e);
+
     e = udev_enumerate_new(udev);
     udev_enumerate_add_match_subsystem(e, "input");
     udev_enumerate_add_match_property(e, "ID_INPUT_TOUCHSCREEN", "1");
@@ -375,10 +391,17 @@ int main(void)
      * monitor of drm devices sees the card's change uevent (HOTPLUG=1). */
     struct udev_monitor *drm_mon = udev_monitor_new_from_netlink(udev, "udev");
     struct udev_monitor *input_mon = udev_monitor_new_from_netlink(udev, "udev");
+    struct udev_monitor *seat_mon = udev_monitor_new_from_netlink(udev, "udev");
+    struct udev_monitor *other_mon = udev_monitor_new_from_netlink(udev, "udev");
     udev_monitor_filter_add_match_subsystem_devtype(drm_mon, "drm", NULL);
     udev_monitor_filter_add_match_subsystem_devtype(input_mon, "input", NULL);
+    udev_monitor_filter_add_match_tag(seat_mon, "power-switch"); /* any of the tags */
+    udev_monitor_filter_add_match_tag(seat_mon, "seat");
+    udev_monitor_filter_add_match_tag(other_mon, "power-switch");
     udev_monitor_enable_receiving(drm_mon);
     udev_monitor_enable_receiving(input_mon);
+    udev_monitor_enable_receiving(seat_mon);
+    udev_monitor_enable_receiving(other_mon);
     struct cham_msg cfg = {CHAM_CONFIG, 0, 900 | (uint64_t)1600 << 32, 60000};
     cham_send(c, &cfg, -1);
     struct pollfd mp = {udev_monitor_get_fd(drm_mon), POLLIN, 0};
@@ -402,8 +425,14 @@ int main(void)
     CHECK(poll(&mp, 1, 300) == 0, "the same size again: no uevent");
     struct pollfd ip = {udev_monitor_get_fd(input_mon), POLLIN, 0};
     CHECK(poll(&ip, 1, 0) == 0, "a monitor of input devices doesn't see the card");
+    struct pollfd sp[2] = {{udev_monitor_get_fd(seat_mon), POLLIN, 0}, {udev_monitor_get_fd(other_mon), POLLIN, 0}};
+    poll(sp, 2, 0);
+    CHECK((sp[0].revents & POLLIN) && !(sp[1].revents & POLLIN),
+          "tag monitors: power-switch or seat sees the card, power-switch alone doesn't");
     udev_monitor_unref(drm_mon);
     udev_monitor_unref(input_mon);
+    udev_monitor_unref(seat_mon);
+    udev_monitor_unref(other_mon);
 
     g_typing = 1;
     pthread_t typist;
