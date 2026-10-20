@@ -28,8 +28,10 @@ Target: KWin 6.7.5 as packaged in
 - KWin's DRM backend runs libinput, which finds Chameleon's devices through
   udev (`libchameleon_udev.so`) and reads their `/dev/input/eventN` nodes as
   it would a kernel's (`shim/core/evdev.c`, `shim/udev/`).
-- The Android keyboard: `bin/kwin_wayland` passes `--inputmethod
-  chameleon-ime` unless kwinrc names an input method. KWin gives it a
+- The Android keyboard: the package installs `chameleon-ime.desktop`
+  (`X-KDE-Wayland-VirtualKeyboard=true`, so the Virtual Keyboard settings
+  page lists it) and a system-wide `$PREFIX/etc/xdg/kwinrc` naming it as
+  `[Wayland] InputMethod`; the user's own kwinrc overrides that. KWin gives it a
   `zwp_input_method_v1` context while the focused client has text-input
   enabled, and it commits the keyboard's text, composing text and deletions
   there (`shim/ime/ime.c`). Without a context, `shim/core/text.c` types the

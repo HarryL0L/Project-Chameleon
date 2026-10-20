@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Chameleon (Android keyboard)
+Comment=Text from the phone's keyboard into text fields
+Exec=/data/data/com.termux/files/usr/lib/chameleon/chameleon-ime
+Icon=input-keyboard-virtual
+NoDisplay=true
+X-KDE-Wayland-VirtualKeyboard=true

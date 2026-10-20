@@ -206,10 +206,15 @@ Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](s
   touchpad, tablet), which `libchameleon_udev.so` shows through udev and
   `/dev/input/eventN`. KWin's libinput reads them like real hardware, so
   KDE's input settings apply.
-- The Android keyboard's text goes to `chameleon-ime`, KWin's input method,
-  whenever the focused app has a text field: suggestions, the word being
-  composed, emoji, any language. Elsewhere (X11 apps) it is typed as keys of
-  the desktop's layout, like on a hardware keyboard.
+- The Android keyboard's text goes to `chameleon-ime`, the desktop's on-screen
+  keyboard (input method), whenever the focused app has a text field:
+  suggestions, the word being composed, emoji, any language. Elsewhere (X11
+  apps) it is typed as keys of the desktop's layout, like on a hardware
+  keyboard. The package makes it KWin's default (`$PREFIX/etc/xdg/kwinrc`);
+  System Settings > Keyboard > Virtual Keyboard lists it as "Chameleon
+  (Android keyboard)" and can choose another one or none. Weston takes it
+  from `weston.ini`:
+  `[input-method]` `path=/data/data/com.termux/files/usr/lib/chameleon/chameleon-ime`.
 
 Code: [`shim/core/input.c`](shim/core/input.c), [`shim/core/evdev.c`](shim/core/evdev.c), [`shim/ime/ime.c`](shim/ime/ime.c), [`android/…/TouchInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/TouchInput.java), [`KeyInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/KeyInput.java)
 </details>

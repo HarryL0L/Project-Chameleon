@@ -113,20 +113,6 @@ export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"  # the f
 # socket (KWin's GpuManager and libinput need one to start).
 export LD_PRELOAD="$SHIM_DIR/libchameleon.so:$SHIM_DIR/libchameleon_udev.so${LD_PRELOAD:+:$LD_PRELOAD}"
 
-# Chameleon's input method: the Android keyboard's text reaches text fields
-# as an on-screen keyboard's would. Not when another input method is chosen
-# (System Settings > Virtual Keyboard) or given.
-case " $* " in
-*" --inputmethod"*) ;;
-*)
-    if [ -x "$SHIM_DIR/chameleon-ime" ] &&
-        ! sed -n '/^\[Wayland\]/,/^\[/p' "${XDG_CONFIG_HOME:-$HOME/.config}/kwinrc" 2>/dev/null |
-        grep -q '^InputMethod='; then
-        set -- --inputmethod "$SHIM_DIR/chameleon-ime" "$@"
-    fi
-    ;;
-esac
-
 if [ -n "$need_drm" ]; then
     exec "$REAL" --drm "$@"
 fi

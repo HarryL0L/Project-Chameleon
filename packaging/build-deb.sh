@@ -11,6 +11,9 @@
 #                           it would replace Mesa's for every program
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
 #   bin/chameleon-probe
+#   share/applications/chameleon-ime.desktop: the input method, as System
+#                           Settings > Keyboard > Virtual Keyboard lists it
+#   etc/xdg/kwinrc          KWin's system-wide default: that input method
 #   share/doc/chameleon/README.md, copyright (GPL-2.0-or-later)
 # Install on the phone: apt install ./chameleon_<version>_aarch64.deb
 set -e
@@ -25,7 +28,8 @@ ROOT=$(mktemp -d)
 chmod 755 "$ROOT"
 trap 'rm -rf "$ROOT"' EXIT
 LIB="$ROOT$PREFIX/lib/chameleon"
-mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT/DEBIAN"
+mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT$PREFIX/share/applications" \
+    "$ROOT$PREFIX/etc/xdg" "$ROOT/DEBIAN"
 
 install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$SHIM/chameleon-ime" "$LIB/"
@@ -33,6 +37,8 @@ install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"
+install -m 644 packaging/chameleon-ime.desktop "$ROOT$PREFIX/share/applications/"
+install -m 644 packaging/kwinrc "$ROOT$PREFIX/etc/xdg/"
 install -m 644 README.md "$ROOT$PREFIX/share/doc/chameleon/README.md"
 {
     cat <<'NOTICE'
