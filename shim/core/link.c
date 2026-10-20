@@ -35,6 +35,7 @@ static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
 static uint32_t g_first_w, g_first_h, g_first_mhz; /* ...and what it said */
 static pthread_cond_t g_cond;
 static int g_replaced;              /* another producer took the app over */
+static uint64_t g_app_version;      /* the app speaks another protocol version (CHAM_BYE_VERSION) */
 
 static struct {
     int active;
@@ -354,6 +355,8 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
     case CHAM_BYE:
         if (m->a == CHAM_BYE_REPLACED)
             g_replaced = 1;
+        else if (m->a == CHAM_BYE_VERSION)
+            g_app_version = m->b;
         break;
     case CHAM_INPUT:
     case CHAM_CLIPBOARD_OFFER:
@@ -412,7 +415,14 @@ static void *reader_main(void *arg)
         close(s);
         pthread_mutex_lock(&g_lock);
         int replaced = g_replaced;
+        uint64_t app_version = g_app_version;
         pthread_mutex_unlock(&g_lock);
+        if (app_version) {
+            cham_log("the Chameleon app speaks protocol %llu, this package %d: update both to the same "
+                     "release, then start again",
+                     (unsigned long long)app_version, CHAM_PROTO_VERSION);
+            return NULL;
+        }
         if (replaced) {
             cham_log("another producer (e.g. a second KWin) took over the Chameleon app; this KWin "
                      "keeps running without a screen. Stop the other one and restart this one.");

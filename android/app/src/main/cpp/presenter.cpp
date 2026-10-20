@@ -671,6 +671,8 @@ bool connection_waiting()
     return !g_conns.empty();
 }
 
+void set_mismatch(const std::string &text);
+
 // Serves one producer until it leaves or a newer connection arrives.
 void serve(int client, int arrivals)
 {
@@ -714,6 +716,18 @@ void serve(int client, int arrivals)
         switch (msg.type) {
         case CHAM_HELLO: {
             std::lock_guard<std::mutex> lock(g_lock);
+            if (msg.a != CHAM_PROTO_VERSION) {
+                // Built from another release: they would misread each other.
+                char text[160];
+                snprintf(text, sizeof text,
+                         "the Termux package speaks protocol %llu, this app %d: update both to the same release",
+                         (unsigned long long)msg.a, CHAM_PROTO_VERSION);
+                LOGE("%s", text);
+                set_mismatch(text);
+                send_locked(CHAM_BYE, 0, CHAM_BYE_VERSION, CHAM_PROTO_VERSION);
+                goto done;
+            }
+            set_mismatch("");
             g_copy_mode = (msg.b & CHAM_HELLO_COPY) != 0;
             LOGI("producer protocol v%llu%s", (unsigned long long)msg.a, g_copy_mode ? ", copy mode" : "");
             break;
@@ -789,14 +803,24 @@ done:
     LOGI("producer disconnected%s", replaced ? " (replaced by a new one)" : "");
 }
 
-// Human-readable state for the on-screen status line (nativeStatus()).
+// Human-readable state for the on-screen status line (nativeStatus()); a
+// protocol mismatch stays until a matching producer connects.
 std::mutex g_status_lock;
 std::string g_status = "starting";
+std::string g_mismatch;
 
 void set_status(const std::string &status)
 {
     std::lock_guard<std::mutex> lock(g_status_lock);
-    g_status = status;
+    g_status = g_mismatch.empty() ? status : g_mismatch;
+}
+
+void set_mismatch(const std::string &text)
+{
+    std::lock_guard<std::mutex> lock(g_status_lock);
+    g_mismatch = text;
+    if (!text.empty())
+        g_status = text;
 }
 
 int next_connection()

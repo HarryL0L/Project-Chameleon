@@ -21,7 +21,9 @@
 
 #include <stdint.h>
 
-#define CHAM_PROTO_VERSION 1
+/* Raised whenever the app and the Termux package built from different
+ * versions of this file can no longer work together. */
+#define CHAM_PROTO_VERSION 2
 
 enum cham_msg_type {
     /* producer -> presenter */
@@ -100,8 +102,11 @@ enum cham_input_kind {
 #define CHAM_INPUT_DY(v) ((int32_t)(uint32_t)((v) >> 32))
 
 /* BYE reasons. A replaced producer must not reconnect by itself, or two
- * producers would keep taking the screen from each other. */
+ * producers would keep taking the screen from each other. Neither should
+ * one whose CHAM_PROTO_VERSION differs from the presenter's (b = the
+ * presenter's). */
 #define CHAM_BYE_REPLACED 1u
+#define CHAM_BYE_VERSION 2u
 
 /* HELLO flags.
  *
