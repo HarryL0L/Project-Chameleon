@@ -52,7 +52,7 @@ flowchart TB
             CORE["KWin compositor<br/>scene · windows · DRM backend"]
             GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
             KMS["libchameleon.so<br/>fake KMS device · app buffers"]
-            INP["input thread<br/>fake-input client"]
+            INP["input thread<br/>evdev devices · text · clipboard"]
         end
         GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
         VEND["libEGL_chameleon.so<br/>glvnd EGL vendor (KWin and apps)"]
@@ -78,7 +78,7 @@ flowchart TB
     APP --> SF
     TOUCH --> APP
     KMS -->|CHAM_INPUT| INP
-    INP -->|fake input| CORE
+    INP -->|"evdev (libinput) · input method"| CORE
 
     classDef kwin fill:#6C4CF1,stroke:#4b32b8,color:#fff
     classDef shim fill:#22B8E6,stroke:#1789ad,color:#06222c
@@ -199,17 +199,19 @@ Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](s
 <summary><b>⌨️ Input</b>: from Android touch to KWin</summary>
 
 - The app sends `CHAM_INPUT` messages over the same socket: touch points,
-  relative/absolute pointer motion, buttons, scroll and X keysyms. Positions
-  are fractions of the surface.
-- KWin always runs its **fake-input** backend and trusts clients from its own
-  process. The shim's input thread therefore connects to KWin's own Wayland
-  socket and binds `org_kde_kwin_fake_input`. It scales positions to the
-  output's logical size (`xdg_output`), so display scaling just works.
-- Keys are keysyms, so KWin looks them up in its keymap (adding Shift when
-  needed) or maps them to a spare key. That's why text in any language,
-  typed on the Android keyboard, arrives as typed.
+  trackpad fingers, mouse motion, buttons and wheels, hardware keys by Linux
+  key code, and the Android keyboard's text. Positions are fractions of the
+  surface.
+- The shim serves them as evdev devices (touchscreen, keyboard, mouse,
+  touchpad, tablet), which `libchameleon_udev.so` shows through udev and
+  `/dev/input/eventN`. KWin's libinput reads them like real hardware, so
+  KDE's input settings apply.
+- The Android keyboard's text goes to `chameleon-ime`, KWin's input method,
+  whenever the focused app has a text field: suggestions, the word being
+  composed, emoji, any language. Elsewhere (X11 apps) it is typed as keys of
+  the desktop's layout, like on a hardware keyboard.
 
-Code: [`shim/core/input.c`](shim/core/input.c), [`android/…/TouchInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/TouchInput.java), [`KeyInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/KeyInput.java)
+Code: [`shim/core/input.c`](shim/core/input.c), [`shim/core/evdev.c`](shim/core/evdev.c), [`shim/ime/ime.c`](shim/ime/ime.c), [`android/…/TouchInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/TouchInput.java), [`KeyInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/KeyInput.java)
 </details>
 
 <details>
@@ -426,6 +428,7 @@ AHardwareBuffer and AImageReader support.
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
 | [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, screen size, clipboard, crash reporter |
+| [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |

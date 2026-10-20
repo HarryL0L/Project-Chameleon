@@ -261,7 +261,7 @@ int ioctl(int fd, int request, ...)
 /* ---- KWin's Wayland socket ---- */
 
 /* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N"; input.c connects
- * to it to inject input through KWin's fake-input protocol. */
+ * to it for the clipboard and the keyboard layout. */
 int bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
     resolve_bind();

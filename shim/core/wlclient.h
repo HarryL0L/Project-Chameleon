@@ -49,7 +49,7 @@ struct cham_wl {
     uint32_t (*get_version)(struct wl_proxy *);
     void *(*get_user_data)(struct wl_proxy *);
     void (*proxy_destroy)(struct wl_proxy *);
-    const struct wl_interface *registry_iface, *output_iface, *seat_iface, *keyboard_iface;
+    const struct wl_interface *registry_iface, *seat_iface, *keyboard_iface;
 };
 extern struct cham_wl wl;
 
@@ -75,11 +75,10 @@ static inline int cham_wl_load(void *lib)
     W(get_user_data, "wl_proxy_get_user_data");
     W(proxy_destroy, "wl_proxy_destroy");
     W(registry_iface, "wl_registry_interface");
-    W(output_iface, "wl_output_interface");
     W(seat_iface, "wl_seat_interface");
     W(keyboard_iface, "wl_keyboard_interface");
 #undef W
-    return wl.connect_to_fd && wl.marshal_flags && wl.add_listener && wl.registry_iface && wl.output_iface &&
+    return wl.connect_to_fd && wl.marshal_flags && wl.add_listener && wl.registry_iface &&
            wl.prepare_read && wl.get_version && wl.get_user_data && wl.proxy_destroy;
 }
 

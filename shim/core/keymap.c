@@ -5,8 +5,8 @@
  * and AltGr as needed, that produces it in the desktop's layout. The layout
  * is the compositor's keymap, which any Wayland client gets on its
  * wl_keyboard; libxkbcommon (loaded at run time) finds the keys in it. A
- * keysym the layout can't produce is left to the caller, as a real keyboard
- * couldn't type it either. Runs on input.c's thread.
+ * keysym the layout can't produce is not typed, as a real keyboard couldn't
+ * type it either. Runs on input.c's thread.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -62,7 +62,7 @@ static int load_xkb(void)
     X(mod_get_index, "xkb_keymap_mod_get_index");
 #undef X
     if (!xkb.key_get_mods_for_level || !xkb.mod_get_index || !(g_xkb = xkb.context_new(0))) {
-        cham_log("input: typed text goes to fake input: cannot use libxkbcommon (1.0+)");
+        cham_log("input: typed text is dropped: cannot use libxkbcommon (1.0+)");
         return loaded = 0;
     }
     return loaded = 1;
@@ -120,8 +120,7 @@ static void keyboard_keymap(void *data, struct wl_proxy *kb, uint32_t format, in
     g_level3_mask = mod_bit("Mod5") | mod_bit("LevelThree");
     g_shift_key = plain_key(XK_SHIFT_L);
     g_level3_key = plain_key(XK_ISO_LEVEL3_SHIFT);
-    /* KWin sends a keymap again whenever it changes, also twice for each
-     * character it types through a temporary one (fake input's keysyms). */
+    /* KWin sends a keymap again whenever it changes. */
     static int logged;
     if (!logged++)
         cham_log("input: typed text goes to the evdev keyboard through the desktop's layout");
@@ -214,8 +213,10 @@ int keymap_type(uint32_t sym, int down)
     if (!g_keymap || slot == sizeof g_down / sizeof g_down[0] || !lookup(sym, &key, &shift, &level3))
         return 0;
     if ((shift && !send_key(g_shift_key, 1)) || (level3 && !send_key(g_level3_key, 1)) || !send_key(key, 1)) {
+        if (level3) /* a key the evdev keyboard lacks */
+            send_key(g_level3_key, 0);
         if (shift)
-            send_key(g_shift_key, 0); /* no reader: the caller takes the keysym */
+            send_key(g_shift_key, 0);
         return 0;
     }
     g_down[slot].sym = sym;

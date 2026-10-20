@@ -65,10 +65,14 @@ screen keeps its first size instead of following the app's window).
   (by Linux key code, so the desktop's keyboard layout applies) and the mouse
   (relative: the app captures it with Android's pointer capture, as games
   do) appear as evdev devices (`core/evdev.c`, served on
-  `$XDG_RUNTIME_DIR/chameleon-evdev`). While a program such as KWin's
-  libinput reads a device, its input goes there; otherwise, and for the soft
-  keyboard and a mouse not captured yet, input goes through KWin's fake-input
-  protocol (`core/input.c`). The touchpad has no such fallback. Many phones report the right mouse button as Back: a
+  `$XDG_RUNTIME_DIR/chameleon-evdev`); a mouse not captured yet is an
+  absolute tablet. As with the kernel, input reaches only the programs
+  reading a device at the time. The Android keyboard's text goes to text
+  fields through `chameleon-ime`, the compositor's input method
+  (`zwp_input_method_v1`, `ime/ime.c`); elsewhere it is typed as keys of the
+  desktop's layout (`core/text.c`, `core/keymap.c`), so characters the layout
+  lacks can't be typed into X11 apps, as with a hardware keyboard. Many
+  phones report the right mouse button as Back: a
   Back key from a mouse is taken as the right button (so a real side Back
   button is one too). Some also turn the middle button into Home, which no
   app receives. While the mouse is captured, a touchpad is captured with it
@@ -111,7 +115,8 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
 - the fake device driven by the real libdrm the way KWin does: enumeration,
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one;
-- the input path against a real libwayland-server fake-input global;
+- typed text and `chameleon-ime` against a real libwayland-server with stub
+  `wl_seat` and input-method globals (`input_test`);
 - the evdev touchscreen, keyboard, mouse and touchpad seen by the system's
   real libinput through `libchameleon_udev.so`: listing, nodes, multitouch,
   keys, relative motion, buttons, wheel, touchpad motion and tapping

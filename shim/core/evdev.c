@@ -11,10 +11,9 @@
  *  3 touchpad: the app's trackpad mode, the screen as a laptop's touchpad
  *    without buttons (so libinput taps to click), in screen pixels.
  * Touch positions are fractions of the screen, so those axes run 0..65535
- * and the compositor maps them onto its output. While a program reads a
- * device, its input goes there; otherwise input.c sends it through KWin's
- * fake input as before (and so does everything else: the soft keyboard, a
- * mouse the app hasn't captured; the touchpad has no fallback).
+ * and the compositor maps them onto its output. As in the kernel, a device
+ * changes whether or not a program reads it; its events reach only the
+ * programs reading it at the time.
  *
  * The same socket carries udev monitors' events (evdev_uevent): kms.c's
  * card hotplug when the app's window changes.
@@ -82,11 +81,9 @@ static struct mt {         /* a multitouch device (protocol B) */
     int32_t x[TOUCH_SLOTS], y[TOUCH_SLOTS], cur_slot, abs_x, abs_y; /* as last sent */
     int tracking_id;
     int touching;
-    int fake, fake_down; /* a gesture on fake input (no reader at its start): its fingers down */
     int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
 } g_touch, g_pad;
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
-static uint8_t g_keys_down[CHAM_BITS(KEY_CNT)]; /* keys and buttons pressed on the devices */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
 static int64_t g_event_time; /* ns, from CHAM_INPUT_TIME; 0 = none yet */
 static struct device *g_pointer = &g_dev[DEV_MOUSE]; /* the mouse or the tablet, whichever moved last */
@@ -590,13 +587,6 @@ static void flush(struct device *d)
     d->frame_len = 0;
 }
 
-static int has_readers(const struct device *d)
-{
-    pthread_mutex_lock(&g_evdev_lock);
-    int n = d->reader_count;
-    pthread_mutex_unlock(&g_evdev_lock);
-    return n > 0;
-}
 
 /* A key or button event, unless it would leave the device stuck: a press
  * goes to the device only while it has readers, a release wherever its
@@ -605,12 +595,6 @@ static int key(struct device *d, unsigned code, int down)
 {
     if (code >= KEY_CNT || !cham_bit_test(d->info.key, code))
         return 0;
-    int held = cham_bit_test(g_keys_down, code);
-    if (down ? !has_readers(d) : !held)
-        return 0;
-    if (down == held)
-        return 1;
-    g_keys_down[code / 8] ^= (uint8_t)(1u << (code % 8));
     add(d, EV_KEY, (uint16_t)code, down);
     flush(d);
     return 1;
@@ -699,28 +683,6 @@ static void tool(struct device *d, struct mt *t)
 /* Touch messages, kind as CHAM_INPUT_TOUCH_* (the touchpad's mapped). */
 static int touch(struct device *d, struct mt *t, unsigned kind, const struct cham_msg *m)
 {
-    /* A gesture stays where it started: one begun without a reader goes on
-     * to fake input, through the frame after its last finger lifts, even if
-     * a reader opens the device meanwhile. */
-    if (t->fake || (!t->touching && !has_readers(d))) {
-        switch (kind) {
-        case CHAM_INPUT_TOUCH_DOWN:
-            t->fake = 1;
-            t->fake_down++;
-            break;
-        case CHAM_INPUT_TOUCH_UP:
-            if (t->fake_down > 0)
-                t->fake_down--;
-            break;
-        case CHAM_INPUT_TOUCH_CANCEL:
-            t->fake_down = 0;
-            __attribute__((fallthrough));
-        case CHAM_INPUT_TOUCH_FRAME:
-            t->fake = t->fake_down > 0;
-            break;
-        }
-        return 0;
-    }
     int slot;
     switch (kind) {
     case CHAM_INPUT_TOUCH_DOWN:
@@ -757,8 +719,6 @@ static int touch(struct device *d, struct mt *t, unsigned kind, const struct cha
 
 static int wheel(struct device *d, int horizontal, int32_t hi_res)
 {
-    if (!has_readers(d))
-        return 0;
     int32_t *rest = &g_wheel_rest[horizontal];
     *rest += hi_res;
     int32_t notches = *rest / 120;
@@ -790,7 +750,7 @@ int evdev_input(const struct cham_msg *m)
     switch (m->id) {
     case CHAM_INPUT_TIME:
         g_event_time = (int64_t)m->b;
-        return 1; /* fake input takes no times */
+        return 1;
     case CHAM_INPUT_TOUCH_DOWN:
     case CHAM_INPUT_TOUCH_MOTION:
     case CHAM_INPUT_TOUCH_UP:
@@ -802,8 +762,7 @@ int evdev_input(const struct cham_msg *m)
     case CHAM_INPUT_PAD_UP:
     case CHAM_INPUT_PAD_CANCEL:
     case CHAM_INPUT_PAD_FRAME:
-        touch(&g_dev[DEV_TOUCHPAD], &g_pad, m->id - CHAM_INPUT_PAD_DOWN + CHAM_INPUT_TOUCH_DOWN, m);
-        return 1; /* no fallback: fake input has no touchpad */
+        return touch(&g_dev[DEV_TOUCHPAD], &g_pad, m->id - CHAM_INPUT_PAD_DOWN + CHAM_INPUT_TOUCH_DOWN, m);
     case CHAM_INPUT_KEY:
         return key(&g_dev[DEV_KEYBOARD], (unsigned)m->a, m->b != 0);
     case CHAM_INPUT_MOUSE_BUTTON:
@@ -812,8 +771,6 @@ int evdev_input(const struct cham_msg *m)
         return wheel(g_pointer, m->a != 0, (int32_t)(int64_t)m->b);
     case CHAM_INPUT_POINTER_ABS: {
         struct device *t = &g_dev[DEV_TABLET];
-        if (!has_readers(t))
-            return 0;
         g_pointer = t;
         add(t, EV_ABS, ABS_X, (int32_t)CHAM_INPUT_X(m->b));
         add(t, EV_ABS, ABS_Y, (int32_t)CHAM_INPUT_Y(m->b));
@@ -821,8 +778,6 @@ int evdev_input(const struct cham_msg *m)
         return 1;
     }
     case CHAM_INPUT_MOUSE_MOTION:
-        if (!has_readers(mouse))
-            return 0;
         g_pointer = mouse;
         if (CHAM_INPUT_DX(m->b))
             add(mouse, EV_REL, REL_X, CHAM_INPUT_DX(m->b));

@@ -23,34 +23,27 @@ Target: KWin 6.7.5 as packaged in
   again), and the app shows "tap to wake", which sends a pointer nudge: any
   input wakes KWin's screen.
 
-## Input: fake input from inside KWin's own process
+## Input: evdev devices and an input method
 
-- `DrmBackend::createInputBackend()` returns nullptr without libinput, so the
-  DRM backend has no input devices of its own.
-- `org_kde_kwin_fake_input` supports pointer (relative + absolute), buttons,
-  axis, touch down/motion/up/frame and keyboard key/keysym.
-- It is on KWin's interface blacklist, but `allowInterface()` returns true
-  for any client whose pid == KWin's pid, and `authenticate` is accepted
-  unconditionally (`// TODO: make secure`).
-- So the shim, already loaded inside KWin, opens a Wayland client connection
-  to KWin's own socket on a helper thread, binds fake input, and feeds it
-  touch/keys that the presenter app sends over the chameleon socket.
-
-Implemented in `shim/core/input.c`:
-
-- The socket path comes from KWin's own `bind()` of `$XDG_RUNTIME_DIR/wayland-N`
-  (interposed), or from `$CHAMELEON_WAYLAND_SOCKET` when `kwin_wayland_wrapper`
-  created the socket and passed KWin only its fd (`bin/kwin_wayland` sets it
-  from `--socket`); libwayland-client is `dlopen()`ed, and the protocol tables are
-  written out by hand (no wayland-scanner at build time).
-- The app sends `CHAM_INPUT` messages with positions as fractions of its
-  surface; the shim maps them onto the output's logical geometry from
-  `zxdg_output_v1` (falls back to the KMS mode size), so output scaling works.
-- Keys are X keysyms (`keyboard_keysym`, v6): KWin finds the keycode and Shift
-  level in its keymap, or maps a spare keycode for anything else, so text from
-  the Android keyboard works in any language.
-- `shim/test/input_test.c` runs the whole path against a real
-  libwayland-server with a stub fake-input global.
+- KWin's DRM backend runs libinput, which finds Chameleon's devices through
+  udev (`libchameleon_udev.so`) and reads their `/dev/input/eventN` nodes as
+  it would a kernel's (`shim/core/evdev.c`, `shim/udev/`).
+- The Android keyboard: `bin/kwin_wayland` passes `--inputmethod
+  chameleon-ime` unless kwinrc names an input method. KWin gives it a
+  `zwp_input_method_v1` context while the focused client has text-input
+  enabled, and it commits the keyboard's text, composing text and deletions
+  there (`shim/ime/ime.c`). Without a context, `shim/core/text.c` types the
+  text as keys of the keymap KWin sends every `wl_keyboard`
+  (`shim/core/keymap.c`).
+- `shim/core/input.c` connects to KWin's own Wayland socket as a client, for
+  the clipboard and that keymap. The socket path comes from KWin's own
+  `bind()` of `$XDG_RUNTIME_DIR/wayland-N` (interposed), or from
+  `$CHAMELEON_WAYLAND_SOCKET` when `kwin_wayland_wrapper` created the socket
+  and passed KWin only its fd (`bin/kwin_wayland` sets it from `--socket`);
+  libwayland-client is `dlopen()`ed, and the protocol tables are written out
+  by hand (no wayland-scanner at build time).
+- `shim/test/evdev_test.c` runs the devices against the system's libinput,
+  `shim/test/input_test.c` the text path against a real libwayland-server.
 
 ## Screen size: the output follows the app's window
 

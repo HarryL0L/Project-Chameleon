@@ -1,18 +1,13 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Touch, pointer and keyboard input from the Chameleon app into KWin.
+ * The app's input, window size and clipboard, on one thread.
  *
- * KWin has no input devices of its own here (no libinput), but it always
- * runs its fake-input backend: org_kde_kwin_fake_input, which it offers to
- * any client in its own process (allowInterface() allows pid == getpid(),
- * and authenticate is accepted unconditionally). So a helper thread in this
- * process connects to KWin's Wayland socket as an ordinary client, binds
- * fake input plus xdg_output (for the screen's logical geometry), and turns
- * the app's CHAM_INPUT messages into fake-input requests. The same
- * connection carries clipboard.c's clipboard sharing and keymap.c's view of
- * the desktop's keyboard layout. The app's window size
- * (CHAM_CONFIG) becomes the connector's mode and a card hotplug (kms.c,
- * evdev.c).
+ * CHAM_INPUT messages become events of the evdev devices (evdev.c) and the
+ * Android keyboard's text goes to chameleon-ime or is typed as keys
+ * (text.c, keymap.c). The app's window size (CHAM_CONFIG) becomes the
+ * connector's mode and a card hotplug (kms.c, evdev.c). The thread also
+ * connects to KWin's Wayland socket as an ordinary client, for clipboard.c's
+ * clipboard sharing and keymap.c's view of the desktop's keyboard layout.
  *
  * The socket path is taken from KWin's own bind() (interpose.c), or from
  * $CHAMELEON_WAYLAND_SOCKET when kwin_wayland_wrapper made the socket, and
@@ -46,68 +41,6 @@ void wl_ignore_event(void)
 {
 }
 
-static wl_fixed_t fixed(double d)
-{
-    return (wl_fixed_t)(d * 256.0);
-}
-
-/* ---- protocol definitions (what wayland-scanner would generate) ---- */
-
-/* org_kde_kwin_fake_input v6, plasma-wayland-protocols fake-input.xml */
-enum {
-    FI_AUTHENTICATE = 0,
-    FI_POINTER_MOTION = 1,
-    FI_BUTTON = 2,
-    FI_AXIS = 3,
-    FI_TOUCH_DOWN = 4,
-    FI_TOUCH_MOTION = 5,
-    FI_TOUCH_UP = 6,
-    FI_TOUCH_CANCEL = 7,
-    FI_TOUCH_FRAME = 8,
-    FI_POINTER_MOTION_ABSOLUTE = 9,
-    FI_KEYBOARD_KEY = 10,
-    FI_DESTROY = 11,
-    FI_KEYBOARD_KEYSYM = 12,
-};
-static const struct wl_message k_fake_input_requests[] = {
-    {"authenticate", "ss", k_null},
-    {"pointer_motion", "ff", k_null},
-    {"button", "uu", k_null},
-    {"axis", "uf", k_null},
-    {"touch_down", "2uff", k_null},
-    {"touch_motion", "2uff", k_null},
-    {"touch_up", "2u", k_null},
-    {"touch_cancel", "2", k_null},
-    {"touch_frame", "2", k_null},
-    {"pointer_motion_absolute", "3ff", k_null},
-    {"keyboard_key", "4uu", k_null},
-    {"destroy", "5", k_null},
-    {"keyboard_keysym", "6uu", k_null},
-};
-static const struct wl_interface k_fake_input_iface = {
-    "org_kde_kwin_fake_input", 6, 13, k_fake_input_requests, 0, NULL,
-};
-
-/* zxdg_output_manager_v1 / zxdg_output_v1, bound at version 1 */
-static const struct wl_interface k_xdg_output_iface;
-static const struct wl_interface *k_get_xdg_output_types[2] = {&k_xdg_output_iface, NULL /* wl_output */};
-static const struct wl_message k_xdg_output_manager_requests[] = {
-    {"destroy", "", k_null},
-    {"get_xdg_output", "no", k_get_xdg_output_types},
-};
-static const struct wl_interface k_xdg_output_manager_iface = {
-    "zxdg_output_manager_v1", 1, 2, k_xdg_output_manager_requests, 0, NULL,
-};
-static const struct wl_message k_xdg_output_requests[] = {{"destroy", "", k_null}};
-static const struct wl_message k_xdg_output_events[] = {
-    {"logical_position", "ii", k_null},
-    {"logical_size", "ii", k_null},
-    {"done", "", k_null},
-};
-static const struct wl_interface k_xdg_output_iface = {
-    "zxdg_output_v1", 1, 1, k_xdg_output_requests, 3, k_xdg_output_events,
-};
-
 /* ---- state (input thread only, except the pipe) ---- */
 
 static int g_pipe[2] = {-1, -1};
@@ -115,12 +48,7 @@ static pthread_mutex_t g_path_lock = PTHREAD_MUTEX_INITIALIZER;
 static char g_wayland_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
 
 static struct wl_display *g_display;
-static struct wl_proxy *g_registry, *g_fake_input, *g_output, *g_xdg_manager, *g_xdg_output;
-static uint32_t g_fake_input_version;
-static struct {
-    int32_t x, y, w, h;
-    int known;
-} g_logical;
+static struct wl_proxy *g_registry;
 
 void input_note_socket(const char *path)
 {
@@ -159,35 +87,25 @@ static int load_wayland(void)
     if (!lib)
         lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
-        cham_log("input and screen resizing disabled: cannot load libwayland-client: %s", dlerror());
+        cham_log("clipboard and typed text disabled: cannot load libwayland-client: %s", dlerror());
         return loaded = 0;
     }
     if (!cham_wl_load(lib)) {
-        cham_log("input and screen resizing disabled: libwayland-client is too old (need 1.20+)");
+        cham_log("clipboard and typed text disabled: libwayland-client is too old (need 1.20+)");
         return loaded = 0;
     }
-    k_get_xdg_output_types[1] = wl.output_iface;
     return loaded = 1;
 }
 
-/* ---- registry / xdg_output listeners ---- */
+/* ---- registry ---- */
 
 static void registry_global(void *data, struct wl_proxy *registry, uint32_t name, const char *iface,
                             uint32_t version)
 {
     (void)data;
     (void)registry;
-    if (strcmp(iface, "org_kde_kwin_fake_input") == 0 && !g_fake_input) {
-        g_fake_input_version = version < 6 ? version : 6;
-        g_fake_input = wl_bind(g_registry, name, &k_fake_input_iface, g_fake_input_version);
-    } else if (strcmp(iface, "wl_output") == 0 && !g_output) {
-        g_output = wl_bind(g_registry, name, wl.output_iface, 1); /* no listener: its events are dropped */
-    } else if (strcmp(iface, "zxdg_output_manager_v1") == 0 && !g_xdg_manager) {
-        g_xdg_manager = wl_bind(g_registry, name, &k_xdg_output_manager_iface, 1);
-    } else {
-        clipboard_global(g_registry, name, iface, version);
-        keymap_global(g_registry, name, iface);
-    }
+    clipboard_global(g_registry, name, iface, version);
+    keymap_global(g_registry, name, iface);
 }
 
 static void registry_global_remove(void *data, struct wl_proxy *registry, uint32_t name)
@@ -202,39 +120,6 @@ static void (*k_registry_listener[])(void) = {
     (void (*)(void))registry_global_remove,
 };
 
-static void xdg_logical_position(void *data, struct wl_proxy *o, int32_t x, int32_t y)
-{
-    (void)data;
-    (void)o;
-    g_logical.x = x;
-    g_logical.y = y;
-}
-
-static void xdg_logical_size(void *data, struct wl_proxy *o, int32_t w, int32_t h)
-{
-    (void)data;
-    (void)o;
-    g_logical.w = w;
-    g_logical.h = h;
-}
-
-static void xdg_done(void *data, struct wl_proxy *o)
-{
-    (void)data;
-    (void)o;
-    if (g_logical.w > 0 && g_logical.h > 0) {
-        cham_log("input: screen is %dx%d logical pixels at %d,%d", g_logical.w, g_logical.h, g_logical.x,
-                 g_logical.y);
-        g_logical.known = 1;
-    }
-}
-
-static void (*k_xdg_output_listener[])(void) = {
-    (void (*)(void))xdg_logical_position,
-    (void (*)(void))xdg_logical_size,
-    (void (*)(void))xdg_done,
-};
-
 /* ---- connection ---- */
 
 static void disconnect_wayland(void)
@@ -244,8 +129,7 @@ static void disconnect_wayland(void)
     if (g_display)
         wl.disconnect(g_display);
     g_display = NULL;
-    g_registry = g_fake_input = g_output = g_xdg_manager = g_xdg_output = NULL;
-    memset(&g_logical, 0, sizeof g_logical);
+    g_registry = NULL;
 }
 
 static int connect_wayland(void)
@@ -273,113 +157,10 @@ static int connect_wayland(void)
                                   wl.get_version((struct wl_proxy *)g_display), 0, NULL);
     wl.add_listener(g_registry, k_registry_listener, NULL);
     wl.roundtrip(g_display);
-    if (!g_fake_input) {
-        cham_log("input: KWin offers no org_kde_kwin_fake_input");
-        disconnect_wayland();
-        return 0;
-    }
-    wl.marshal_flags(g_fake_input, FI_AUTHENTICATE, NULL, g_fake_input_version, 0, "Chameleon",
-                     "Touch and keyboard input from the Chameleon app");
-    if (g_xdg_manager && g_output) {
-        g_xdg_output = wl.marshal_flags(g_xdg_manager, 1 /* get_xdg_output */, &k_xdg_output_iface, 1, 0, NULL,
-                                        g_output);
-        wl.add_listener(g_xdg_output, k_xdg_output_listener, NULL);
-    }
-    wl.roundtrip(g_display);
-    cham_log("input: connected to KWin (fake input v%u)", g_fake_input_version);
+    wl.roundtrip(g_display); /* the globals' first events (keymap) */
+    cham_log("input: connected to KWin");
     clipboard_connected();
     return 1;
-}
-
-/* ---- event translation ---- */
-
-static void screen_geometry(double *x, double *y, double *w, double *h)
-{
-    if (g_logical.known) {
-        *x = g_logical.x;
-        *y = g_logical.y;
-        *w = g_logical.w;
-        *h = g_logical.h;
-        return;
-    }
-    uint32_t mw = 0, mh = 0;
-    kms_mode_size(&mw, &mh);
-    if (!mw || !mh)
-        link_app_size(&mw, &mh);
-    *x = *y = 0;
-    *w = mw ? mw : 1;
-    *h = mh ? mh : 1;
-}
-
-static void to_logical(uint64_t pos, wl_fixed_t *fx, wl_fixed_t *fy)
-{
-    double x, y, w, h;
-    screen_geometry(&x, &y, &w, &h);
-    *fx = fixed(x + CHAM_INPUT_X(pos) / 65536.0 * w);
-    *fy = fixed(y + CHAM_INPUT_Y(pos) / 65536.0 * h);
-}
-
-static void forward(const struct cham_msg *m)
-{
-    struct wl_proxy *fi = g_fake_input;
-    uint32_t v = g_fake_input_version;
-    wl_fixed_t x, y;
-    double sx, sy, w, h;
-    switch (m->id) {
-    case CHAM_INPUT_TOUCH_DOWN:
-    case CHAM_INPUT_TOUCH_MOTION:
-        if (v < 2)
-            break;
-        to_logical(m->b, &x, &y);
-        wl.marshal_flags(fi, m->id == CHAM_INPUT_TOUCH_DOWN ? FI_TOUCH_DOWN : FI_TOUCH_MOTION, NULL, v, 0,
-                         (uint32_t)m->a, x, y);
-        break;
-    case CHAM_INPUT_TOUCH_UP:
-        if (v >= 2)
-            wl.marshal_flags(fi, FI_TOUCH_UP, NULL, v, 0, (uint32_t)m->a);
-        break;
-    case CHAM_INPUT_TOUCH_CANCEL:
-        if (v >= 2)
-            wl.marshal_flags(fi, FI_TOUCH_CANCEL, NULL, v, 0);
-        break;
-    case CHAM_INPUT_TOUCH_FRAME:
-        if (v >= 2)
-            wl.marshal_flags(fi, FI_TOUCH_FRAME, NULL, v, 0);
-        break;
-    case CHAM_INPUT_POINTER_MOTION:
-        screen_geometry(&sx, &sy, &w, &h);
-        wl.marshal_flags(fi, FI_POINTER_MOTION, NULL, v, 0, fixed(CHAM_INPUT_DX(m->b) / 1048576.0 * w),
-                         fixed(CHAM_INPUT_DY(m->b) / 1048576.0 * h));
-        break;
-    case CHAM_INPUT_MOUSE_MOTION: /* a count per logical pixel */
-        wl.marshal_flags(fi, FI_POINTER_MOTION, NULL, v, 0, fixed(CHAM_INPUT_DX(m->b)), fixed(CHAM_INPUT_DY(m->b)));
-        break;
-    case CHAM_INPUT_POINTER_ABS:
-        if (v < 3)
-            break;
-        to_logical(m->b, &x, &y);
-        wl.marshal_flags(fi, FI_POINTER_MOTION_ABSOLUTE, NULL, v, 0, x, y);
-        break;
-    case CHAM_INPUT_BUTTON:
-    case CHAM_INPUT_MOUSE_BUTTON:
-        wl.marshal_flags(fi, FI_BUTTON, NULL, v, 0, (uint32_t)m->a, (uint32_t)(m->b ? 1 : 0));
-        break;
-    case CHAM_INPUT_AXIS:
-        wl.marshal_flags(fi, FI_AXIS, NULL, v, 0, (uint32_t)(m->a ? 1 : 0), (wl_fixed_t)(int64_t)m->b);
-        break;
-    case CHAM_INPUT_MOUSE_WHEEL: /* 15 units per notch, + is down / right */
-        wl.marshal_flags(fi, FI_AXIS, NULL, v, 0, (uint32_t)(m->a ? 1 : 0),
-                         (wl_fixed_t)((m->a ? 1 : -1) * (int64_t)m->b * 15 * 256 / 120));
-        break;
-    case CHAM_INPUT_KEYSYM:
-        if (v >= 6)
-            wl.marshal_flags(fi, FI_KEYBOARD_KEYSYM, NULL, v, 0, (uint32_t)m->a, (uint32_t)(m->b ? 1 : 0));
-        break;
-    case CHAM_INPUT_KEY:
-        if (v >= 4)
-            wl.marshal_flags(fi, FI_KEYBOARD_KEY, NULL, v, 0, (uint32_t)m->a, (uint32_t)(m->b ? 1 : 0));
-        break;
-    }
 }
 
 /* ---- thread ---- */
@@ -399,13 +180,14 @@ static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
         evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
 }
 
-/* A keysym typed on the evdev keyboard, or through fake input when the
- * layout has no key for it (or nothing reads the keyboard). */
+/* A keysym typed on the evdev keyboard; one the layout has no key for is
+ * lost, as on a real keyboard. */
 void input_keysym(uint32_t sym, int down)
 {
-    struct cham_msg m = {CHAM_INPUT, CHAM_INPUT_KEYSYM, sym, (uint64_t)down};
-    if (!keymap_type(sym, down) && g_display)
-        forward(&m);
+    static int warned;
+    if (!keymap_type(sym, down) && down && !warned++)
+        cham_log("input: the desktop's layout has no key for some typed characters (keysym 0x%x); they are dropped",
+                 sym);
 }
 
 /* Not a presenter message: chameleon-ime connected (input_ime_connected). */
@@ -414,7 +196,6 @@ void input_keysym(uint32_t sym, int down)
 static void *input_main(void *arg)
 {
     (void)arg;
-    int warned = 0;
     uint64_t next_connect = 0;
     for (;;) {
         struct pollfd p[3] = {{.fd = g_pipe[0], .events = POLLIN},
@@ -446,8 +227,8 @@ static void *input_main(void *arg)
         if (n > 0 && (p[0].revents & POLLIN))
             got = read(g_pipe[0], batch, sizeof batch);
         size_t count = got > 0 ? (size_t)got / sizeof batch[0] : 0;
-        /* Text and input the evdev devices don't take need the connection
-         * (keymap.c's layout, fake input). */
+        /* Typed text needs the connection (keymap.c's layout), and so does
+         * the clipboard. */
         if (!g_display && count && now_ns() >= next_connect && !connect_wayland())
             next_connect = now_ns() + 1000000000ull;
         for (size_t i = 0; i < count; i++) {
@@ -456,21 +237,16 @@ static void *input_main(void *arg)
                 config(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
             } else if (m->type == IME_CONNECTED) {
                 text_ime_attach((int)m->a);
-            } else if (m->type == CHAM_INPUT && !text_input(m) && !evdev_input(m)) {
-                if (m->id == CHAM_INPUT_KEYSYM)
-                    input_keysym((uint32_t)m->a, m->b != 0);
-                else if (g_display)
-                    forward(m);
-                else if (!warned++)
-                    cham_log("input: dropping input until KWin's Wayland socket is reachable");
+            } else if (m->type == CHAM_INPUT && m->id == CHAM_INPUT_KEYSYM) {
+                input_keysym((uint32_t)m->a, m->b != 0);
+            } else if (m->type == CHAM_INPUT && !text_input(m)) {
+                evdev_input(m);
             } else if (m->type == CHAM_CLIPBOARD_OFFER && g_display) {
                 clipboard_offer(m->a != 0);
             }
         }
-        if (g_display) {
-            warned = 0;
+        if (g_display)
             wl.flush(g_display);
-        }
     }
     return NULL;
 }

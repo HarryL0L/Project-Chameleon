@@ -3,8 +3,8 @@ package io.github.harryl0l.chameleon;
 
 /**
  * Sends CHAM_INPUT messages (common/chameleon_proto.h) to the connected
- * producer; the KWin shim serves touch, hardware keys and the mouse as evdev
- * devices and turns the rest into org_kde_kwin_fake_input requests.
+ * producer; the KWin shim serves them as evdev devices, and the Android
+ * keyboard's text through its input method or as keys.
  */
 final class InputSender {
     static {

@@ -41,12 +41,10 @@ void link_screen_off_locked(int off);
 int link_flip_pending_locked(void);
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
                             uint32_t refresh_mhz);
-/* The app's surface size (last CONFIG), 0x0 while it has none. */
-void link_app_size(uint32_t *width, uint32_t *height);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
 void link_clipboard(uint32_t type, uint64_t a, int fd);
 
-/* ---- input.c: app input -> KWin's fake input ---- */
+/* ---- input.c: the app's input, window size and clipboard (one thread) ---- */
 struct cham_msg;
 /* CHAM_INPUT, CHAM_CONFIG (the connector's mode) and CHAM_CLIPBOARD_OFFER
  * for clipboard.c; handled on the input thread. */
@@ -60,7 +58,7 @@ void input_socket_path(char *out, size_t size);
 void evdev_start(void);
 /* A uevent (struct cham_uevent's what) to every udev monitor. */
 void evdev_uevent(uint32_t what);
-/* Takes an input message (input thread) if its device has a reader. */
+/* Takes an input message for a device (input thread); 0 if none. */
 int evdev_input(const struct cham_msg *m);
 
 /* ---- clipboard.c: the desktop's clipboard <-> Android's (input thread) ---- */
@@ -74,7 +72,7 @@ void clipboard_offer(int secret); /* Android's clipboard has new text */
 void keymap_global(struct wl_proxy *registry, uint32_t name, const char *iface);
 void keymap_disconnected(void);
 /* Presses or releases the keys typing `sym` on the evdev keyboard; 0 if the
- * layout has no key for it or nothing reads the keyboard. */
+ * layout has no key for it. */
 int keymap_type(uint32_t sym, int down);
 
 /* ---- text.c: the Android keyboard's text (input thread) ---- */
@@ -82,8 +80,7 @@ int text_input(const struct cham_msg *m); /* takes CHAM_INPUT_TEXT_* */
 void text_ime_attach(int fd);             /* chameleon-ime connected (input.c's message) */
 int text_ime_fd(void);                    /* -1 = none */
 void text_ime_readable(void);
-/* input.c: a keysym typed on the evdev keyboard, or through fake input if the
- * layout lacks it. */
+/* input.c: a keysym typed on the evdev keyboard (dropped if the layout lacks it). */
 void input_keysym(uint32_t sym, int down);
 /* evdev.c's server: chameleon-ime connected (any thread). */
 void input_ime_connected(int fd);

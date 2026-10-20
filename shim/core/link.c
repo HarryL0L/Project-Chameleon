@@ -456,13 +456,6 @@ void link_clipboard(uint32_t type, uint64_t a, int fd)
     pthread_mutex_unlock(&g_lock);
 }
 
-void link_app_size(uint32_t *width, uint32_t *height)
-{
-    pthread_mutex_lock(&g_lock);
-    *width = g_cfg_w;
-    *height = g_cfg_h;
-    pthread_mutex_unlock(&g_lock);
-}
 
 int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, int timeout_ms)
 {
