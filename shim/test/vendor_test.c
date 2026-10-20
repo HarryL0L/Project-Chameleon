@@ -162,8 +162,8 @@ int main(void)
 
     const char *glexts = (const char *)glGetString(GL_EXTENSIONS);
     CHECK(glexts && strstr(glexts, "GL_OES_a") && strstr(glexts, "GL_OES_b") &&
-              !strstr(glexts, "BGRA8888") && !strstr(glexts, "disjoint_timer_query"),
-          "glGetString through glvnd hides extensions: '%s'", glexts ? glexts : "(null)");
+              strstr(glexts, "GL_EXT_texture_format_BGRA8888") && !strstr(glexts, "disjoint_timer_query"),
+          "glGetString through glvnd hides the timer query only: '%s'", glexts ? glexts : "(null)");
     CHECK(glexts && strstr(glexts, "GL_EXT_unpack_subimage"),
           "GL_EXT_unpack_subimage added on OpenGL ES 3 (KWin asks for it by name)");
     const char *src = "#if GL_FOO\nx\n#endif\n";

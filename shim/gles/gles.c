@@ -11,9 +11,7 @@
  *    extensions whose driver paths misbehave. Default:
  *    GL_EXT_disjoint_timer_query - after KWin's per-frame GL_TIMESTAMP
  *    query, Mali-G77 (r32p1) dies with SIGBUS (NULL+0x29) in the next write
- *    into texture memory (KWin uses timer queries only with it), and
- *    GL_EXT_texture_format_BGRA8888, so KWin uploads plain RGBA (hidden
- *    while that crash was being hunted, kept as the well-trodden path).
+ *    into texture memory (KWin uses timer queries only with it).
  *    Override with CHAMELEON_GL_HIDE="ext1 ext2" (empty = hide nothing).
  *    One is added: GL_EXT_unpack_subimage on OpenGL ES 3.0+, where its
  *    GL_UNPACK_ROW_LENGTH/SKIP_* are core (same enums). KWin demands the
@@ -87,7 +85,7 @@ static int is_hidden(const char *name, size_t len)
 {
     const char *list = getenv("CHAMELEON_GL_HIDE");
     if (!list)
-        list = "GL_EXT_texture_format_BGRA8888 GL_EXT_disjoint_timer_query";
+        list = "GL_EXT_disjoint_timer_query";
     for (const char *p = list; *p;) {
         while (*p == ' ' || *p == ',')
             p++;
