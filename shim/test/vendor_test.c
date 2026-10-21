@@ -107,7 +107,31 @@ int main(void)
     if (kwin) {
         CHECK(client && strstr(client, "EGL_KHR_platform_gbm"), "GBM platform for KWin");
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) != EGL_NO_DISPLAY, "default display for KWin");
-        CHECK(eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL) != EGL_NO_DISPLAY, "GBM display for KWin");
+        EGLDisplay gbm_dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL);
+        CHECK(gbm_dpy != EGL_NO_DISPLAY, "GBM display for KWin");
+        /* The card as an EGLDevice, as Mesa describes a KMS-only card. */
+        PFNEGLQUERYDISPLAYATTRIBEXTPROC display_attrib =
+            (PFNEGLQUERYDISPLAYATTRIBEXTPROC)eglGetProcAddress("eglQueryDisplayAttribEXT");
+        PFNEGLQUERYDEVICESTRINGEXTPROC device_string =
+            (PFNEGLQUERYDEVICESTRINGEXTPROC)eglGetProcAddress("eglQueryDeviceStringEXT");
+        PFNEGLQUERYDEVICESEXTPROC query_devices = (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
+        EGLAttrib device = 0;
+        EGLint gmajor, gminor;
+        CHECK(client && strstr(client, "EGL_EXT_device_query"), "EGL_EXT_device_query for KWin");
+        CHECK(display_attrib && eglInitialize(gbm_dpy, &gmajor, &gminor) &&
+                  display_attrib(gbm_dpy, EGL_DEVICE_EXT, &device) && device,
+              "the GBM display's EGLDevice");
+        const char *dev_exts = device ? device_string((EGLDeviceEXT)device, EGL_EXTENSIONS) : NULL;
+        const char *file = device ? device_string((EGLDeviceEXT)device, EGL_DRM_DEVICE_FILE_EXT) : NULL;
+        CHECK(dev_exts && strstr(dev_exts, "EGL_EXT_device_drm") && !strstr(dev_exts, "render_node") && file &&
+                  strcmp(file, "/dev/dri/card0") == 0,
+              "it is the card, /dev/dri/card0, without a render node (%s)", file ? file : "none");
+        EGLDeviceEXT devices[8];
+        EGLint count = 0, ours = 0;
+        if (query_devices && query_devices(8, devices, &count))
+            for (EGLint i = 0; i < count; i++)
+                ours += devices[i] == (EGLDeviceEXT)device;
+        CHECK(ours == 0, "not enumerated, as Mesa leaves out a card without a render node");
     } else {
         CHECK(client && !strstr(client, "platform_gbm"), "no GBM platform outside KWin");
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == EGL_NO_DISPLAY,

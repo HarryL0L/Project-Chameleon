@@ -98,6 +98,36 @@ STUB(EGLBoolean, eglSwapBuffersWithDamageEXT, (EGLDisplay dpy, EGLSurface surfac
      (dpy, surface, rects, n), EGL_FALSE)
 STUB(EGLBoolean, eglSetDamageRegionKHR, (EGLDisplay dpy, EGLSurface surface, EGLint *rects, EGLint n),
      (dpy, surface, rects, n), EGL_FALSE)
+
+/* The same for extension functions taking an EGLDeviceEXT: the device's
+ * vendor is the one that handed it out (eglQueryDevicesEXT or
+ * eglQueryDisplayAttribEXT). */
+static __eglMustCastToProperFunctionPointerType fetch_device(EGLDeviceEXT device, int index)
+{
+    g_exports->threadInit();
+    __EGLvendorInfo *vendor = g_exports->getVendorFromDevice(device);
+    __eglMustCastToProperFunctionPointerType fn =
+        vendor && index >= 0 ? g_exports->fetchDispatchEntry(vendor, index) : NULL;
+    if (!fn) {
+        g_exports->setEGLError(EGL_BAD_DEVICE_EXT);
+        return NULL;
+    }
+    g_exports->setLastVendor(vendor);
+    return fn;
+}
+
+#define DEVICE_STUB(ret, name, params, args, failure)                 \
+    static int idx_##name = -1;                                      \
+    static ret EGLAPIENTRY stub_##name params                        \
+    {                                                                \
+        ret(EGLAPIENTRY * fn) params;                                \
+        *(void **)&fn = (void *)fetch_device(device, idx_##name);    \
+        return fn ? fn args : (failure);                             \
+    }
+
+DEVICE_STUB(const char *, eglQueryDeviceStringEXT, (EGLDeviceEXT device, EGLint name), (device, name), NULL)
+DEVICE_STUB(EGLBoolean, eglQueryDeviceAttribEXT, (EGLDeviceEXT device, EGLint attribute, EGLAttrib *value),
+            (device, attribute, value), EGL_FALSE)
 STUB(EGLBoolean, eglPresentationTimeANDROID, (EGLDisplay dpy, EGLSurface surface, EGLnsecsANDROID time),
      (dpy, surface, time), EGL_FALSE)
 
@@ -111,7 +141,8 @@ static const struct {
     ENTRY(eglDestroySyncKHR),        ENTRY(eglClientWaitSyncKHR),      ENTRY(eglWaitSyncKHR),
     ENTRY(eglGetSyncAttribKHR),      ENTRY(eglDupNativeFenceFDANDROID), ENTRY(eglQueryDmaBufFormatsEXT),
     ENTRY(eglQueryDmaBufModifiersEXT), ENTRY(eglSwapBuffersWithDamageKHR), ENTRY(eglSwapBuffersWithDamageEXT),
-    ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID),
+    ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID), ENTRY(eglQueryDeviceStringEXT),
+    ENTRY(eglQueryDeviceAttribEXT),
 };
 
 static void *get_dispatch_address(const char *name)
