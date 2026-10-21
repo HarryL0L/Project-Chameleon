@@ -148,6 +148,15 @@ int link_flip_pending_locked(void)
     return g_flip.active;
 }
 
+void link_cancel_flip_locked(int event_fd)
+{
+    if (g_flip.active && g_flip.event_fd == event_fd) {
+        g_flip.active = 0;
+        g_flip.on_tick = g_flip.held = 0;
+        pthread_cond_broadcast(&g_cond);
+    }
+}
+
 /* Completes the pending flip on the next vblank tick once the previous
  * copy is done and Android has latched what it should have by now. */
 static void schedule_tick_locked(void)

@@ -8,6 +8,11 @@
  * commit that puts a framebuffer on the plane becomes a PRESENT to the app;
  * the app's FRAME_DONE becomes the page-flip event.
  *
+ * Each open file has the kernel's per-file state (Linux 6.8, checked against
+ * vkms with shim/test/refvm.sh): the first opener while there is no DRM
+ * master becomes master and only it may commit; client caps, GEM handles,
+ * framebuffers and property blobs belong to the file, and go when it closes.
+ *
  * The connector's one mode is the app's surface: its size and the display's
  * refresh rate. When the window changes (the phone rotates, the keyboard
  * opens, battery saver drops to 60 Hz) the mode changes with it and the
@@ -24,6 +29,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -118,6 +124,7 @@ struct kms_state {
 struct fb {
     uint32_t id;
     struct cham_bo *bo; /* holds a ref */
+    struct fake_fd *owner; /* the file that created it */
     struct fb *next;
 };
 
@@ -125,6 +132,7 @@ struct blob {
     uint32_t id;
     uint32_t length;
     void *data;
+    struct fake_fd *owner; /* NULL: the card's own (EDID) */
     int destroyed; /* the client let go of it; kept while the CRTC uses it, as the kernel does */
     struct blob *next;
 };
@@ -138,6 +146,9 @@ static struct fb *g_fbs;
 static struct blob *g_blobs;
 static uint32_t g_next_object_id = 1000;
 static uint64_t g_frame;
+static struct fake_fd *g_files;     /* every open file (kms_next) */
+static struct fake_fd *g_master;    /* the file that is DRM master, if any */
+static uint32_t g_next_magic = 1;
 
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
@@ -363,20 +374,35 @@ static int get_resources(struct drm_mode_card_res *r)
     return 0;
 }
 
-static int get_connector(struct drm_mode_get_connector *c)
+/* An object's properties as `f` sees them: atomic ones only with the
+ * atomic client cap. Returns the count. */
+static uint32_t visible_props(const struct fake_fd *f, const uint32_t *props, uint32_t n, uint32_t *ids,
+                              uint64_t *values)
+{
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((k_props[props[i] - 100].flags & DRM_MODE_PROP_ATOMIC) && !f->atomic)
+            continue;
+        ids[k] = props[i];
+        values[k++] = prop_value(props[i]);
+    }
+    return k;
+}
+
+static int get_connector(struct fake_fd *f, struct drm_mode_get_connector *c)
 {
     if (c->connector_id != ID_CONNECTOR)
         return -ENOENT;
     static const uint32_t encs[] = {ID_ENCODER};
-    enum { n = sizeof k_conn_props / sizeof k_conn_props[0] };
-    uint64_t values[n];
-    for (int i = 0; i < n; i++)
-        values[i] = prop_value(k_conn_props[i]);
+    enum { max = sizeof k_conn_props / sizeof k_conn_props[0] };
+    uint32_t ids[max];
+    uint64_t values[max];
+    uint32_t n = visible_props(f, k_conn_props, max, ids, values);
     COPY_OUT(c->modes_ptr, c->count_modes, &g_mode, 1u);
     COPY_OUT(c->encoders_ptr, c->count_encoders, encs, 1u);
     if (c->props_ptr && c->prop_values_ptr && c->count_props >= n) {
-        memcpy(U2P(c->props_ptr), k_conn_props, sizeof k_conn_props);
-        memcpy(U2P(c->prop_values_ptr), values, sizeof values);
+        memcpy(U2P(c->props_ptr), ids, n * sizeof ids[0]);
+        memcpy(U2P(c->prop_values_ptr), values, n * sizeof values[0]);
     }
     c->count_props = n;
     c->encoder_id = ID_ENCODER;
@@ -416,10 +442,11 @@ static int get_crtc(struct drm_mode_crtc *c)
     return 0;
 }
 
-static int get_plane_resources(struct drm_mode_get_plane_res *r)
+static int get_plane_resources(const struct fake_fd *f, struct drm_mode_get_plane_res *r)
 {
     static const uint32_t planes[] = {ID_PLANE};
-    COPY_OUT(r->plane_id_ptr, r->count_planes, planes, 1u);
+    /* The one plane is the primary: listed only for universal-planes clients. */
+    COPY_OUT(r->plane_id_ptr, r->count_planes, planes, f->universal_planes ? 1u : 0u);
     return 0;
 }
 
@@ -452,19 +479,18 @@ static int get_plane(struct drm_mode_get_plane *p)
 
 /* ---- properties ---- */
 
-static int obj_get_properties(struct drm_mode_obj_get_properties *o)
+static int obj_get_properties(const struct fake_fd *f, struct drm_mode_obj_get_properties *o)
 {
-    uint32_t type, n;
-    const uint32_t *props = object_props(o->obj_id, &type, &n);
+    uint32_t type, max;
+    const uint32_t *props = object_props(o->obj_id, &type, &max);
     if (!props || (o->obj_type && o->obj_type != type))
         return -ENOENT;
+    uint32_t ids[P_END - 100];
+    uint64_t values[P_END - 100];
+    uint32_t n = visible_props(f, props, max, ids, values);
     if (o->props_ptr && o->prop_values_ptr && o->count_props >= n) {
-        uint32_t *ids = U2P(o->props_ptr);
-        uint64_t *values = U2P(o->prop_values_ptr);
-        for (uint32_t i = 0; i < n; i++) {
-            ids[i] = props[i];
-            values[i] = prop_value(props[i]);
-        }
+        memcpy(U2P(o->props_ptr), ids, n * sizeof ids[0]);
+        memcpy(U2P(o->prop_values_ptr), values, n * sizeof values[0]);
     }
     o->count_props = n;
     return 0;
@@ -510,7 +536,7 @@ static int get_blob(struct drm_mode_get_blob *g)
     return 0;
 }
 
-static int create_blob(struct drm_mode_create_blob *c)
+static int create_blob(struct fake_fd *f, struct drm_mode_create_blob *c)
 {
     if (!c->length || c->length > (1u << 20))
         return -EINVAL;
@@ -518,6 +544,7 @@ static int create_blob(struct drm_mode_create_blob *c)
     b->data = malloc(c->length);
     memcpy(b->data, U2P(c->data), c->length);
     b->length = c->length;
+    b->owner = f;
     b->id = g_next_object_id++;
     b->next = g_blobs;
     g_blobs = b;
@@ -540,52 +567,138 @@ static void free_destroyed_blobs(void)
     }
 }
 
-static int destroy_blob(struct drm_mode_destroy_blob *d)
+static int destroy_blob(struct fake_fd *f, struct drm_mode_destroy_blob *d)
 {
     struct blob *b = blob_find(d->blob_id);
     if (!b || b->destroyed)
         return -ENOENT;
+    if (b->owner != f)
+        return -EPERM;
     b->destroyed = 1;
     free_destroyed_blobs();
     return 0;
 }
 
-/* ---- framebuffers & buffers ---- */
+/* ---- buffers: GEM handles, per file ---- */
 
-static int add_fb2(struct drm_mode_fb_cmd2 *c)
+static struct cham_bo *handle_bo(const struct fake_fd *f, uint32_t handle)
+{
+    for (int i = 0; handle && i < f->nhandles; i++)
+        if (f->handles[i].handle == handle)
+            return f->handles[i].bo;
+    return NULL;
+}
+
+/* The file's handle for `bo`, made if it has none (the lowest free number,
+ * as the kernel's idr). The handle holds a reference. */
+static uint32_t handle_for(struct fake_fd *f, struct cham_bo *bo)
+{
+    uint32_t h = 1;
+    for (int i = 0; i < f->nhandles; i++)
+        if (f->handles[i].bo == bo)
+            return f->handles[i].handle;
+    for (int i = 0; i < f->nhandles; i++)
+        if (f->handles[i].handle == h)
+            h++, i = -1; /* taken: look again from the start */
+    struct gem_handle *t = realloc(f->handles, sizeof *t * (size_t)(f->nhandles + 1));
+    if (!t)
+        return 0;
+    f->handles = t;
+    f->handles[f->nhandles++] = (struct gem_handle){h, bo};
+    bo_ref_locked(bo);
+    return h;
+}
+
+static int gem_close(struct fake_fd *f, uint32_t handle)
+{
+    for (int i = 0; handle && i < f->nhandles; i++) {
+        if (f->handles[i].handle == handle) {
+            struct cham_bo *bo = f->handles[i].bo;
+            f->handles[i] = f->handles[--f->nhandles];
+            bo_unref_locked(bo); /* framebuffers keep their own references */
+            return 0;
+        }
+    }
+    return -EINVAL;
+}
+
+/* For libgbm: a gbm device on the card makes a handle for each buffer it
+ * creates and closes it when the buffer goes, as Mesa's does. */
+uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+{
+    struct fake_fd *f = fake_fd_get(fd);
+    if (!f)
+        return 0;
+    pthread_mutex_lock(&g_lock);
+    uint32_t h = handle_for(f, bo);
+    pthread_mutex_unlock(&g_lock);
+    return h;
+}
+
+void cham_bo_handle_close(int fd, uint32_t handle)
+{
+    struct fake_fd *f = fake_fd_get(fd);
+    if (!f)
+        return;
+    pthread_mutex_lock(&g_lock);
+    gem_close(f, handle);
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* ---- framebuffers ---- */
+
+static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
 {
     if (!plane_has_format(c->pixel_format))
         return -EINVAL; /* as the kernel: a format no plane can show */
-    struct cham_bo *bo = bo_by_handle_locked(c->handles[0]);
+    struct cham_bo *bo = handle_bo(f, c->handles[0]);
     if (!bo)
         return -ENOENT;
     if (c->width > bo->width || c->height > bo->height)
         return -EINVAL;
-    struct fb *f = calloc(1, sizeof *f);
-    f->id = g_next_object_id++;
-    f->bo = bo;
+    struct fb *fb = calloc(1, sizeof *fb);
+    fb->id = g_next_object_id++;
+    fb->bo = bo;
+    fb->owner = f;
     bo_ref_locked(bo);
-    f->next = g_fbs;
-    g_fbs = f;
-    c->fb_id = f->id;
+    fb->next = g_fbs;
+    g_fbs = fb;
+    c->fb_id = fb->id;
     return 0;
 }
 
-static int remove_fb(uint32_t id)
+/* The plane lets go of a framebuffer that is being removed (RMFB, or its
+ * file closing): the kernel takes it off the plane; the CRTC stays on. */
+static void plane_drop_fb(uint32_t id)
+{
+    if (!id || g_state.fb != id)
+        return;
+    g_state.fb = 0;
+    g_state.plane_crtc = 0;
+    if (g_plane_bo)
+        bo_unref_locked(g_plane_bo);
+    g_plane_bo = NULL;
+    g_plane_shown = 0;
+}
+
+/* RMFB takes the framebuffer off the plane; CLOSEFB leaves it showing. */
+static int remove_fb(struct fake_fd *f, uint32_t id, int off_plane)
 {
     for (struct fb **p = &g_fbs; *p; p = &(*p)->next) {
-        if ((*p)->id == id) {
-            struct fb *f = *p;
-            *p = f->next;
-            bo_unref_locked(f->bo); /* the plane keeps its own ref */
-            free(f);
+        if ((*p)->id == id && (*p)->owner == f) {
+            struct fb *fb = *p;
+            *p = fb->next;
+            if (off_plane)
+                plane_drop_fb(id);
+            bo_unref_locked(fb->bo); /* the plane keeps its own ref */
+            free(fb);
             return 0;
         }
     }
     return -ENOENT;
 }
 
-static int prime_fd_to_handle(struct drm_prime_handle *p)
+static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
 {
     /* cham_bo_from_fd takes the lock itself. */
     pthread_mutex_unlock(&g_lock);
@@ -593,13 +706,13 @@ static int prime_fd_to_handle(struct drm_prime_handle *p)
     pthread_mutex_lock(&g_lock);
     if (!bo)
         return -EINVAL; /* not one of ours, e.g. a client buffer: no direct scanout */
-    p->handle = bo->handle;
-    return 0;
+    p->handle = handle_for(f, bo);
+    return p->handle ? 0 : -ENOMEM;
 }
 
-static int prime_handle_to_fd(struct drm_prime_handle *p)
+static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
 {
-    struct cham_bo *bo = bo_by_handle_locked(p->handle);
+    struct cham_bo *bo = handle_bo(f, p->handle);
     if (!bo)
         return -ENOENT;
     p->fd = cham_bo_export_fd(bo);
@@ -833,17 +946,137 @@ static int get_cap(struct drm_get_cap *c)
     return -EINVAL;
 }
 
-static int set_client_cap(struct drm_set_client_cap *c)
+/* The kernel refuses atomic to Xorg's modesetting driver by process name
+ * ("broken atomic modeset userspace"). */
+static int comm_starts_with_x(void)
+{
+    char comm[32] = "";
+    FILE *fp = fopen("/proc/self/comm", "re");
+    if (fp) {
+        if (!fgets(comm, sizeof comm, fp))
+            comm[0] = 0;
+        fclose(fp);
+    }
+    return comm[0] == 'X';
+}
+
+static int set_client_cap(struct fake_fd *f, struct drm_set_client_cap *c)
 {
     switch (c->capability) {
     case DRM_CLIENT_CAP_STEREO_3D:
-    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
-    case DRM_CLIENT_CAP_ATOMIC:
     case DRM_CLIENT_CAP_ASPECT_RATIO:
         return c->value <= 1 ? 0 : -EINVAL;
+    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
+        if (c->value > 1)
+            return -EINVAL;
+        f->universal_planes = (int)c->value;
+        return 0;
+    case DRM_CLIENT_CAP_ATOMIC:
+        if (c->value == 1 && comm_starts_with_x())
+            return -EOPNOTSUPP;
+        if (c->value > 2)
+            return -EINVAL;
+        f->atomic = f->universal_planes = (int)c->value; /* and aspect ratios */
+        return 0;
+    case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
+        if (!f->atomic || c->value > 1)
+            return -EINVAL;
+        f->writeback = (int)c->value; /* there are none to show */
+        return 0;
+    case 6: /* DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT: a feature of virtual GPUs' drivers */
+        return -EOPNOTSUPP;
     }
-    return -EINVAL; /* writeback, cursor hotspot, color pipeline */
+    return -EINVAL;
 }
+
+/* ---- DRM master and authentication (6.8's drm_auth.c) ---- */
+
+void kms_file_open(struct fake_fd *f)
+{
+    pthread_mutex_lock(&g_lock);
+    f->kms_next = g_files;
+    g_files = f;
+    if (!g_master) /* the first opener while there is none becomes master */
+        g_master = f, f->master = f->was_master = 1;
+    pthread_mutex_unlock(&g_lock);
+}
+
+void kms_file_close(struct fake_fd *f)
+{
+    pthread_mutex_lock(&g_lock);
+    for (struct fake_fd **p = &g_files; *p; p = &(*p)->kms_next) {
+        if (*p == f) {
+            *p = f->kms_next;
+            break;
+        }
+    }
+    if (g_master == f)
+        g_master = NULL; /* nobody inherits it; the next opener takes it */
+    link_cancel_flip_locked(f->event_wfd);
+    for (struct fb **p = &g_fbs; *p;) { /* drm_fb_release */
+        struct fb *fb = *p;
+        if (fb->owner == f) {
+            *p = fb->next;
+            plane_drop_fb(fb->id);
+            bo_unref_locked(fb->bo);
+            free(fb);
+        } else {
+            p = &fb->next;
+        }
+    }
+    for (struct blob *b = g_blobs; b; b = b->next)
+        if (b->owner == f)
+            b->destroyed = 1, b->owner = NULL;
+    free_destroyed_blobs();
+    while (f->nhandles)
+        gem_close(f, f->handles[0].handle);
+    free(f->handles);
+    f->handles = NULL;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Who may SET_MASTER/DROP_MASTER: a file that was master, from the process
+ * that opened it, or anyone with CAP_SYS_ADMIN (root here). */
+static int master_perm(const struct fake_fd *f)
+{
+    return (f->was_master && f->pid == getpid()) || geteuid() == 0 ? 0 : -EACCES;
+}
+
+static int set_master(struct fake_fd *f)
+{
+    int ret = master_perm(f);
+    if (ret || g_master == f)
+        return ret;
+    if (g_master)
+        return -EBUSY;
+    g_master = f;
+    f->master = f->was_master = 1;
+    return 0;
+}
+
+static int drop_master(struct fake_fd *f)
+{
+    int ret = master_perm(f);
+    if (ret)
+        return ret;
+    if (g_master != f)
+        return -EINVAL;
+    g_master = NULL;
+    f->master = 0;
+    return 0;
+}
+
+static int get_magic(struct fake_fd *f, struct drm_auth *a)
+{
+    if (!f->magic)
+        f->magic = g_next_magic++;
+    a->magic = f->magic;
+    return 0;
+}
+
+/* Called by the master (checked by the caller): marks the file holding the
+ * magic authenticated; a magic works once. */
+static int auth_magic(const struct drm_auth *a);
 
 static void copy_string(char *dst, __kernel_size_t *len, const char *src)
 {
@@ -864,38 +1097,81 @@ static int get_version(struct drm_version *v)
     return 0;
 }
 
+static int auth_magic(const struct drm_auth *a)
+{
+    struct fake_fd *holder = g_files;
+    while (holder && (!a->magic || holder->magic != a->magic))
+        holder = holder->kms_next;
+    if (!holder || holder->magic_used)
+        return -EINVAL;
+    holder->magic_used = 1;
+    return 0;
+}
+
+/* Ioctls only the master may use (DRM_MASTER in 6.8's drm_ioctls[]),
+ * refused before their arguments are looked at. */
+static int master_only(unsigned int request)
+{
+    switch (request) {
+    case (unsigned int)DRM_IOCTL_AUTH_MAGIC:
+    case (unsigned int)DRM_IOCTL_SET_VERSION:
+    case (unsigned int)DRM_IOCTL_MODE_SETCRTC:
+    case (unsigned int)DRM_IOCTL_MODE_SETPLANE:
+    case (unsigned int)DRM_IOCTL_MODE_CURSOR:
+    case (unsigned int)DRM_IOCTL_MODE_CURSOR2:
+    case (unsigned int)DRM_IOCTL_MODE_SETGAMMA:
+    case (unsigned int)DRM_IOCTL_MODE_SETPROPERTY:
+    case (unsigned int)DRM_IOCTL_MODE_PAGE_FLIP:
+    case (unsigned int)DRM_IOCTL_MODE_DIRTYFB:
+    case (unsigned int)DRM_IOCTL_MODE_OBJ_SETPROPERTY:
+    case (unsigned int)DRM_IOCTL_MODE_ATOMIC:
+    case (unsigned int)DRM_IOCTL_MODE_CREATE_LEASE:
+    case (unsigned int)DRM_IOCTL_MODE_LIST_LESSEES:
+    case (unsigned int)DRM_IOCTL_MODE_GET_LEASE:
+    case (unsigned int)DRM_IOCTL_MODE_REVOKE_LEASE:
+        return 1;
+    }
+    return 0;
+}
+
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg)
 {
-    static int unknown_warnings;
+    static int unknown_warnings, non_master_commits;
     int ret;
     pthread_mutex_lock(&g_lock);
+    if (master_only(request) && g_master != f) {
+        if (request == (unsigned int)DRM_IOCTL_MODE_ATOMIC && non_master_commits++ < 5)
+            cham_log("refusing a commit from a file that isn't DRM master (EACCES)");
+        pthread_mutex_unlock(&g_lock);
+        return -EACCES;
+    }
     switch (request) {
     case (unsigned int)DRM_IOCTL_VERSION: ret = get_version(arg); break;
     case (unsigned int)DRM_IOCTL_GET_CAP: ret = get_cap(arg); break;
-    case (unsigned int)DRM_IOCTL_SET_CLIENT_CAP: ret = set_client_cap(arg); break;
-    case (unsigned int)DRM_IOCTL_GET_MAGIC: ((struct drm_auth *)arg)->magic = 0x4348; ret = 0; break;
-    case (unsigned int)DRM_IOCTL_AUTH_MAGIC: ret = 0; break;
-    case (unsigned int)DRM_IOCTL_SET_MASTER:
-    case (unsigned int)DRM_IOCTL_DROP_MASTER: ret = 0; break;
+    case (unsigned int)DRM_IOCTL_SET_CLIENT_CAP: ret = set_client_cap(f, arg); break;
+    case (unsigned int)DRM_IOCTL_GET_MAGIC: ret = get_magic(f, arg); break;
+    case (unsigned int)DRM_IOCTL_AUTH_MAGIC: ret = auth_magic(arg); break;
+    case (unsigned int)DRM_IOCTL_SET_MASTER: ret = set_master(f); break;
+    case (unsigned int)DRM_IOCTL_DROP_MASTER: ret = drop_master(f); break;
     case (unsigned int)DRM_IOCTL_GET_UNIQUE: ((struct drm_unique *)arg)->unique_len = 0; ret = 0; break;
     case (unsigned int)DRM_IOCTL_MODE_GETRESOURCES: ret = get_resources(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETCONNECTOR: ret = get_connector(arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_GETCONNECTOR: ret = get_connector(f, arg); break;
     case (unsigned int)DRM_IOCTL_MODE_GETENCODER: ret = get_encoder(arg); break;
     case (unsigned int)DRM_IOCTL_MODE_GETCRTC: ret = get_crtc(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPLANERESOURCES: ret = get_plane_resources(arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_GETPLANERESOURCES: ret = get_plane_resources(f, arg); break;
     case (unsigned int)DRM_IOCTL_MODE_GETPLANE: ret = get_plane(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_OBJ_GETPROPERTIES: ret = obj_get_properties(arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_OBJ_GETPROPERTIES: ret = obj_get_properties(f, arg); break;
     case (unsigned int)DRM_IOCTL_MODE_GETPROPERTY: ret = get_property(arg); break;
     case (unsigned int)DRM_IOCTL_MODE_GETPROPBLOB: ret = get_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_CREATEPROPBLOB: ret = create_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_DESTROYPROPBLOB: ret = destroy_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_ADDFB2: ret = add_fb2(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_RMFB: ret = remove_fb(*(uint32_t *)arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_CLOSEFB: ret = remove_fb(((struct drm_mode_closefb *)arg)->fb_id); break;
-    case (unsigned int)DRM_IOCTL_PRIME_FD_TO_HANDLE: ret = prime_fd_to_handle(arg); break;
-    case (unsigned int)DRM_IOCTL_PRIME_HANDLE_TO_FD: ret = prime_handle_to_fd(arg); break;
-    case (unsigned int)DRM_IOCTL_GEM_CLOSE: ret = 0; break; /* handles are the bo's own ids */
-    case (unsigned int)DRM_IOCTL_MODE_ATOMIC: ret = atomic_commit(f, arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_CREATEPROPBLOB: ret = create_blob(f, arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_DESTROYPROPBLOB: ret = destroy_blob(f, arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_ADDFB2: ret = add_fb2(f, arg); break;
+    case (unsigned int)DRM_IOCTL_MODE_RMFB: ret = remove_fb(f, *(uint32_t *)arg, 1); break;
+    case (unsigned int)DRM_IOCTL_MODE_CLOSEFB: ret = remove_fb(f, ((struct drm_mode_closefb *)arg)->fb_id, 0); break;
+    case (unsigned int)DRM_IOCTL_PRIME_FD_TO_HANDLE: ret = prime_fd_to_handle(f, arg); break;
+    case (unsigned int)DRM_IOCTL_PRIME_HANDLE_TO_FD: ret = prime_handle_to_fd(f, arg); break;
+    case (unsigned int)DRM_IOCTL_GEM_CLOSE: ret = gem_close(f, ((struct drm_gem_close *)arg)->handle); break;
+    case (unsigned int)DRM_IOCTL_MODE_ATOMIC: ret = f->atomic ? atomic_commit(f, arg) : -EINVAL; break;
     case (unsigned int)DRM_IOCTL_MODE_LIST_LESSEES: ((struct drm_mode_list_lessees *)arg)->count_lessees = 0; ret = 0; break;
     default:
         if (unknown_warnings++ < 20)

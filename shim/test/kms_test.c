@@ -432,16 +432,105 @@ int main(void)
     secs = (now_ns() - t0) / 1e9;
     CHECK(ok && g_flips == 12, "12 flips without an app (%.1f fps, KWin keeps running)", 12 / secs);
 
+    /* As Linux 6.8 with vkms answers for a normal user (shim/test/refvm.sh). */
+    printf("files: master, client caps, handles, ownership\n");
+    int root = geteuid() == 0; /* CAP_SYS_ADMIN may take master */
+    int fd2 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd2 >= 0 && !drmIsMaster(fd2), "a second open is not master");
+    errno = 0;
+    CHECK(drmSetMaster(fd2) != 0 && errno == (root ? EBUSY : EACCES), "...SET_MASTER: %s",
+          root ? "EBUSY while another is master" : "EACCES (never was master)");
+    pres = drmModeGetPlaneResources(fd2);
+    CHECK(pres && pres->count_planes == 0, "no planes listed without the universal-planes cap");
+    drmModeFreePlaneResources(pres);
+    drmModeObjectProperties *op = drmModeObjectGetProperties(fd2, crtc_id, DRM_MODE_OBJECT_CRTC);
+    CHECK(op && op->count_props == 0, "atomic properties hidden without the atomic cap");
+    drmModeFreeObjectProperties(op);
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS, 1) != 0 && errno == EINVAL,
+          "writeback cap needs the atomic cap first");
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 3) != 0 && errno == EINVAL, "atomic cap 3: EINVAL");
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "atomic cap on the second file");
+    pres = drmModeGetPlaneResources(fd2);
+    CHECK(pres && pres->count_planes == 1, "...which lists the plane");
+    drmModeFreePlaneResources(pres);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    CHECK(drmModeAtomicCommit(fd2, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) != 0 && errno == EACCES,
+          "a commit from a non-master file: EACCES");
+    drmModeAtomicFree(req);
+    uint32_t h1 = gbm_bo_get_handle(bos[1]).u32, fb2 = 0;
+    uint32_t handles2[4] = {h1}, pitches2[4] = {gbm_bo_get_stride(bos[1])}, offsets2[4] = {0};
+    CHECK(drmModeAddFB2(fd2, 1080, 1800, DRM_FORMAT_XBGR8888, handles2, pitches2, offsets2, &fb2, 0) != 0 &&
+              errno == ENOENT,
+          "another file's handle number means nothing here (ENOENT)");
+    int dmabuf = gbm_bo_get_fd(bos[1]);
+    uint32_t h2 = 0, h2again = 0;
+    CHECK(drmPrimeFDToHandle(fd2, dmabuf, &h2) == 0 && drmPrimeFDToHandle(fd2, dmabuf, &h2again) == 0 &&
+              h2 && h2 == h2again,
+          "importing the same buffer twice gives the same handle");
+    close(dmabuf);
+    handles2[0] = h2;
+    CHECK(drmModeAddFB2(fd2, 1080, 1800, DRM_FORMAT_XBGR8888, handles2, pitches2, offsets2, &fb2, 0) == 0,
+          "a non-master file adds a framebuffer");
+    CHECK(drmCloseBufferHandle(fd2, h2) == 0 && drmCloseBufferHandle(fd2, h2) != 0 && errno == EINVAL,
+          "GEM_CLOSE twice: EINVAL the second time");
+    CHECK(drmModeRmFB(fd, fb2) != 0 && errno == ENOENT, "RMFB of another file's framebuffer: ENOENT");
+    uint32_t blob2 = 0;
+    CHECK(drmModeCreatePropertyBlob(fd2, "abcd", 4, &blob2) == 0 && drmModeDestroyPropertyBlob(fd, blob2) != 0 &&
+              errno == EPERM,
+          "a non-master file creates a blob; another file can't destroy it (EPERM)");
+    drm_magic_t magic2 = 0;
+    CHECK(drmGetMagic(fd2, &magic2) == 0 && drmAuthMagic(fd2, magic2) != 0 && errno == EACCES,
+          "AUTH_MAGIC from a non-master: EACCES");
+    CHECK(drmAuthMagic(fd, magic2) == 0 && drmAuthMagic(fd, magic2) != 0 && errno == EINVAL,
+          "the master authenticates the magic once");
+    int dup2fd = dup(fd2);
+    close(fd2);
+    drmModePropertyBlobRes *pb = drmModeGetPropertyBlob(fd, blob2);
+    CHECK(pb != NULL, "a dup keeps the file open");
+    drmModeFreePropertyBlob(pb);
+    close(dup2fd);
+    pb = drmModeGetPropertyBlob(fd, blob2);
+    CHECK(pb == NULL, "closing the last copy releases the file's blobs");
+    drmModeFreePropertyBlob(pb);
+    CHECK(drmModeRmFB(fd2, fb2) != 0, "...and framebuffers");
+    CHECK(drmDropMaster(fd) == 0 && !drmIsMaster(fd), "the master drops master");
+    int fd3 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd3 >= 0 && drmIsMaster(fd3), "the next open while there is none becomes master");
+    close(fd3);
+    CHECK(drmSetMaster(fd) == 0 && drmIsMaster(fd), "...and once it closed, the old master takes it back");
+
     printf("teardown\n");
-    struct drm_mode_closefb cfb = {.fb_id = fbs[0]};
-    CHECK(drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &cfb) == 0, "CLOSEFB of the fb on screen");
-    for (int i = 1; i < 3; i++)
-        drmModeRmFB(fd, fbs[i]);
+    uint64_t on_plane = 0;
+    prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &on_plane);
+    struct drm_mode_closefb cfb = {.fb_id = (uint32_t)on_plane};
+    CHECK(on_plane && drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &cfb) == 0, "CLOSEFB of the fb on screen");
+    uint64_t still = 0;
+    prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &still);
+    CHECK(still == on_plane, "...leaves it on the plane");
+    uint32_t rm = 0;
+    for (int i = 0; i < 3; i++)
+        if (fbs[i] != on_plane)
+            rm = fbs[i];
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, rm);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) == 0, "show another framebuffer");
+    drmModeAtomicFree(req);
+    uint64_t active = 0;
+    CHECK(drmModeRmFB(fd, rm) == 0 && prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &still) &&
+              prop_id(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", &active) && still == 0 && active == 1,
+          "RMFB of the fb on screen takes it off the plane, the CRTC stays on");
+    for (int i = 0; i < 3; i++)
+        if (fbs[i] != on_plane && fbs[i] != rm)
+            drmModeRmFB(fd, fbs[i]);
     for (int i = 0; i < 3; i++)
         gbm_bo_destroy(bos[i]);
     gbm_device_destroy(gbm);
     CHECK(drmModeDestroyPropertyBlob(fd, blob) == 0, "destroy mode blob");
     close(fd);
+    int fd4 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd4 >= 0 && drmIsMaster(fd4), "after the master closed, a new open becomes master");
+    close(fd4);
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

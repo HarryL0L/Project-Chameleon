@@ -28,6 +28,7 @@ struct gbm_device {
 struct gbm_bo {
     struct gbm_device *device;
     struct cham_bo *cb;
+    uint32_t handle;   /* in the device's card file, 0 if none */
     uint64_t modifier;
     void *user_data;
     void (*destroy_user_data)(struct gbm_bo *, void *);
@@ -83,6 +84,7 @@ static struct gbm_bo *create(struct gbm_device *gbm, uint32_t width, uint32_t he
     struct gbm_bo *bo = calloc(1, sizeof *bo);
     bo->device = gbm;
     bo->cb = cb;
+    bo->handle = cham_bo_handle_open(cb, gbm->fd);
     bo->modifier = modifier;
     return bo;
 }
@@ -136,6 +138,8 @@ void gbm_bo_destroy(struct gbm_bo *bo)
         return;
     if (bo->destroy_user_data)
         bo->destroy_user_data(bo, bo->user_data);
+    if (bo->handle)
+        cham_bo_handle_close(bo->device->fd, bo->handle);
     cham_bo_unref(bo->cb);
     free(bo);
 }
@@ -197,7 +201,7 @@ union gbm_bo_handle gbm_bo_get_handle(struct gbm_bo *bo)
 {
     union gbm_bo_handle h;
     memset(&h, 0, sizeof h);
-    h.u32 = bo->cb->handle;
+    h.u32 = bo->handle;
     return h;
 }
 
@@ -206,7 +210,7 @@ union gbm_bo_handle gbm_bo_get_handle_for_plane(struct gbm_bo *bo, int plane)
     union gbm_bo_handle h;
     memset(&h, 0, sizeof h);
     if (plane == 0)
-        h.u32 = bo->cb->handle;
+        h.u32 = bo->handle;
     else
         h.s32 = -1;
     return h;
@@ -401,6 +405,7 @@ static struct gbm_bo *surface_bo(struct gbm_surface *s, AHardwareBuffer *ahb, in
     struct gbm_bo *bo = calloc(1, sizeof *bo);
     bo->device = s->device;
     bo->cb = cb;
+    bo->handle = cham_bo_handle_open(cb, s->device->fd);
     bo->modifier = DRM_FORMAT_MOD_INVALID;
     s->bos[free_index] = bo;
     *index = free_index;

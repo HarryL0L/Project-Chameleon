@@ -19,7 +19,6 @@ typedef struct AHardwareBuffer AHardwareBuffer;
 
 /* An AHardwareBuffer standing in for a GEM buffer object. */
 struct cham_bo {
-    uint32_t handle;   /* GEM handle as seen through the fake DRM device */
     uint32_t width, height;
     uint32_t format;   /* DRM fourcc */
     uint32_t stride;   /* bytes */
@@ -52,6 +51,11 @@ CHAM_EXPORT void cham_bo_unref(struct cham_bo *bo);
 CHAM_EXPORT struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width,
                                          uint32_t height, uint32_t stride, uint32_t format,
                                          void (*release)(AHardwareBuffer *));
+/* A GEM handle for the buffer in the card file `fd` (a gbm device's), made
+ * if the file has none; 0 if fd isn't the card. Close it with
+ * cham_bo_handle_close, as Mesa's gbm closes its handles. */
+CHAM_EXPORT uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd);
+CHAM_EXPORT void cham_bo_handle_close(int fd, uint32_t handle);
 /* Finds the buffer whose dmabuf `fd` refers to (any dup of it). No new ref. */
 CHAM_EXPORT struct cham_bo *cham_bo_from_fd(int fd);
 /* New fd (dup) of the buffer's dmabuf, caller owns it. */

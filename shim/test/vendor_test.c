@@ -10,10 +10,12 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "check.h"
 
@@ -57,7 +59,9 @@ static void gbm_surface_checks(EGLDisplay dpy, EGLConfig config)
     CHECK(gbm.create_device && gbm.bo_handle, "Chameleon's libgbm");
     if (!gbm.create_device || !gbm.bo_handle)
         return;
-    void *dev = gbm.create_device(-1);
+    const char *path = getenv("CHAMELEON_DRM_PATH");
+    int card = open(path ? path : "/dev/dri/card0", O_RDWR | O_CLOEXEC); /* gbm's GEM handles live in the card file */
+    void *dev = gbm.create_device(card);
     void *surface = gbm.surface_create(dev, 64, 32, 0x34324241 /* AB24 */, 5 /* SCANOUT | RENDERING */);
     void *other = gbm.surface_create(dev, 64, 32, 0x34324258 /* XB24 */, 5);
     CHECK(surface && other, "gbm_surface_create");

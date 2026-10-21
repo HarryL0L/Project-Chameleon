@@ -6,7 +6,10 @@
  * Opening the fake card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
  * libchameleon_udev.so lists it as a drm device) returns the read end of a
  * pipe: KWin polls and read()s DRM
- * events from it, and every DRM ioctl on it is answered by kms.c. stat() and
+ * events from it, and every DRM ioctl on it is answered by kms.c. Each open
+ * is one file with its own state (DRM master, client caps, GEM handles),
+ * shared by its dups, and released once no copy of the pipe's read end is
+ * left. stat() and
  * fstat() make it look like a DRM character device; libdrm learns the rest
  * from the card's sysfs entries (shim/udev/sysfs.c). bind() is watched to
  * learn KWin's Wayland socket (input.c), and the constructor hands KWin's
@@ -17,6 +20,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +81,33 @@ __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
     return REAL(fstat)(fd, st);
 }
 
+/* Files whose every copy is closed (the pipe has no reader left): released
+ * as the kernel does on the last close, noticed on the next open or ioctl. */
+static void reap_closed_files(void)
+{
+    struct fake_fd *dead = NULL;
+    pthread_mutex_lock(&g_fd_lock);
+    for (struct fake_fd **p = &g_fake_fds; *p;) {
+        struct pollfd pfd = {(*p)->event_wfd, POLLOUT, 0};
+        if (poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLERR)) {
+            struct fake_fd *f = *p;
+            *p = f->next;
+            f->next = dead;
+            dead = f;
+        } else {
+            p = &(*p)->next;
+        }
+    }
+    pthread_mutex_unlock(&g_fd_lock);
+    while (dead) {
+        struct fake_fd *f = dead;
+        dead = f->next;
+        kms_file_close(f);
+        close(f->event_wfd);
+        free(f);
+    }
+}
+
 static struct fake_fd *fake_fd_lookup(int fd)
 {
     struct stat st;
@@ -88,6 +119,12 @@ static struct fake_fd *fake_fd_lookup(int fd)
         f = f->next;
     pthread_mutex_unlock(&g_fd_lock);
     return f;
+}
+
+__attribute__((visibility("hidden"))) struct fake_fd *fake_fd_get(int fd)
+{
+    reap_closed_files();
+    return fake_fd_lookup(fd);
 }
 
 static void fake_stat(struct stat *st)
@@ -103,6 +140,7 @@ static void fake_stat(struct stat *st)
 static int fake_open(void)
 {
     kms_init_once();
+    reap_closed_files();
     int p[2];
     if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
         return -1;
@@ -112,11 +150,13 @@ static int fake_open(void)
     f->dev = st.st_dev;
     f->ino = st.st_ino;
     f->event_wfd = p[1];
+    f->pid = getpid();
+    kms_file_open(f);
     pthread_mutex_lock(&g_fd_lock);
     f->next = g_fake_fds;
     g_fake_fds = f;
     pthread_mutex_unlock(&g_fd_lock);
-    cham_log("opened fake DRM device %s (fd %d)", fake_path(), p[0]);
+    cham_log("opened fake DRM device %s (fd %d%s)", fake_path(), p[0], f->master ? ", DRM master" : "");
     return p[0];
 }
 
@@ -243,7 +283,7 @@ int ioctl(int fd, int request, ...)
     va_end(ap);
 
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
-        struct fake_fd *f = fake_fd_lookup(fd);
+        struct fake_fd *f = fake_fd_get(fd);
         if (f) {
             int ret = kms_ioctl(f, (unsigned int)request, arg);
             if (ret < 0) {

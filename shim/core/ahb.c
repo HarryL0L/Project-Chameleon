@@ -55,7 +55,6 @@ static struct {
 
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cham_bo *g_bos;
-static uint32_t g_next_handle = 1;
 
 void cham_log(const char *fmt, ...)
 {
@@ -282,7 +281,6 @@ static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, 
     bo->release_fence = -1;
 
     pthread_mutex_lock(&g_lock);
-    bo->handle = g_next_handle++;
     bo->next = g_bos;
     g_bos = bo;
     pthread_mutex_unlock(&g_lock);
@@ -396,14 +394,6 @@ void cham_bo_unref(struct cham_bo *bo)
     pthread_mutex_lock(&g_lock);
     bo_unref_locked(bo);
     pthread_mutex_unlock(&g_lock);
-}
-
-struct cham_bo *bo_by_handle_locked(uint32_t handle)
-{
-    for (struct cham_bo *bo = g_bos; bo; bo = bo->next)
-        if (bo->handle == handle)
-            return bo;
-    return NULL;
 }
 
 struct cham_bo *cham_bo_from_fd(int fd)

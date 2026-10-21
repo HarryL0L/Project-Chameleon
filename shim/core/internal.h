@@ -15,7 +15,6 @@ extern pthread_mutex_t g_lock;
 uint64_t now_ns(void);
 
 /* ---- ahb.c ---- */
-struct cham_bo *bo_by_handle_locked(uint32_t handle);
 void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
 /* Waits (briefly) for every pending presenter release fence. */
@@ -39,6 +38,8 @@ void link_forget_bo_locked(struct cham_bo *bo);
 void link_screen_off_locked(int off);
 /* Page-flip event bookkeeping (one pending flip, like KMS). */
 int link_flip_pending_locked(void);
+/* The pending flip's event would go to a file being closed: drop it. */
+void link_cancel_flip_locked(int event_fd);
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
                             uint32_t refresh_mhz);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
@@ -88,13 +89,30 @@ void input_keysym(uint32_t sym, int down);
 void input_ime_connected(int fd);
 
 /* ---- kms.c: the fake KMS device ---- */
+struct gem_handle {
+    uint32_t handle;
+    struct cham_bo *bo; /* holds a ref */
+};
+/* One open file of the card (struct drm_file): dups and fork share it. */
 struct fake_fd {
     dev_t dev;
     ino_t ino;
-    int event_wfd; /* write end of the pipe KWin reads DRM events from */
-    struct fake_fd *next;
+    int event_wfd;    /* write end of the pipe the program reads DRM events from */
+    pid_t pid;        /* the opener, for SET_MASTER's permission check */
+    int master, was_master;
+    uint32_t magic;   /* 0 until GET_MAGIC */
+    int magic_used;   /* AUTH_MAGIC took it */
+    int universal_planes, atomic, writeback;
+    struct gem_handle *handles; /* under g_lock */
+    int nhandles;
+    struct fake_fd *next;     /* interpose.c's list */
+    struct fake_fd *kms_next; /* kms.c's list, under g_lock */
 };
 void kms_init_once(void);
+/* A file was opened (it may become master) / every copy of it is closed:
+ * its master, handles, framebuffers, blobs and pending event go. */
+void kms_file_open(struct fake_fd *f);
+void kms_file_close(struct fake_fd *f);
 /* The app's screen when KWin started, in pixels and as the connector reports
  * its physical size. */
 void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
@@ -110,5 +128,7 @@ int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or
 
 /* ---- interpose.c ---- */
 int real_fstat(int fd, struct stat *st);
+/* The open card file `fd` refers to, or NULL. */
+struct fake_fd *fake_fd_get(int fd);
 
 #endif
