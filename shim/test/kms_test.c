@@ -189,11 +189,6 @@ int main(void)
     CHECK(drmGetCap(fd, DRM_CAP_ADDFB2_MODIFIERS, &cap) == 0 && cap == 0, "implicit modifiers only");
     CHECK(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "atomic client cap");
     CHECK(drmSetClientCap(fd, DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE, 1) != 0, "color pipeline refused");
-    drmDevicePtr dev = NULL;
-    CHECK(drmGetDevice2(fd, 0, &dev) == 0 && dev && dev->bustype == DRM_BUS_PLATFORM &&
-              strcmp(dev->nodes[DRM_NODE_PRIMARY], dev_path) == 0,
-          "drmGetDevice2: platform device at the fake path");
-    drmFreeDevice(&dev);
     drm_magic_t magic;
     CHECK(drmGetMagic(fd, &magic) == 0 && drmAuthMagic(fd, magic) == 0, "magic / auth (RenderDevice::open)");
     CHECK(drmIsMaster(fd), "drmIsMaster");

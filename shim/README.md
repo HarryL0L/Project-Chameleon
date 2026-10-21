@@ -86,7 +86,11 @@ screen keeps its first size instead of following the app's window).
   evdev's queue (whole frames, `SYN_DROPPED` when it overflows), live key,
   axis and touch state, its own clock, grab and revoke, and subsystem `drm` is
   the fake card, `card0` with node `/dev/dri/card0`, which compositors find
-  the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`). Enumerations of other
+  the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`). The card also
+  has the sysfs entries a KMS-only platform card has (`/sys/dev/char/226:0`,
+  `/sys/devices/platform/chameleon`, `/dev/dri` listing `card0`, no render
+  node; `udev/sysfs.c`), from which libdrm names and describes it as for
+  vkms, while it exists. Enumerations of other
   subsystems (`power_supply`, `backlight`, ...) pass through to the real
   libudev, without its monitor events. Any program in the session
   (`libinput debug-events`) sees the same devices while KWin runs.
@@ -122,7 +126,9 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   keys, relative motion, buttons, wheel, touchpad motion and tapping
   (`evdev_test`);
 - the screen following the app's window: the connector's mode and the
-  card's hotplug uevent, filtered by subsystem (`evdev_test`);
+  card's hotplug uevent, filtered by subsystem and tag (`evdev_test`);
+- libdrm naming and describing the card from its sysfs entries: primary
+  node, no render node, node type, `drmGetDevice2` (`evdev_test`);
 - udev monitors and libinput's udev backend starting on them, and other
   subsystems passing through, with the system's real libudev and libinput
   (`udev_test`);

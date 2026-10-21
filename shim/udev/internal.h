@@ -3,6 +3,8 @@
 #ifndef CHAM_UDEV_INTERNAL_H
 #define CHAM_UDEV_INTERNAL_H
 
+#include <stddef.h>
+#include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/types.h>
 
@@ -27,5 +29,13 @@ int cham_evdev_list(struct cham_evdev_info *out, int max);
 int cham_evdev_open(int index, struct cham_evdev_info *info);
 /* N for "/dev/input/eventN" (devnode) or ".../eventN" (syspath), else -1. */
 int cham_evdev_index(const char *path, const char *prefix);
+/* Whether the card exists: the compositor's libchameleon.so is serving. */
+int cham_card_present(void);
+
+/* sysfs.c: `path` inside the card's sysfs entries or /dev/dri, as its place
+ * in the tree standing for them (in buf); else `path` itself. */
+const char *cham_sys_path(const char *path, char *buf, size_t size);
+/* 1 and fills *st if `path` is the card's node, else 0. */
+int cham_sys_node_stat(const char *path, struct stat *st);
 
 #endif

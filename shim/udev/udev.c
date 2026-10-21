@@ -140,6 +140,11 @@ static int server_running(void)
     return s >= 0;
 }
 
+int cham_card_present(void)
+{
+    return server_running();
+}
+
 int cham_evdev_list(struct cham_evdev_info *out, int max)
 {
     int s = connect_server();

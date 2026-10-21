@@ -10,6 +10,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <libinput.h>
+#include <limits.h>
 #include <libudev.h>
 #include <linux/input.h>
 #include <poll.h>
@@ -25,6 +26,7 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <xf86drm.h>
 #include <xf86drmMode.h>
 
 #include "../../common/cham_io.h"
@@ -154,6 +156,35 @@ int main(void)
     if (d)
         udev_device_unref(d);
     udev_enumerate_unref(e);
+
+    /* libdrm names and describes the card from its sysfs entries, as for a
+     * KMS-only platform card such as vkms: card0, no render node. */
+    printf("libdrm\n");
+    char *name = drmGetPrimaryDeviceNameFromFd(fd);
+    CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "primary node name (%s)", name ? name : "none");
+    free(name);
+    name = drmGetRenderDeviceNameFromFd(fd);
+    CHECK(!name, "no render node");
+    free(name);
+    CHECK(drmGetNodeTypeFromFd(fd) == DRM_NODE_PRIMARY, "node type: primary");
+    name = drmGetDeviceNameFromFd2(fd);
+    CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "device name from its uevent (%s)", name ? name : "none");
+    free(name);
+    drmDevicePtr dev = NULL;
+    CHECK(drmGetDevice2(fd, 0, &dev) == 0 && dev->bustype == DRM_BUS_PLATFORM &&
+              dev->available_nodes == 1 << DRM_NODE_PRIMARY &&
+              strcmp(dev->nodes[DRM_NODE_PRIMARY], "/dev/dri/card0") == 0 &&
+              strcmp(dev->businfo.platform->fullname, "chameleon") == 0 &&
+              strcmp(dev->deviceinfo.platform->compatible[0], "chameleon") == 0,
+          "drmGetDevice2: platform device \"chameleon\" with card0");
+    drmFreeDevice(&dev);
+    char resolved[PATH_MAX];
+    CHECK(realpath("/sys/dev/char/226:0/device", resolved) && strcmp(resolved, "/sys/devices/platform/chameleon") == 0,
+          "realpath of its device link (%s)", resolved);
+    int fd2 = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    CHECK(fd2 >= 0 && drmIsKMS(fd2), "the named node opens as the card");
+    if (fd2 >= 0)
+        close(fd2);
 
     /* Tag filters as systemd's libudev applies them: a device needs every
      * tag; the card has seat, the input event nodes none. */

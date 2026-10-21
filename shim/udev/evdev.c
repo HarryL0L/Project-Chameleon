@@ -23,6 +23,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <poll.h>
 #include <pthread.h>
 #include <stdarg.h>
@@ -468,7 +469,8 @@ EXPORT int open(const char *path, int flags, ...)
     va_start(ap, flags);
     mode_t mode = mode_arg(flags, ap);
     va_end(ap);
-    return next_open(path, flags, mode);
+    char buf[PATH_MAX];
+    return next_open(cham_sys_path(path, buf, sizeof buf), flags, mode);
 }
 
 EXPORT int open64(const char *path, int flags, ...) __attribute__((alias("open")));
@@ -483,7 +485,8 @@ EXPORT int openat(int dirfd, const char *path, int flags, ...)
     va_start(ap, flags);
     mode_t mode = mode_arg(flags, ap);
     va_end(ap);
-    return next_openat(dirfd, path, flags, mode);
+    char buf[PATH_MAX];
+    return next_openat(dirfd, cham_sys_path(path, buf, sizeof buf), flags, mode);
 }
 
 EXPORT int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("openat")));
@@ -494,7 +497,8 @@ EXPORT int __open_2(const char *path, int flags)
     if (i >= 0)
         return open_node(i, flags);
     NEXT(__open_2);
-    return next___open_2(path, flags);
+    char buf[PATH_MAX];
+    return next___open_2(cham_sys_path(path, buf, sizeof buf), flags);
 }
 
 EXPORT int __openat_2(int dirfd, const char *path, int flags)
@@ -503,7 +507,8 @@ EXPORT int __openat_2(int dirfd, const char *path, int flags)
     if (i >= 0)
         return open_node(i, flags);
     NEXT(__openat_2);
-    return next___openat_2(dirfd, path, flags);
+    char buf[PATH_MAX];
+    return next___openat_2(dirfd, cham_sys_path(path, buf, sizeof buf), flags);
 }
 
 /* ---- stat ---- */
@@ -515,8 +520,11 @@ EXPORT int stat(const char *path, struct stat *st)
         node_stat(i, st);
         return 0;
     }
+    if (cham_sys_node_stat(path, st))
+        return 0;
     NEXT(stat);
-    return next_stat(path, st);
+    char buf[PATH_MAX];
+    return next_stat(cham_sys_path(path, buf, sizeof buf), st);
 }
 
 EXPORT int lstat(const char *path, struct stat *st)
@@ -526,8 +534,11 @@ EXPORT int lstat(const char *path, struct stat *st)
         node_stat(i, st);
         return 0;
     }
+    if (cham_sys_node_stat(path, st))
+        return 0;
     NEXT(lstat);
-    return next_lstat(path, st);
+    char buf[PATH_MAX];
+    return next_lstat(cham_sys_path(path, buf, sizeof buf), st);
 }
 
 EXPORT int fstatat(int dirfd, const char *path, struct stat *st, int flags)
@@ -537,8 +548,11 @@ EXPORT int fstatat(int dirfd, const char *path, struct stat *st, int flags)
         node_stat(i, st);
         return 0;
     }
+    if (cham_sys_node_stat(path, st))
+        return 0;
     NEXT(fstatat);
-    return next_fstatat(dirfd, path, st, flags);
+    char buf[PATH_MAX];
+    return next_fstatat(dirfd, cham_sys_path(path, buf, sizeof buf), st, flags);
 }
 
 EXPORT int fstat(int fd, struct stat *st)

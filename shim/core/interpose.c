@@ -1,16 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * libc / libdrm entry points libchameleon.so overrides when LD_PRELOADed
+ * libc entry points libchameleon.so overrides when LD_PRELOADed
  * into kwin_wayland.
  *
  * Opening the fake card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
  * libchameleon_udev.so lists it as a drm device) returns the read end of a
  * pipe: KWin polls and read()s DRM
  * events from it, and every DRM ioctl on it is answered by kms.c. stat() and
- * fstat() make it look like a DRM character device, and libdrm's
- * drmGetDevice*() describe it. bind() is watched to learn KWin's Wayland
- * socket (input.c), and the constructor hands KWin's children their
- * original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides sigaction.)
+ * fstat() make it look like a DRM character device; libdrm learns the rest
+ * from the card's sysfs entries (shim/udev/sysfs.c). bind() is watched to
+ * learn KWin's Wayland socket (input.c), and the constructor hands KWin's
+ * children their original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides
+ * sigaction.)
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -32,7 +33,7 @@
 
 static const dev_t fake_rdev = (dev_t)((226u << 8) | CHAM_DRM_MINOR);
 
-/* The overrides of libc/libdrm symbols below must be exported. */
+/* The overrides of libc symbols below must be exported. */
 #pragma GCC visibility push(default)
 
 static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -56,9 +57,6 @@ DECLARE_REAL(int, lstat, const char *, struct stat *)
 DECLARE_REAL(int, fstatat, int, const char *, struct stat *, int)
 DECLARE_REAL(int, fstat, int, struct stat *)
 DECLARE_REAL(int, ioctl, int, int, ...)
-DECLARE_REAL(int, drmGetDevice2, int, uint32_t, drmDevicePtr *)
-DECLARE_REAL(int, drmGetDevice, int, drmDevicePtr *)
-DECLARE_REAL(char *, drmGetDeviceNameFromFd2, int)
 DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 
 static const char *fake_path(void)
@@ -67,9 +65,10 @@ static const char *fake_path(void)
     return p && *p ? p : CHAM_DRM_PATH;
 }
 
+/* Its node as udev names it, or as libdrm does from sysfs. */
 static int is_fake_path(const char *path)
 {
-    return path && strcmp(path, fake_path()) == 0;
+    return path && (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0);
 }
 
 __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
@@ -280,72 +279,6 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
             input_note_socket(path);
     }
     return ret;
-}
-
-/* ---- libdrm device identity ---- */
-
-/* Laid out the way libdrm's drmFreeDevice() frees it: one block for the
- * device, bus/device info and node paths, plus a separately allocated
- * `compatible` array whose strings are each freed on their own. */
-static drmDevicePtr make_device(void)
-{
-    const char *path = fake_path();
-    size_t path_len = strlen(path) + 1;
-    size_t size = sizeof(drmDevice) + DRM_NODE_MAX * sizeof(char *) + sizeof(drmPlatformBusInfo) +
-                  sizeof(drmPlatformDeviceInfo) + path_len;
-    char *mem = calloc(1, size);
-    char **compatible = calloc(2, sizeof(char *));
-    char *name = strdup("chameleon");
-    if (!mem || !compatible || !name) {
-        free(mem);
-        free(compatible);
-        free(name);
-        return NULL;
-    }
-    drmDevicePtr dev = (drmDevicePtr)mem;
-    char *p = mem + sizeof(drmDevice);
-    dev->nodes = (char **)p;
-    p += DRM_NODE_MAX * sizeof(char *);
-    dev->businfo.platform = (drmPlatformBusInfoPtr)p;
-    p += sizeof(drmPlatformBusInfo);
-    dev->deviceinfo.platform = (drmPlatformDeviceInfoPtr)p;
-    p += sizeof(drmPlatformDeviceInfo);
-    memcpy(p, path, path_len);
-    dev->nodes[DRM_NODE_PRIMARY] = p;
-    compatible[0] = name;
-    dev->deviceinfo.platform->compatible = compatible;
-    strcpy(dev->businfo.platform->fullname, "/chameleon");
-    dev->available_nodes = 1 << DRM_NODE_PRIMARY;
-    dev->bustype = DRM_BUS_PLATFORM;
-    return dev;
-}
-
-int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
-{
-    if (fake_fd_lookup(fd)) {
-        *device = make_device();
-        return *device ? 0 : -ENOMEM;
-    }
-    resolve_drmGetDevice2();
-    return REAL(drmGetDevice2) ? REAL(drmGetDevice2)(fd, flags, device) : -ENOSYS;
-}
-
-int drmGetDevice(int fd, drmDevicePtr *device)
-{
-    if (fake_fd_lookup(fd)) {
-        *device = make_device();
-        return *device ? 0 : -ENOMEM;
-    }
-    resolve_drmGetDevice();
-    return REAL(drmGetDevice) ? REAL(drmGetDevice)(fd, device) : -ENOSYS;
-}
-
-char *drmGetDeviceNameFromFd2(int fd)
-{
-    if (fake_fd_lookup(fd))
-        return strdup(fake_path());
-    resolve_drmGetDeviceNameFromFd2();
-    return REAL(drmGetDeviceNameFromFd2) ? REAL(drmGetDeviceNameFromFd2)(fd) : NULL;
 }
 
 /* ---- environment ----
