@@ -9,6 +9,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <dirent.h>
 #include <libinput.h>
 #include <limits.h>
 #include <libudev.h>
@@ -21,6 +22,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
 #include <sys/wait.h>
@@ -185,6 +187,41 @@ int main(void)
     CHECK(fd2 >= 0 && drmIsKMS(fd2), "the named node opens as the card");
     if (fd2 >= 0)
         close(fd2);
+    /* /dev/dri lists the card next to whatever real entries there are (read
+     * here with raw system calls, past the interposers), which stay real. */
+    char listed[4096] = "";
+    DIR *dir = opendir("/dev/dri");
+    for (struct dirent *e; dir && (e = readdir(dir));)
+        snprintf(listed + strlen(listed), sizeof listed - strlen(listed), "%s ", e->d_name);
+    if (dir)
+        closedir(dir);
+    int missing = !strstr(listed, "card0 "), real_dri = (int)syscall(SYS_openat, AT_FDCWD, "/dev/dri",
+                                                                     O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    char dents[4096];
+    long n;
+    while (real_dri >= 0 && (n = syscall(SYS_getdents64, real_dri, dents, sizeof dents)) > 0)
+        for (long off = 0; off < n;) {
+            struct {
+                unsigned long long ino;
+                long long off;
+                unsigned short reclen;
+                unsigned char type;
+                char name[];
+            } *d = (void *)(dents + off);
+            char want[300];
+            snprintf(want, sizeof want, "%s ", d->name);
+            if (d->name[0] != '.' && strcmp(d->name, "card0") != 0) {
+                struct stat real_st, seen_st;
+                missing += !strstr(listed, want) ||
+                           (fstatat(real_dri, d->name, &real_st, 0) == 0 &&
+                            (snprintf(want, sizeof want, "/dev/dri/%s", d->name), stat(want, &seen_st) != 0 ||
+                             seen_st.st_rdev != real_st.st_rdev));
+            }
+            off += d->reclen;
+        }
+    if (real_dri >= 0)
+        close(real_dri);
+    CHECK(!missing, "/dev/dri: the card and every real entry, the real ones as they are (%s)", listed);
 
     /* Tag filters as systemd's libudev applies them: a device needs every
      * tag; the card has seat, the input event nodes none. */

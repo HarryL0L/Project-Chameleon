@@ -13,6 +13,11 @@
  * $XDG_RUNTIME_DIR/chameleon-sys, which these paths lead to while the card
  * exists (the compositor's libchameleon.so serving), as udev lists it. The
  * node itself is libchameleon.so's; here it only stats and is accessible.
+ *
+ * Only the /dev/dri directory itself is the tree's: it lists card0 next to
+ * the real entries the program can see (a GPU's render node, on the few
+ * devices that let apps reach one), and those stay the real ones. A real
+ * card0 is the one name hidden: it can't drive Android's screen.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -101,6 +106,25 @@ static void build_tree(void)
              link_to("../../../chameleon", AT("/sys/devices/platform/chameleon/drm/card0/device")) == 0 &&
              link_to("../../devices/platform/chameleon/drm/card0", AT(CHAR_DEV)) == 0 &&
              write_file(AT("/dev/dri/card0"), "") == 0; /* for the listing; the node is libchameleon.so's */
+    /* Past our own open() (bionic's opendir() calls it, and /dev/dri leads
+     * back here while the tree is being built). */
+    NEXT(openat);
+    int real_fd = ok ? next_openat(AT_FDCWD, "/dev/dri", O_RDONLY | O_DIRECTORY | O_CLOEXEC) : -1;
+    DIR *real = real_fd >= 0 ? fdopendir(real_fd) : NULL;
+    if (real_fd >= 0 && !real)
+        close(real_fd);
+    for (struct dirent *e; real && (e = readdir(real));) {
+        if (e->d_name[0] == '.' || strcmp(e->d_name, "card0") == 0)
+            continue;
+        char name[16 + sizeof e->d_name];
+        snprintf(name, sizeof name, "/dev/dri/%s", e->d_name);
+        if (e->d_type == DT_DIR)
+            make_dirs(AT(name)); /* by-path */
+        else
+            write_file(AT(name), "");
+    }
+    if (real)
+        closedir(real);
 #undef AT
     NEXT(realpath);
     if (!ok || !next_realpath(g_root, g_real_root))
@@ -124,7 +148,7 @@ const char *cham_sys_path(const char *path, char *buf, size_t size)
 {
     if (!path || path[0] != '/' || is_node(path) ||
         (!prefixed(path, CHAR_DEV) && !prefixed(path, "/sys/devices/platform/chameleon") &&
-         !prefixed(path, "/dev/dri")))
+         strcmp(path, "/dev/dri") != 0 && strcmp(path, "/dev/dri/") != 0))
         return path;
     pthread_once(&g_once, build_tree);
     if (!g_root[0] || !cham_card_present() || snprintf(buf, size, "%s%s", g_root, path) >= (int)size)

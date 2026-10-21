@@ -90,7 +90,8 @@ screen keeps its first size instead of following the app's window).
   has the sysfs entries a KMS-only platform card has (`/sys/dev/char/226:0`,
   `/sys/devices/platform/chameleon`, `/dev/dri` listing `card0`, no render
   node; `udev/sysfs.c`), from which libdrm names and describes it as for
-  vkms, while it exists. Enumerations of other
+  vkms, while it exists. Real entries in `/dev/dri` (a GPU's render node,
+  where Android lets apps reach one) are listed next to it and stay real. Enumerations of other
   subsystems (`power_supply`, `backlight`, ...) pass through to the real
   libudev, without its monitor events. Any program in the session
   (`libinput debug-events`) sees the same devices while KWin runs.
