@@ -199,7 +199,9 @@ int main(void)
     uint32_t plane_id = pres ? pres->planes[0] : 0;
     drmModeFreePlaneResources(pres);
     drmModePlane *plane = drmModeGetPlane(fd, plane_id);
-    CHECK(plane && plane->count_formats == 2 && plane->possible_crtcs == 1, "plane: 2 formats, crtc mask 1");
+    CHECK(plane && plane->count_formats == 4 && plane->formats[0] == DRM_FORMAT_XRGB8888 &&
+              plane->possible_crtcs == 1,
+          "plane: XRGB8888 first of 4 formats, crtc mask 1");
     drmModeFreePlane(plane);
     uint64_t type = 99;
     uint32_t p_type = prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type", &type);
@@ -278,6 +280,21 @@ int main(void)
         ok = ok && drmModeAddFB2(fd, 1080, 1800, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &fbs[i], 0) == 0;
         drmCloseBufferHandle(fd, handle);
         CHECK(ok, "bo %d: gbm -> dmabuf -> prime handle -> fb %u", i, fbs[i]);
+    }
+    {
+        uint32_t handles[4] = {gbm_bo_get_handle(bos[0]).u32}, pitches[4] = {gbm_bo_get_stride(bos[0])},
+                 offsets[4] = {0}, fb = 0;
+        CHECK(drmModeAddFB2(fd, 1080, 1800, DRM_FORMAT_RGB565, handles, pitches, offsets, &fb, 0) != 0 &&
+                  errno == EINVAL,
+              "a framebuffer in a format no plane shows is refused (EINVAL)");
+        struct gbm_bo *xrgb = gbm_bo_create(gbm, 640, 480, DRM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+        handles[0] = xrgb ? gbm_bo_get_handle(xrgb).u32 : 0;
+        pitches[0] = xrgb ? gbm_bo_get_stride(xrgb) : 0;
+        CHECK(xrgb && drmModeAddFB2(fd, 640, 480, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0) == 0 &&
+                  drmModeRmFB(fd, fb) == 0,
+              "an XRGB8888 framebuffer is accepted");
+        if (xrgb)
+            gbm_bo_destroy(xrgb);
     }
     int foreign = memfd_create("not-ours", 0);
     uint32_t h;

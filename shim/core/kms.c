@@ -423,18 +423,30 @@ static int get_plane_resources(struct drm_mode_get_plane_res *r)
     return 0;
 }
 
+/* The plane's formats: what gbm allocates (RGBA and BGRA Android buffers),
+ * which the app copies by their own layout. XRGB8888 first, the format every
+ * driver offers by convention. */
+static const uint32_t k_plane_formats[] = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888,
+                                           DRM_FORMAT_ABGR8888};
+
+static int plane_has_format(uint32_t format)
+{
+    for (size_t i = 0; i < sizeof k_plane_formats / sizeof k_plane_formats[0]; i++)
+        if (k_plane_formats[i] == format)
+            return 1;
+    return 0;
+}
+
 static int get_plane(struct drm_mode_get_plane *p)
 {
     if (p->plane_id != ID_PLANE)
         return -ENOENT;
-    /* The formats the app shows: RGBA buffers (gbm's BGRA ones aren't offered for scanout). */
-    static const uint32_t formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888};
-    const int n = (int)(sizeof formats / sizeof formats[0]);
+    const uint32_t n = sizeof k_plane_formats / sizeof k_plane_formats[0];
     p->crtc_id = g_state.plane_crtc;
     p->fb_id = g_state.fb;
     p->possible_crtcs = 1;
     p->gamma_size = 0;
-    COPY_OUT(p->format_type_ptr, p->count_format_types, formats, (uint32_t)n);
+    COPY_OUT(p->format_type_ptr, p->count_format_types, k_plane_formats, n);
     return 0;
 }
 
@@ -542,6 +554,8 @@ static int destroy_blob(struct drm_mode_destroy_blob *d)
 
 static int add_fb2(struct drm_mode_fb_cmd2 *c)
 {
+    if (!plane_has_format(c->pixel_format))
+        return -EINVAL; /* as the kernel: a format no plane can show */
     struct cham_bo *bo = bo_by_handle_locked(c->handles[0]);
     if (!bo)
         return -ENOENT;
