@@ -26,9 +26,11 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <drm.h>
@@ -124,7 +126,7 @@ struct kms_state {
 struct fb {
     uint32_t id;
     struct cham_bo *bo; /* holds a ref */
-    struct fake_fd *owner; /* the file that created it */
+    struct fake_fd *owner; /* the file that created it; NULL once it let go (CLOSEFB) */
     struct fb *next;
 };
 
@@ -290,6 +292,39 @@ int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz)
 
 #define U2P(u) ((void *)(uintptr_t)(u))
 
+/* The kernel's copies to and from the caller's memory. In this process a
+ * user pointer is memory we can reach; NULL is the one bad address we can
+ * tell, and it gets the kernel's EFAULT. */
+static int copy_to_user(uint64_t to, const void *from, size_t n)
+{
+    if (!n)
+        return 0;
+    if (!to)
+        return -EFAULT;
+    memcpy(U2P(to), from, n);
+    return 0;
+}
+
+static int copy_from_user(void *to, uint64_t from, size_t n)
+{
+    if (!n)
+        return 0;
+    if (!from)
+        return -EFAULT;
+    memcpy(to, U2P(from), n);
+    return 0;
+}
+
+/* An id list as most getters return it: as many as fit, then the count. */
+static int put_ids(uint64_t ptr, uint32_t *count, const uint32_t *ids, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (i < *count && copy_to_user(ptr + i * sizeof ids[0], &ids[i], sizeof ids[0]))
+            return -EFAULT;
+    *count = n;
+    return 0;
+}
+
 static struct fb *fb_find(uint32_t id)
 {
     for (struct fb *f = g_fbs; f; f = f->next)
@@ -351,68 +386,71 @@ static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *coun
     return NULL;
 }
 
-/* Copies an array out if the caller's buffer is big enough (kernel rules),
- * and always reports the real count. */
-#define COPY_OUT(ptr, user_count, src, n)                                  \
-    do {                                                                   \
-        if ((ptr) && (user_count) >= (n) && (n))                           \
-            memcpy(U2P(ptr), (src), sizeof((src)[0]) * (n));               \
-        (user_count) = (n);                                                \
-    } while (0)
-
 /* ---- mode objects ---- */
 
-static int get_resources(struct drm_mode_card_res *r)
+static int get_resources(const struct fake_fd *f, struct drm_mode_card_res *r)
 {
     static const uint32_t crtcs[] = {ID_CRTC}, conns[] = {ID_CONNECTOR}, encs[] = {ID_ENCODER};
-    r->count_fbs = 0;
-    COPY_OUT(r->crtc_id_ptr, r->count_crtcs, crtcs, 1u);
-    COPY_OUT(r->connector_id_ptr, r->count_connectors, conns, 1u);
-    COPY_OUT(r->encoder_id_ptr, r->count_encoders, encs, 1u);
+    uint32_t n = 0;
+    for (const struct fb *fb = g_fbs; fb; fb = fb->next) { /* the file's own */
+        if (fb->owner != f)
+            continue;
+        if (n < r->count_fbs && copy_to_user(r->fb_id_ptr + n * sizeof fb->id, &fb->id, sizeof fb->id))
+            return -EFAULT;
+        n++;
+    }
+    r->count_fbs = n;
     r->min_width = r->min_height = 1;
     r->max_width = r->max_height = 16384;
+    if (put_ids(r->crtc_id_ptr, &r->count_crtcs, crtcs, 1) ||
+        put_ids(r->encoder_id_ptr, &r->count_encoders, encs, 1) ||
+        put_ids(r->connector_id_ptr, &r->count_connectors, conns, 1))
+        return -EFAULT;
     return 0;
 }
 
-/* An object's properties as `f` sees them: atomic ones only with the
- * atomic client cap. Returns the count. */
-static uint32_t visible_props(const struct fake_fd *f, const uint32_t *props, uint32_t n, uint32_t *ids,
-                              uint64_t *values)
+/* An object's properties as `f` sees them (atomic ones only with the
+ * atomic client cap): as many as fit, then the count. */
+static int put_props(const struct fake_fd *f, const uint32_t *props, uint32_t n, uint64_t ids_ptr,
+                     uint64_t values_ptr, uint32_t *count)
 {
     uint32_t k = 0;
     for (uint32_t i = 0; i < n; i++) {
         if ((k_props[props[i] - 100].flags & DRM_MODE_PROP_ATOMIC) && !f->atomic)
             continue;
-        ids[k] = props[i];
-        values[k++] = prop_value(props[i]);
+        if (*count > k) {
+            uint64_t v = prop_value(props[i]);
+            if (copy_to_user(ids_ptr + k * sizeof props[i], &props[i], sizeof props[i]) ||
+                copy_to_user(values_ptr + k * sizeof v, &v, sizeof v))
+                return -EFAULT;
+        }
+        k++;
     }
-    return k;
+    *count = k;
+    return 0;
 }
 
 static int get_connector(struct fake_fd *f, struct drm_mode_get_connector *c)
 {
     if (c->connector_id != ID_CONNECTOR)
         return -ENOENT;
-    static const uint32_t encs[] = {ID_ENCODER};
-    enum { max = sizeof k_conn_props / sizeof k_conn_props[0] };
-    uint32_t ids[max];
-    uint64_t values[max];
-    uint32_t n = visible_props(f, k_conn_props, max, ids, values);
-    COPY_OUT(c->modes_ptr, c->count_modes, &g_mode, 1u);
-    COPY_OUT(c->encoders_ptr, c->count_encoders, encs, 1u);
-    if (c->props_ptr && c->prop_values_ptr && c->count_props >= n) {
-        memcpy(U2P(c->props_ptr), ids, n * sizeof ids[0]);
-        memcpy(U2P(c->prop_values_ptr), values, n * sizeof values[0]);
-    }
-    c->count_props = n;
-    c->encoder_id = ID_ENCODER;
+    static const uint32_t enc = ID_ENCODER;
+    /* Encoders and modes: all of them if they fit, else none. */
+    if (c->count_encoders >= 1 && copy_to_user(c->encoders_ptr, &enc, sizeof enc))
+        return -EFAULT;
+    c->count_encoders = 1;
     c->connector_type = DRM_MODE_CONNECTOR_DSI;
     c->connector_type_id = 1;
     c->connection = 1; /* DRM_MODE_CONNECTED */
     c->mm_width = g_mm_width;
     c->mm_height = g_mm_height;
     c->subpixel = 1; /* DRM_MODE_SUBPIXEL_UNKNOWN */
-    return 0;
+    if (c->count_modes >= 1 && copy_to_user(c->modes_ptr, &g_mode, sizeof g_mode))
+        return -EFAULT;
+    c->count_modes = 1;
+    c->encoder_id = g_state.conn_crtc ? ID_ENCODER : 0; /* the one it drives now */
+    return put_props(f, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
+                     c->prop_values_ptr, &c->count_props);
 }
 
 static int get_encoder(struct drm_mode_get_encoder *e)
@@ -431,10 +469,12 @@ static int get_crtc(struct drm_mode_crtc *c)
     if (c->crtc_id != ID_CRTC)
         return -ENOENT;
     c->fb_id = g_state.fb;
-    c->x = c->y = 0;
+    c->x = g_state.src_x >> 16;
+    c->y = g_state.src_y >> 16;
     c->gamma_size = 0;
+    /* A CRTC with a mode is enabled, active or not (DPMS off keeps it). */
     struct blob *b = blob_find(g_state.mode_blob);
-    c->mode_valid = g_state.active && b && b->length == sizeof(struct drm_mode_modeinfo);
+    c->mode_valid = b && b->length == sizeof(struct drm_mode_modeinfo);
     if (c->mode_valid)
         memcpy(&c->mode, b->data, sizeof c->mode);
     else
@@ -446,8 +486,7 @@ static int get_plane_resources(const struct fake_fd *f, struct drm_mode_get_plan
 {
     static const uint32_t planes[] = {ID_PLANE};
     /* The one plane is the primary: listed only for universal-planes clients. */
-    COPY_OUT(r->plane_id_ptr, r->count_planes, planes, f->universal_planes ? 1u : 0u);
-    return 0;
+    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? 1u : 0u);
 }
 
 /* The plane's formats: what gbm allocates (RGBA and BGRA Android buffers),
@@ -473,7 +512,9 @@ static int get_plane(struct drm_mode_get_plane *p)
     p->fb_id = g_state.fb;
     p->possible_crtcs = 1;
     p->gamma_size = 0;
-    COPY_OUT(p->format_type_ptr, p->count_format_types, k_plane_formats, n);
+    if (p->count_format_types >= n && copy_to_user(p->format_type_ptr, k_plane_formats, sizeof k_plane_formats))
+        return -EFAULT;
+    p->count_format_types = n;
     return 0;
 }
 
@@ -481,19 +522,13 @@ static int get_plane(struct drm_mode_get_plane *p)
 
 static int obj_get_properties(const struct fake_fd *f, struct drm_mode_obj_get_properties *o)
 {
-    uint32_t type, max;
-    const uint32_t *props = object_props(o->obj_id, &type, &max);
+    uint32_t type, n;
+    const uint32_t *props = object_props(o->obj_id, &type, &n);
+    if (o->obj_id == ID_ENCODER && (!o->obj_type || o->obj_type == DRM_MODE_OBJECT_ENCODER))
+        return -EINVAL; /* an object without properties */
     if (!props || (o->obj_type && o->obj_type != type))
         return -ENOENT;
-    uint32_t ids[P_END - 100];
-    uint64_t values[P_END - 100];
-    uint32_t n = visible_props(f, props, max, ids, values);
-    if (o->props_ptr && o->prop_values_ptr && o->count_props >= n) {
-        memcpy(U2P(o->props_ptr), ids, n * sizeof ids[0]);
-        memcpy(U2P(o->prop_values_ptr), values, n * sizeof values[0]);
-    }
-    o->count_props = n;
-    return 0;
+    return put_props(f, props, n, o->props_ptr, o->prop_values_ptr, &o->count_props);
 }
 
 static int get_property(struct drm_mode_get_property *p)
@@ -502,26 +537,29 @@ static int get_property(struct drm_mode_get_property *p)
         return -ENOENT;
     const struct propdef *d = &k_props[p->prop_id - 100];
     p->flags = d->flags;
+    memset(p->name, 0, sizeof p->name);
     snprintf(p->name, sizeof p->name, "%s", d->name);
-    if (d->flags & DRM_MODE_PROP_ENUM) {
-        uint32_t n = (uint32_t)d->nenums;
-        if (p->values_ptr && p->count_values >= n)
-            for (uint32_t i = 0; i < n; i++)
-                ((uint64_t *)U2P(p->values_ptr))[i] = i;
-        if (p->enum_blob_ptr && p->count_enum_blobs >= n) {
-            struct drm_mode_property_enum *e = U2P(p->enum_blob_ptr);
-            for (uint32_t i = 0; i < n; i++) {
-                e[i].value = i;
-                snprintf(e[i].name, sizeof e[i].name, "%s", d->enums[i]);
-            }
-        }
-        p->count_values = n;
-        p->count_enum_blobs = n;
-    } else {
-        uint32_t n = (uint32_t)d->nvalues;
-        COPY_OUT(p->values_ptr, p->count_values, d->values, n);
-        p->count_enum_blobs = 0;
+    int is_enum = (d->flags & DRM_MODE_PROP_ENUM) != 0;
+    uint32_t n = is_enum ? (uint32_t)d->nenums : (uint32_t)d->nvalues; /* an enum's values are 0..n-1 */
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t v = is_enum ? i : d->values[i];
+        if (i < p->count_values && copy_to_user(p->values_ptr + i * sizeof v, &v, sizeof v))
+            return -EFAULT;
     }
+    p->count_values = n;
+    if (is_enum) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (p->count_enum_blobs < i + 1)
+                continue;
+            struct drm_mode_property_enum e = {.value = i};
+            snprintf(e.name, sizeof e.name, "%s", d->enums[i]);
+            if (copy_to_user(p->enum_blob_ptr + i * sizeof e, &e, sizeof e))
+                return -EFAULT;
+        }
+        p->count_enum_blobs = n;
+    }
+    if (d->flags & DRM_MODE_PROP_BLOB)
+        p->count_enum_blobs = 0;
     return 0;
 }
 
@@ -530,19 +568,27 @@ static int get_blob(struct drm_mode_get_blob *g)
     struct blob *b = g->blob_id == ID_EDID_BLOB ? &g_edid_blob : blob_find(g->blob_id);
     if (!b)
         return -ENOENT;
-    if (g->data && g->length >= b->length)
-        memcpy(U2P(g->data), b->data, b->length);
+    if (g->length == b->length && copy_to_user(g->data, b->data, b->length)) /* only an exact fit */
+        return -EFAULT;
     g->length = b->length;
     return 0;
 }
 
 static int create_blob(struct fake_fd *f, struct drm_mode_create_blob *c)
 {
-    if (!c->length || c->length > (1u << 20))
+    if (!c->length || c->length > INT32_MAX - 64)
         return -EINVAL;
     struct blob *b = calloc(1, sizeof *b);
-    b->data = malloc(c->length);
-    memcpy(b->data, U2P(c->data), c->length);
+    b->data = b ? malloc(c->length) : NULL;
+    if (!b || !b->data) {
+        free(b);
+        return -ENOMEM;
+    }
+    if (copy_from_user(b->data, c->data, c->length)) {
+        free(b->data);
+        free(b);
+        return -EFAULT;
+    }
     b->length = c->length;
     b->owner = f;
     b->id = g_next_object_id++;
@@ -667,6 +713,22 @@ static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
     return 0;
 }
 
+/* Frees the framebuffers no file holds that the plane doesn't show either
+ * (the kernel's last reference going). */
+static void free_unused_fbs(void)
+{
+    for (struct fb **p = &g_fbs; *p;) {
+        struct fb *fb = *p;
+        if (!fb->owner && fb->id != g_state.fb) {
+            *p = fb->next;
+            bo_unref_locked(fb->bo);
+            free(fb);
+        } else {
+            p = &fb->next;
+        }
+    }
+}
+
 /* The plane lets go of a framebuffer that is being removed (RMFB, or its
  * file closing): the kernel takes it off the plane; the CRTC stays on. */
 static void plane_drop_fb(uint32_t id)
@@ -681,21 +743,18 @@ static void plane_drop_fb(uint32_t id)
     g_plane_shown = 0;
 }
 
-/* RMFB takes the framebuffer off the plane; CLOSEFB leaves it showing. */
+/* The file lets go of its framebuffer. RMFB also takes it off the plane;
+ * CLOSEFB leaves it showing (and usable by id) until something replaces it. */
 static int remove_fb(struct fake_fd *f, uint32_t id, int off_plane)
 {
-    for (struct fb **p = &g_fbs; *p; p = &(*p)->next) {
-        if ((*p)->id == id && (*p)->owner == f) {
-            struct fb *fb = *p;
-            *p = fb->next;
-            if (off_plane)
-                plane_drop_fb(id);
-            bo_unref_locked(fb->bo); /* the plane keeps its own ref */
-            free(fb);
-            return 0;
-        }
-    }
-    return -ENOENT;
+    struct fb *fb = fb_find(id);
+    if (!fb || fb->owner != f)
+        return -ENOENT;
+    fb->owner = NULL;
+    if (off_plane)
+        plane_drop_fb(id);
+    free_unused_fbs();
+    return 0;
 }
 
 static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
@@ -704,6 +763,9 @@ static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
     pthread_mutex_unlock(&g_lock);
     struct cham_bo *bo = cham_bo_from_fd(p->fd);
     pthread_mutex_lock(&g_lock);
+    struct stat st;
+    if (!bo && real_fstat(p->fd, &st) != 0)
+        return -EBADF;
     if (!bo)
         return -EINVAL; /* not one of ours, e.g. a client buffer: no direct scanout */
     p->handle = handle_for(f, bo);
@@ -712,11 +774,17 @@ static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
 
 static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
 {
+    if (p->flags & ~(uint32_t)(DRM_CLOEXEC | DRM_RDWR))
+        return -EINVAL;
     struct cham_bo *bo = handle_bo(f, p->handle);
     if (!bo)
         return -ENOENT;
     p->fd = cham_bo_export_fd(bo);
-    return p->fd < 0 ? -errno : 0;
+    if (p->fd < 0)
+        return -errno;
+    if (!(p->flags & DRM_CLOEXEC))
+        fcntl(p->fd, F_SETFD, 0); /* close-on-exec only when asked */
+    return 0;
 }
 
 /* ---- atomic ---- */
@@ -729,11 +797,7 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
             s->conn_crtc = (uint32_t)v;
             return 0;
         }
-        if (prop == P_CONN_DPMS && v <= 3) {
-            s->dpms = v;
-            return 0;
-        }
-        return -EINVAL;
+        return -EINVAL; /* DPMS too: the kernel takes it only through the legacy SETPROPERTY */
     case ID_CRTC:
         if (prop == P_CRTC_ACTIVE && v <= 1) {
             s->active = v;
@@ -750,9 +814,7 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
     case ID_PLANE:
         switch (prop) {
         case P_PLANE_FB_ID:
-            if (v && !fb_find((uint32_t)v))
-                return -ENOENT;
-            s->fb = (uint32_t)v;
+            s->fb = (uint32_t)v; /* checked to exist by prop_value_ok */
             return 0;
         case P_PLANE_CRTC_ID:
             if (v != 0 && v != ID_CRTC)
@@ -767,11 +829,37 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         case P_CRTC_Y: s->crtc_y = (int32_t)v; return 0;
         case P_CRTC_W: s->crtc_w = (uint32_t)v; return 0;
         case P_CRTC_H: s->crtc_h = (uint32_t)v; return 0;
-        case P_IN_FENCE_FD: s->in_fence = (int64_t)(int32_t)v; return 0;
+        case P_IN_FENCE_FD:
+            if ((int64_t)v >= 0 && fcntl((int)v, F_GETFD) < 0)
+                return -EINVAL; /* not an open file */
+            s->in_fence = (int64_t)(int32_t)v;
+            return 0;
         }
         return -EINVAL;
     }
     return -ENOENT;
+}
+
+/* drm_property_change_valid_get: the value fits the property's type. */
+static int prop_value_ok(uint32_t prop, uint64_t v)
+{
+    const struct propdef *d = &k_props[prop - 100];
+    if (d->flags & DRM_MODE_PROP_IMMUTABLE)
+        return 0;
+    if (d->flags & DRM_MODE_PROP_RANGE)
+        return v >= d->values[0] && v <= d->values[1];
+    if (d->flags & DRM_MODE_PROP_SIGNED_RANGE)
+        return (int64_t)v >= (int64_t)d->values[0] && (int64_t)v <= (int64_t)d->values[1];
+    if (d->flags & DRM_MODE_PROP_BLOB)
+        return v == 0 || blob_find((uint32_t)v) != NULL;
+    if (d->flags & DRM_MODE_PROP_OBJECT) { /* 0, or an object of the property's type */
+        if (v == 0)
+            return 1;
+        if (d->values[0] == DRM_MODE_OBJECT_FB)
+            return fb_find((uint32_t)v) != NULL;
+        return d->values[0] == DRM_MODE_OBJECT_CRTC && v == ID_CRTC;
+    }
+    return v < (uint64_t)d->nenums; /* enum values are 0..n-1 */
 }
 
 static const struct drm_mode_modeinfo *state_mode(const struct kms_state *s)
@@ -817,10 +905,16 @@ int kms_screen_off_locked(void)
 
 static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
+    if (!f->atomic)
+        return -EINVAL;
     if (a->flags & ~(uint32_t)DRM_MODE_ATOMIC_FLAGS)
+        return -EINVAL;
+    if (a->reserved)
         return -EINVAL;
     if (a->flags & DRM_MODE_PAGE_FLIP_ASYNC)
         return -EINVAL; /* no tearing updates */
+    if ((a->flags & DRM_MODE_ATOMIC_TEST_ONLY) && (a->flags & DRM_MODE_PAGE_FLIP_EVENT))
+        return -EINVAL;
 
     struct kms_state s = g_state;
     s.in_fence = -1;
@@ -835,14 +929,31 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         return (err);                                                                    \
     } while (0)
 
-    const uint32_t *objs = U2P(a->objs_ptr), *counts = U2P(a->count_props_ptr), *props = U2P(a->props_ptr);
-    const uint64_t *values = U2P(a->prop_values_ptr);
     uint64_t k = 0;
     for (uint32_t i = 0; i < a->count_objs; i++) {
-        for (uint32_t j = 0; j < counts[i]; j++, k++) {
-            int ret = set_prop(&s, objs[i], props[k], values[k]);
+        uint32_t obj, count, type, nprops;
+        if (copy_from_user(&obj, a->objs_ptr + i * sizeof obj, sizeof obj))
+            return -EFAULT;
+        const uint32_t *obj_props = object_props(obj, &type, &nprops);
+        if (!obj_props)
+            REFUSE(-ENOENT, "object %u has no properties", obj);
+        if (copy_from_user(&count, a->count_props_ptr + i * sizeof count, sizeof count))
+            return -EFAULT;
+        for (uint32_t j = 0; j < count; j++, k++) {
+            uint32_t prop;
+            uint64_t v;
+            if (copy_from_user(&prop, a->props_ptr + k * sizeof prop, sizeof prop))
+                return -EFAULT;
+            uint32_t m = 0;
+            while (m < nprops && obj_props[m] != prop)
+                m++;
+            if (m == nprops)
+                REFUSE(-ENOENT, "object %u has no property %u", obj, prop);
+            if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
+                return -EFAULT;
+            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v) : -EINVAL;
             if (ret)
-                REFUSE(ret, "object %u property %u = %llu", objs[i], props[k], (unsigned long long)values[k]);
+                REFUSE(ret, "object %u property %u = %llu", obj, prop, (unsigned long long)v);
         }
     }
 
@@ -864,16 +975,16 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
      * scanned out); it is accepted but not shown, since the app shows whole
      * buffers - the previous frame stays until a full one comes. */
     int partial = 0;
-    if (s.fb) {
-        if (!on || s.plane_crtc != ID_CRTC)
-            REFUSE(-EINVAL, "framebuffer on a CRTC that is off");
+    if (s.fb && !s.plane_crtc)
+        REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
+    if (s.plane_crtc && !s.fb)
+        REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
+    /* A plane on a CRTC that is off or has no mode stays attached, unseen. */
+    if (s.fb && on)
         partial = s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
                   (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay;
-    } else if (s.plane_crtc) {
-        REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
-    }
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-        if (!on)
+        if (!s.active && !g_state.active) /* an event for turning it off is fine */
             REFUSE(-EINVAL, "page-flip event with the CRTC off");
         if (link_flip_pending_locked())
             return -EBUSY;
@@ -885,9 +996,8 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     /* Commit. The kernel doesn't take ownership of IN_FENCE_FD either. */
     int in_fence = (int)s.in_fence;
     s.in_fence = -1;
-    /* CLOSEFB may have dropped the id of the fb that's still on the plane. */
     struct fb *fb = s.fb ? fb_find(s.fb) : NULL;
-    struct cham_bo *bo = fb ? fb->bo : (s.fb && s.fb == g_state.fb ? g_plane_bo : NULL);
+    struct cham_bo *bo = fb ? fb->bo : NULL;
     if (bo)
         bo_ref_locked(bo);
     if (g_plane_bo)
@@ -895,6 +1005,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     g_plane_bo = bo;
     g_state = s;
     free_destroyed_blobs();
+    free_unused_fbs(); /* a closed framebuffer the plane just let go of */
 
     if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
                             mode->vdisplay != old_mode->vdisplay))
@@ -925,6 +1036,7 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
 static int get_cap(struct drm_get_cap *c)
 {
+    c->value = 0;
     switch (c->capability) {
     case DRM_CAP_DUMB_BUFFER: c->value = 0; return 0;
     case DRM_CAP_VBLANK_HIGH_CRTC: c->value = 1; return 0;
@@ -1013,17 +1125,13 @@ void kms_file_close(struct fake_fd *f)
     if (g_master == f)
         g_master = NULL; /* nobody inherits it; the next opener takes it */
     link_cancel_flip_locked(f->event_wfd);
-    for (struct fb **p = &g_fbs; *p;) { /* drm_fb_release */
-        struct fb *fb = *p;
+    for (struct fb *fb = g_fbs; fb; fb = fb->next) { /* drm_fb_release */
         if (fb->owner == f) {
-            *p = fb->next;
+            fb->owner = NULL;
             plane_drop_fb(fb->id);
-            bo_unref_locked(fb->bo);
-            free(fb);
-        } else {
-            p = &fb->next;
         }
     }
+    free_unused_fbs();
     for (struct blob *b = g_blobs; b; b = b->next)
         if (b->owner == f)
             b->destroyed = 1, b->owner = NULL;
@@ -1078,12 +1186,12 @@ static int get_magic(struct fake_fd *f, struct drm_auth *a)
  * magic authenticated; a magic works once. */
 static int auth_magic(const struct drm_auth *a);
 
-static void copy_string(char *dst, __kernel_size_t *len, const char *src)
+/* drm_copy_field: as much as fits, the full length reported. */
+static int copy_string(char *dst, __kernel_size_t *len, const char *src)
 {
-    size_t n = strlen(src);
-    if (dst && *len)
-        memcpy(dst, src, n < *len ? n : *len);
+    size_t n = strlen(src), fit = n < *len ? n : *len;
     *len = n;
+    return dst && fit ? copy_to_user((uint64_t)(uintptr_t)dst, src, fit) : 0;
 }
 
 static int get_version(struct drm_version *v)
@@ -1091,9 +1199,9 @@ static int get_version(struct drm_version *v)
     v->version_major = 1;
     v->version_minor = 0;
     v->version_patchlevel = 0;
-    copy_string(v->name, &v->name_len, "chameleon");
-    copy_string(v->date, &v->date_len, "20260929");
-    copy_string(v->desc, &v->desc_len, "Chameleon: KMS on an Android surface");
+    if (copy_string(v->name, &v->name_len, "chameleon") || copy_string(v->date, &v->date_len, "20260929") ||
+        copy_string(v->desc, &v->desc_len, "Chameleon: KMS on an Android surface"))
+        return -EFAULT;
     return 0;
 }
 
@@ -1108,77 +1216,168 @@ static int auth_magic(const struct drm_auth *a)
     return 0;
 }
 
-/* Ioctls only the master may use (DRM_MASTER in 6.8's drm_ioctls[]),
- * refused before their arguments are looked at. */
-static int master_only(unsigned int request)
+/* ---- the ioctl entry (6.8's drm_ioctl) ---- */
+
+static int op_version(struct fake_fd *f, void *d) { (void)f; return get_version(d); }
+static int op_get_cap(struct fake_fd *f, void *d) { (void)f; return get_cap(d); }
+static int op_set_client_cap(struct fake_fd *f, void *d) { return set_client_cap(f, d); }
+static int op_get_magic(struct fake_fd *f, void *d) { return get_magic(f, d); }
+static int op_auth_magic(struct fake_fd *f, void *d) { (void)f; return auth_magic(d); }
+static int op_set_master(struct fake_fd *f, void *d) { (void)d; return set_master(f); }
+static int op_drop_master(struct fake_fd *f, void *d) { (void)d; return drop_master(f); }
+static int op_get_unique(struct fake_fd *f, void *d)
 {
-    switch (request) {
-    case (unsigned int)DRM_IOCTL_AUTH_MAGIC:
-    case (unsigned int)DRM_IOCTL_SET_VERSION:
-    case (unsigned int)DRM_IOCTL_MODE_SETCRTC:
-    case (unsigned int)DRM_IOCTL_MODE_SETPLANE:
-    case (unsigned int)DRM_IOCTL_MODE_CURSOR:
-    case (unsigned int)DRM_IOCTL_MODE_CURSOR2:
-    case (unsigned int)DRM_IOCTL_MODE_SETGAMMA:
-    case (unsigned int)DRM_IOCTL_MODE_SETPROPERTY:
-    case (unsigned int)DRM_IOCTL_MODE_PAGE_FLIP:
-    case (unsigned int)DRM_IOCTL_MODE_DIRTYFB:
-    case (unsigned int)DRM_IOCTL_MODE_OBJ_SETPROPERTY:
-    case (unsigned int)DRM_IOCTL_MODE_ATOMIC:
-    case (unsigned int)DRM_IOCTL_MODE_CREATE_LEASE:
-    case (unsigned int)DRM_IOCTL_MODE_LIST_LESSEES:
-    case (unsigned int)DRM_IOCTL_MODE_GET_LEASE:
-    case (unsigned int)DRM_IOCTL_MODE_REVOKE_LEASE:
-        return 1;
-    }
+    (void)f;
+    ((struct drm_unique *)d)->unique_len = 0; /* a platform device's unique is empty, as vkms' */
     return 0;
 }
+static int op_get_resources(struct fake_fd *f, void *d) { return get_resources(f, d); }
+static int op_get_connector(struct fake_fd *f, void *d) { return get_connector(f, d); }
+static int op_get_encoder(struct fake_fd *f, void *d) { (void)f; return get_encoder(d); }
+static int op_get_crtc(struct fake_fd *f, void *d) { (void)f; return get_crtc(d); }
+static int op_get_plane_resources(struct fake_fd *f, void *d) { return get_plane_resources(f, d); }
+static int op_get_plane(struct fake_fd *f, void *d) { (void)f; return get_plane(d); }
+static int op_obj_get_properties(struct fake_fd *f, void *d) { return obj_get_properties(f, d); }
+static int op_get_property(struct fake_fd *f, void *d) { (void)f; return get_property(d); }
+static int op_get_blob(struct fake_fd *f, void *d) { (void)f; return get_blob(d); }
+static int op_create_blob(struct fake_fd *f, void *d) { return create_blob(f, d); }
+static int op_destroy_blob(struct fake_fd *f, void *d) { return destroy_blob(f, d); }
+static int op_add_fb2(struct fake_fd *f, void *d) { return add_fb2(f, d); }
+static int op_rmfb(struct fake_fd *f, void *d) { return remove_fb(f, *(uint32_t *)d, 1); }
+static int op_closefb(struct fake_fd *f, void *d) { return remove_fb(f, ((struct drm_mode_closefb *)d)->fb_id, 0); }
+static int op_prime_fd_to_handle(struct fake_fd *f, void *d) { return prime_fd_to_handle(f, d); }
+static int op_prime_handle_to_fd(struct fake_fd *f, void *d) { return prime_handle_to_fd(f, d); }
+static int op_gem_close(struct fake_fd *f, void *d) { return gem_close(f, ((struct drm_gem_close *)d)->handle); }
+static int op_atomic(struct fake_fd *f, void *d) { return atomic_commit(f, d); }
+static int op_list_lessees(struct fake_fd *f, void *d)
+{
+    (void)f;
+    struct drm_mode_list_lessees *l = d;
+    if (l->pad)
+        return -EINVAL;
+    l->count_lessees = 0; /* nothing is leased */
+    return 0;
+}
+static int op_noop(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; }
+/* The syncobj ioctls of a driver without DRIVER_SYNCOBJ. */
+static int op_no_syncobj(struct fake_fd *f, void *d) { (void)f; (void)d; return -EOPNOTSUPP; }
 
-int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg)
+#define DRM_CORE_IOCTL_COUNT 0xd1 /* up to DRM_IOCTL_MODE_CLOSEFB */
+#define MASTER 1
+struct ioctl_def {
+    unsigned int cmd;
+    int (*fn)(struct fake_fd *, void *);
+    int flags;
+};
+#define DEF(c, f, fl) [_IOC_NR(c)] = {(unsigned int)(c), (f), (fl)}
+/* What the card answers; core ioctls it doesn't implement are listed with
+ * no function when the kernel needs the master to reach them, so a
+ * non-master file still gets EACCES as on Linux. */
+static const struct ioctl_def k_ioctls[DRM_CORE_IOCTL_COUNT] = {
+    DEF(DRM_IOCTL_VERSION, op_version, 0),
+    DEF(DRM_IOCTL_GET_UNIQUE, op_get_unique, 0),
+    DEF(DRM_IOCTL_GET_MAGIC, op_get_magic, 0),
+    DEF(DRM_IOCTL_GET_CAP, op_get_cap, 0),
+    DEF(DRM_IOCTL_SET_CLIENT_CAP, op_set_client_cap, 0),
+    DEF(DRM_IOCTL_SET_VERSION, NULL, MASTER),
+    DEF(DRM_IOCTL_AUTH_MAGIC, op_auth_magic, MASTER),
+    DEF(DRM_IOCTL_SET_MASTER, op_set_master, 0),
+    DEF(DRM_IOCTL_DROP_MASTER, op_drop_master, 0),
+    DEF(DRM_IOCTL_GEM_CLOSE, op_gem_close, 0),
+    DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, op_prime_handle_to_fd, 0),
+    DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, op_prime_fd_to_handle, 0),
+    DEF(DRM_IOCTL_MODE_GETRESOURCES, op_get_resources, 0),
+    DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, op_get_plane_resources, 0),
+    DEF(DRM_IOCTL_MODE_GETCRTC, op_get_crtc, 0),
+    DEF(DRM_IOCTL_MODE_SETCRTC, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPLANE, op_get_plane, 0),
+    DEF(DRM_IOCTL_MODE_SETPLANE, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_CURSOR, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_SETGAMMA, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_GETENCODER, op_get_encoder, 0),
+    DEF(DRM_IOCTL_MODE_GETCONNECTOR, op_get_connector, 0),
+    DEF(DRM_IOCTL_MODE_ATTACHMODE, op_noop, MASTER),
+    DEF(DRM_IOCTL_MODE_DETACHMODE, op_noop, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPROPERTY, op_get_property, 0),
+    DEF(DRM_IOCTL_MODE_SETPROPERTY, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPROPBLOB, op_get_blob, 0),
+    DEF(DRM_IOCTL_MODE_ADDFB2, op_add_fb2, 0),
+    DEF(DRM_IOCTL_MODE_RMFB, op_rmfb, 0),
+    DEF(DRM_IOCTL_MODE_PAGE_FLIP, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_DIRTYFB, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, op_obj_get_properties, 0),
+    DEF(DRM_IOCTL_MODE_OBJ_SETPROPERTY, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_CURSOR2, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_ATOMIC, op_atomic, MASTER),
+    DEF(DRM_IOCTL_MODE_CREATEPROPBLOB, op_create_blob, 0),
+    DEF(DRM_IOCTL_MODE_DESTROYPROPBLOB, op_destroy_blob, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_CREATE, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_DESTROY, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_WAIT, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_RESET, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_SIGNAL, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_MODE_CREATE_LEASE, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_LIST_LESSEES, op_list_lessees, MASTER),
+    DEF(DRM_IOCTL_MODE_GET_LEASE, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_REVOKE_LEASE, NULL, MASTER),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_QUERY, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_TRANSFER, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_EVENTFD, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_MODE_CLOSEFB, op_closefb, 0),
+};
+
+/* As the kernel: the ioctl is found by number, the argument is copied in
+ * and out by the size the caller declares (the rest zero-filled), and only
+ * then are permission and the handler applied. */
+int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
 {
     static int unknown_warnings, non_master_commits;
-    int ret;
-    pthread_mutex_lock(&g_lock);
-    if (master_only(request) && g_master != f) {
-        if (request == (unsigned int)DRM_IOCTL_MODE_ATOMIC && non_master_commits++ < 5)
-            cham_log("refusing a commit from a file that isn't DRM master (EACCES)");
-        pthread_mutex_unlock(&g_lock);
-        return -EACCES;
-    }
-    switch (request) {
-    case (unsigned int)DRM_IOCTL_VERSION: ret = get_version(arg); break;
-    case (unsigned int)DRM_IOCTL_GET_CAP: ret = get_cap(arg); break;
-    case (unsigned int)DRM_IOCTL_SET_CLIENT_CAP: ret = set_client_cap(f, arg); break;
-    case (unsigned int)DRM_IOCTL_GET_MAGIC: ret = get_magic(f, arg); break;
-    case (unsigned int)DRM_IOCTL_AUTH_MAGIC: ret = auth_magic(arg); break;
-    case (unsigned int)DRM_IOCTL_SET_MASTER: ret = set_master(f); break;
-    case (unsigned int)DRM_IOCTL_DROP_MASTER: ret = drop_master(f); break;
-    case (unsigned int)DRM_IOCTL_GET_UNIQUE: ((struct drm_unique *)arg)->unique_len = 0; ret = 0; break;
-    case (unsigned int)DRM_IOCTL_MODE_GETRESOURCES: ret = get_resources(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETCONNECTOR: ret = get_connector(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETENCODER: ret = get_encoder(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETCRTC: ret = get_crtc(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPLANERESOURCES: ret = get_plane_resources(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPLANE: ret = get_plane(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_OBJ_GETPROPERTIES: ret = obj_get_properties(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPROPERTY: ret = get_property(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPROPBLOB: ret = get_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_CREATEPROPBLOB: ret = create_blob(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_DESTROYPROPBLOB: ret = destroy_blob(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_ADDFB2: ret = add_fb2(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_RMFB: ret = remove_fb(f, *(uint32_t *)arg, 1); break;
-    case (unsigned int)DRM_IOCTL_MODE_CLOSEFB: ret = remove_fb(f, ((struct drm_mode_closefb *)arg)->fb_id, 0); break;
-    case (unsigned int)DRM_IOCTL_PRIME_FD_TO_HANDLE: ret = prime_fd_to_handle(f, arg); break;
-    case (unsigned int)DRM_IOCTL_PRIME_HANDLE_TO_FD: ret = prime_handle_to_fd(f, arg); break;
-    case (unsigned int)DRM_IOCTL_GEM_CLOSE: ret = gem_close(f, ((struct drm_gem_close *)arg)->handle); break;
-    case (unsigned int)DRM_IOCTL_MODE_ATOMIC: ret = f->atomic ? atomic_commit(f, arg) : -EINVAL; break;
-    case (unsigned int)DRM_IOCTL_MODE_LIST_LESSEES: ((struct drm_mode_list_lessees *)arg)->count_lessees = 0; ret = 0; break;
-    default:
+    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE)
+        return -ENOTTY;
+    unsigned int nr = _IOC_NR(cmd);
+    const struct ioctl_def *def = nr < DRM_CORE_IOCTL_COUNT && !(nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END)
+                                      ? &k_ioctls[nr]
+                                      : NULL; /* driver ioctls: this driver has none */
+    if (!def || (!def->fn && !(def->flags & MASTER))) {
         if (unknown_warnings++ < 20)
-            cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", request, _IOC_NR(request));
-        ret = -EINVAL;
-        break;
+            cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
+        return -EINVAL;
     }
-    pthread_mutex_unlock(&g_lock);
+    unsigned int drv_size = _IOC_SIZE(def->cmd), in_size = _IOC_SIZE(cmd), out_size = in_size;
+    if (!(cmd & def->cmd & IOC_IN))
+        in_size = 0;
+    if (!(cmd & def->cmd & IOC_OUT))
+        out_size = 0;
+    unsigned int ksize = in_size > out_size ? in_size : out_size;
+    if (drv_size > ksize)
+        ksize = drv_size;
+    char stack[256], *kdata = ksize <= sizeof stack ? stack : malloc(ksize);
+    if (!kdata)
+        return -ENOMEM;
+    int ret = copy_from_user(kdata, (uint64_t)(uintptr_t)user_arg, in_size);
+    if (!ret) {
+        memset(kdata + in_size, 0, ksize - in_size);
+        pthread_mutex_lock(&g_lock);
+        if ((def->flags & MASTER) && g_master != f) {
+            if (nr == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) && non_master_commits++ < 5)
+                cham_log("refusing a commit from a file that isn't DRM master (EACCES)");
+            ret = -EACCES;
+        } else if (!def->fn) {
+            if (unknown_warnings++ < 20)
+                cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
+            ret = -EINVAL;
+        } else {
+            ret = def->fn(f, kdata);
+        }
+        pthread_mutex_unlock(&g_lock);
+        if (copy_to_user((uint64_t)(uintptr_t)user_arg, kdata, out_size))
+            ret = -EFAULT;
+    }
+    if (kdata != stack)
+        free(kdata);
     return ret;
 }

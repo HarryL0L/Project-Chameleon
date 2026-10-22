@@ -282,6 +282,11 @@ int ioctl(int fd, int request, ...)
     void *arg = va_arg(ap, void *);
     va_end(ap);
 
+    /* DRM ioctls go to the card; every other ioctl passes untouched, at no
+     * cost: the GPU driver's (many per frame) and FIONREAD, which Qt and
+     * D-Bus call on every socket read. On the card the pipe answers those
+     * (TCGETS: ENOTTY as a DRM device; FIONREAD: a byte count where a DRM
+     * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
         struct fake_fd *f = fake_fd_get(fd);
         if (f) {

@@ -1,9 +1,10 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Chameleon's evdev devices against the real kernel's: evdev_conformance.c
-# runs on the host against Chameleon's keyboard and touchscreen and, in the
-# reference VM (refvm.sh), against uinput devices with the same
-# capabilities; the two transcripts must be identical.
+# Chameleon's devices against the real kernel's. evdev_conformance.c runs on
+# the host against Chameleon's keyboard and touchscreen and, in the reference
+# VM (refvm.sh), against uinput devices with the same capabilities;
+# kms_conformance.c runs against Chameleon's card and against vkms. Each pair
+# of transcripts must be identical.
 # Needs what run-host-test.sh needs, plus what refvm.sh needs.
 # CACHE (default ~/.cache/chameleon-refvm) keeps the downloaded kernel.
 set -e
@@ -15,9 +16,14 @@ CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_T
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/*.c -ldl -lpthread \
     -Wl,-soname,libchameleon.so
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
+cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon \
+    -Wl,-soname,libgbm.so
 cc -O1 -g -Wall -Wextra -o "$OUT/probe" shim/test/evdev_conformance.c
+cc -O1 -g -Wall -Wextra -Ishim/include -o "$OUT/kms_probe" shim/test/kms_conformance.c "$OUT/libgbm.so" \
+    -Wl,-rpath,"$OUT"
 mkdir -p "$OUT/vm" "$OUT/runtime" && chmod 700 "$OUT/runtime"
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/probe" shim/test/evdev_conformance.c
+cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/kms_probe" shim/test/kms_conformance.c
 run_host() {
     CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DIR="$OUT/runtime" \
         LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/probe" "$@"
@@ -33,11 +39,31 @@ sed -i '/^@@@ exit/d' "$OUT/kernel.txt"
 # - Chameleon's devices can't be removed yet (no hotplug).
 sed -i -e 's/^revoked poll revents 0x18$/revoked poll revents 0x10/' -e '/^== removal$/,$d' "$OUT/kernel.txt"
 sed -i '/^== removal$/,$d' "$OUT/chameleon.txt"
+failed=
 if diff -u "$OUT/kernel.txt" "$OUT/chameleon.txt" > "$OUT/diff.txt"; then
     echo "PASSED: Chameleon's evdev devices match the kernel's ($(wc -l < "$OUT/kernel.txt") lines)"
 else
-    echo "FAILED: differences from the kernel (- kernel, + Chameleon):"
+    echo "FAILED: evdev differences from the kernel (- kernel, + Chameleon):"
     cat "$OUT/diff.txt"
     [ -z "$KEEP" ] || cp "$OUT/kernel.txt" "$OUT/chameleon.txt" "$KEEP"
-    exit 1
+    failed=1
 fi
+
+CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMELEON_WAIT=0 XDG_RUNTIME_DIR="$OUT/runtime" \
+    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_probe" 2>/dev/null > "$OUT/kms-chameleon.txt"
+sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./kms_probe > "$OUT/kms-kernel.txt"
+grep -q '^@@@ exit 0$' "$OUT/kms-kernel.txt" || { echo "the reference VM run failed:"; cat "$OUT/kms-kernel.txt"; exit 1; }
+sed -i '/^@@@ exit/d' "$OUT/kms-kernel.txt"
+# Known difference: FIONREAD on the card is answered by its pipe (a byte
+# count) instead of ENOTTY, so that this ioctl, frequent on sockets, never
+# pays for a look at the card.
+sed -i 's/^\(FIONREAD  *\)Inappropriate ioctl for device$/\1ok/' "$OUT/kms-kernel.txt"
+if diff -u "$OUT/kms-kernel.txt" "$OUT/kms-chameleon.txt" > "$OUT/kms-diff.txt"; then
+    echo "PASSED: Chameleon's card matches vkms ($(wc -l < "$OUT/kms-kernel.txt") lines)"
+else
+    echo "FAILED: card differences from the kernel (- vkms, + Chameleon):"
+    cat "$OUT/kms-diff.txt"
+    [ -z "$KEEP" ] || cp "$OUT/kms-kernel.txt" "$OUT/kms-chameleon.txt" "$KEEP"
+    failed=1
+fi
+[ -z "$failed" ]
