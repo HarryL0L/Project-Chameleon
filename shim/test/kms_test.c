@@ -390,6 +390,22 @@ int main(void)
     drmModeAtomicAddProperty(req, crtc_id, p_mode, blob);
     CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0, "back to the first mode blob");
     drmModeAtomicFree(req);
+    int fence_pipe[2];
+    if (pipe(fence_pipe) != 0)
+        return 1;
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)fence_pipe[0]);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) == 0, "a commit with an IN_FENCE_FD (sent along with it)");
+    drmModeAtomicFree(req);
+    CHECK(fcntl(fence_pipe[0], F_GETFD) >= 0, "...which stays the caller's");
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    drmModeAtomicAddProperty(req, plane_id, p_fence, 9999);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) != 0 && errno == EINVAL, "IN_FENCE_FD that isn't an open file: EINVAL");
+    drmModeAtomicFree(req);
+    close(fence_pipe[0]);
+    close(fence_pipe[1]);
 
     printf("page flips (presenter at 120 Hz)\n");
     int ok = 1, busy_checked = 0;

@@ -42,6 +42,7 @@ struct caller {
     pid_t pid;
     uid_t uid;
     int broken; /* a callback went unanswered: the connection is out of step */
+    int sent_fd, sent_num; /* an fd that came with the request, and its number in the caller */
 };
 /* The caller of the call running on a thread. A pthread key, not __thread:
  * bionic refuses executables whose TLS segment is aligned below 64 bytes,
@@ -98,6 +99,8 @@ static int callback_answer(struct caller *c, struct cham_msg *m, int *fd_out)
 int card_fd_get(int n)
 {
     struct caller *c = current();
+    if (c && c->sent_fd >= 0 && n == c->sent_num)
+        return fcntl(c->sent_fd, F_DUPFD_CLOEXEC, 0); /* came with the request */
     struct cham_msg m = {CARD_GET_FD, 0, (uint64_t)(int64_t)n, 0};
     int fd = -1;
     if (!c || c->broken || cham_send(c->sock, &m, -1) != 0 || callback_answer(c, &m, &fd) != 0 ||
@@ -255,7 +258,10 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         struct fake_fd *f = file_get(m->id);
         int ret = -EBADF;
         if (f) {
+            c->sent_fd = fd; /* an fd of the caller's this call names (IN_FENCE_FD) */
+            c->sent_num = (int)(m->a >> 32) - 1;
             ret = kms_ioctl(f, (unsigned int)m->a, (void *)(uintptr_t)m->b);
+            c->sent_fd = -1;
             file_put(f);
         }
         answer(c, ret, -1);
@@ -294,7 +300,7 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
 
 static void *conn_main(void *arg)
 {
-    struct caller c = {.sock = (int)(intptr_t)arg};
+    struct caller c = {.sock = (int)(intptr_t)arg, .sent_fd = -1};
     struct ucred cred;
     socklen_t len = sizeof cred;
     if (getsockopt(c.sock, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {

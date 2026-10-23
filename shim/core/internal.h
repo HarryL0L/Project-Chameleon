@@ -148,7 +148,8 @@ uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 enum {
     CARD_OPEN = 1, /* -> a = file id, and the read end of its event pipe */
     CARD_ATTACH,   /* + an fd: -> a = the id of the file it is, or -EBADF */
-    CARD_IOCTL,    /* id = file, a = request, b = the argument's address */
+    CARD_IOCTL,    /* id = file, a = request (+ the number of an fd sent with it << 32,
+                    * plus one), b = the argument's address */
     CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
     CARD_WAYLAND,  /* then a packet with KWin's Wayland socket path; no answer */
     CARD_DONE = 100,
