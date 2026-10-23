@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Private to libchameleon.so. */
+/* Private to libchameleon.so and chameleon-kernel. */
 #ifndef CHAM_INTERNAL_H
 #define CHAM_INTERNAL_H
 
@@ -19,12 +19,18 @@ void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
 /* Waits (briefly) for every pending presenter release fence. */
 void bo_wait_release_fences_locked(void);
-/* An AHardwareBuffer sent by another process (clients.c). */
+/* An AHardwareBuffer sent by another process (clients.c, card.c). */
 AHardwareBuffer *ahb_recv(int sock);
+/* The bo for a buffer another process sent (card.c), one per buffer however
+ * often it arrives (matched by dmabuf). Takes over `b`'s reference; returns
+ * the bo with a reference for the caller, or NULL. */
+struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format);
 void ahb_release(AHardwareBuffer *b);
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
 /* AHardwareBuffer_sendHandleToUnixSocket (the presenter link). */
 int ahb_send(const AHardwareBuffer *b, int sock);
+/* The bo's AHardwareBuffer, as ahb_send (to chameleon-kernel). */
+int bo_send(const struct cham_bo *bo, int sock);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);
@@ -50,9 +56,12 @@ struct cham_msg;
 /* CHAM_INPUT, CHAM_CONFIG (the connector's mode) and CHAM_CLIPBOARD_OFFER
  * for clipboard.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
-/* KWin's Wayland socket, seen when it bind()s it. */
+
+/* ---- wlpath.c: KWin's Wayland socket ---- */
+/* Seen when KWin bind()s it (interpose.c), or told by KWin's process
+ * (card.c); the latest one counts. */
 void input_note_socket(const char *path);
-/* KWin's Wayland socket path, once known (env or bind()); "" if not yet. */
+/* The socket's path, once known (env or bind()); "" if not yet. */
 void input_socket_path(char *out, size_t size);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
@@ -93,10 +102,13 @@ struct gem_handle {
     uint32_t handle;
     struct cham_bo *bo; /* holds a ref */
 };
-/* One open file of the card (struct drm_file): dups and fork share it. */
+/* One open file of the card (struct drm_file): dups, fork and fd passing
+ * share it. */
 struct fake_fd {
+    uint32_t id;      /* card.c's name for it in requests */
+    int refs;         /* card.c: the file list's, and each call in progress */
     dev_t dev;
-    ino_t ino;
+    ino_t ino;        /* the read end the program holds */
     int event_wfd;    /* write end of the pipe the program reads DRM events from */
     pid_t pid;        /* the opener, for SET_MASTER's permission check */
     int master, was_master;
@@ -105,7 +117,7 @@ struct fake_fd {
     int universal_planes, atomic, writeback;
     struct gem_handle *handles; /* under g_lock */
     int nhandles;
-    struct fake_fd *next;     /* interpose.c's list */
+    struct fake_fd *next;     /* card.c's list */
     struct fake_fd *kms_next; /* kms.c's list, under g_lock */
 };
 void kms_init_once(void);
@@ -124,11 +136,41 @@ int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz);
 struct cham_bo *kms_screen_bo_locked(void);
 /* KWin turned its screen off (it wakes on input). */
 int kms_screen_off_locked(void);
-int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg); /* 0 / >=0 or -errno */
+/* `arg` is an address in the calling process. 0 / >=0 or -errno. */
+int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);
+/* A GEM handle in `f` for a buffer its process sent (card.c); 0 if none. */
+uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 
-/* ---- interpose.c ---- */
+/* ---- card.c: the card's files, served to every process ---- */
+#define CHAM_CARD_SOCKET_NAME "chameleon-card" /* in $XDG_RUNTIME_DIR, SOCK_SEQPACKET */
+/* Requests (struct cham_msg type), one at a time per connection, each
+ * answered by CARD_DONE (a = the result, or -errno): */
+enum {
+    CARD_OPEN = 1, /* -> a = file id, and the read end of its event pipe */
+    CARD_ATTACH,   /* + an fd: -> a = the id of the file it is, or -EBADF */
+    CARD_IOCTL,    /* id = file, a = request, b = the argument's address */
+    CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
+    CARD_WAYLAND,  /* then a packet with KWin's Wayland socket path; no answer */
+    CARD_DONE = 100,
+    /* While an ioctl runs the service may ask its caller, as the kernel's
+     * fget and fd_install use the caller's fd table: */
+    CARD_GET_FD,   /* a = the caller's fd number: CARD_FD with a dup of it (a = 0) or a = -EBADF */
+    CARD_PUT_FD,   /* + an fd, a = 1 for close-on-exec: CARD_FD, a = its number in the caller */
+    CARD_FD,
+};
+int card_start(void); /* 0 once it listens */
+/* The process whose ioctl is running on this thread. */
+pid_t card_caller_pid(void);
+uid_t card_caller_uid(void);
+/* copy_from_user / copy_to_user on its memory: 0 or -EFAULT. */
+int card_copy_from(void *to, uint64_t from, size_t n);
+int card_copy_to(uint64_t to, const void *from, size_t n);
+/* fget: our own copy of its fd `n` (the caller closes it), or -EBADF. */
+int card_fd_get(int n);
+/* fd_install: `fd` (still ours) as a new fd of the caller; its number, or -errno. */
+int card_fd_install(int fd, int cloexec);
+
+/* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
 int real_fstat(int fd, struct stat *st);
-/* The open card file `fd` refers to, or NULL. */
-struct fake_fd *fake_fd_get(int fd);
 
 #endif

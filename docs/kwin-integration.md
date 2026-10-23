@@ -12,7 +12,8 @@ Target: KWin 6.7.5 as packaged in
 - `addGpu` → `Session::openRestricted(path)` (noop session = plain `open`)
   → `drmIsKMS(fd)` → `DrmDevice::openWithAuthentication` (`drmGetVersion`,
   GBM device) → `EGL_PLATFORM_GBM_KHR` display.
-- `libchameleon.so` (LD_PRELOAD) fakes that device (libdrm KMS calls), the
+- `chameleon-kernel` serves that device and `libchameleon.so` (LD_PRELOAD)
+  makes `/dev/dri/card0` its node (DRM ioctls go there as system calls), the
   fake `libgbm.so` (LD_LIBRARY_PATH) makes a bo an AHardwareBuffer (fd = the
   gralloc handle's dmabuf fd), and EGL goes through glvnd to the
   `libEGL_chameleon.so` vendor, which forwards to Android's libEGL.

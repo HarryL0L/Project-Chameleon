@@ -51,7 +51,11 @@ flowchart TB
             direction TB
             CORE["KWin compositor<br/>scene · windows · DRM backend"]
             GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
-            KMS["libchameleon.so<br/>fake KMS device · app buffers"]
+            NODE["libchameleon.so<br/>card node · app buffers"]
+        end
+        subgraph KS["chameleon-kernel process: what the kernel would be"]
+            direction TB
+            KMS["fake KMS device<br/>per-file DRM state · page flips"]
             INP["input thread<br/>evdev devices · text · clipboard"]
         end
         GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
@@ -69,11 +73,12 @@ flowchart TB
     CMD --> CORE
     APPS <-->|Wayland| CORE
     APPS -->|EGL / GLES| GLVND
-    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| KMS
+    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| NODE
     CORE -->|EGL / GLES| GLVND --> VEND --> DRV
     CORE -->|buffers| GBM
     GBM -.->|gralloc| DRV
-    CORE -->|atomic commit| KMS
+    CORE -->|"DRM ioctls on /dev/dri/card0"| NODE
+    NODE -->|"system call arguments<br/>(the service reads KWin's memory)"| KMS
     KMS <==>|"Unix socket<br/>frames + fences ⇄ page flips, window size, input"| APP
     APP --> SF
     TOUCH --> APP
@@ -83,15 +88,18 @@ flowchart TB
     classDef kwin fill:#6C4CF1,stroke:#4b32b8,color:#fff
     classDef shim fill:#22B8E6,stroke:#1789ad,color:#06222c
     classDef android fill:#3DDC84,stroke:#2aa862,color:#06220f
-    class KMS,GBM,VEND,INP shim
+    class KMS,GBM,VEND,INP,NODE shim
     class CORE,GLVND,APPS,CMD kwin
     class DRV,APP,SF,TOUCH android
 ```
 
 Purple is KDE/Termux software as shipped, blue is Chameleon's shim, and green
-is Android. KWin and the app talk over one Unix socket. KWin's shim connects
-to `$PREFIX/tmp/chameleon-0`, where a small broker from the app's APK, running
-in Termux, hands the connection to the app.
+is Android. The card, the input devices and the link to the app live in
+`chameleon-kernel`, which `chameleon` starts for the session, as the kernel
+would serve them; KWin reaches the card through its device node. The service
+and the app talk over one Unix socket: it connects to
+`$PREFIX/tmp/chameleon-0`, where a small broker from the app's APK, running in
+Termux, hands the connection to the app.
 
 <details>
 <summary><b>🦎 The Chameleon app</b>: Android side, shows frames and collects input</summary>
@@ -130,12 +138,17 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
 </details>
 
 <details>
-<summary><b>🖥️ libchameleon.so</b>: a fake KMS display device for KWin</summary>
+<summary><b>🖥️ chameleon-kernel</b>: a fake KMS display device</summary>
 
-- Preloaded into `kwin_wayland` only. Opening
-  `/dev/dri/card0` (KWin finds it in udev, like any GPU)
-  returns a pipe that behaves like a DRM card: `stat()` says it's a character
-  device, and every DRM `ioctl` on it is answered in user space.
+- A process `chameleon` starts before the session, like the kernel under
+  any program. `libchameleon.so`, preloaded into `kwin_wayland`, makes
+  `/dev/dri/card0` (KWin finds it in udev, like any GPU) a device node:
+  opening it returns a pipe that behaves like a DRM card, `stat()` says it's
+  a character device, and each DRM `ioctl` goes to the service as the system
+  call's arguments. The service reads and writes the caller's memory itself,
+  as the kernel does, and keeps each open file's state (DRM master, client
+  caps, GEM handles), released when the file's last copy closes, even in a
+  process that died.
 - It offers one connector (with an EDID: "Chameleon", the phone's physical
   size, the app's size and refresh rate as its preferred mode), one CRTC
   and one primary plane, with atomic
@@ -144,8 +157,9 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's
   `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
   vblank keeps KWin running.
-- It also contains the input thread and a crash reporter that logs the last
-  GL/EGL calls and a symbolised backtrace.
+- It also runs the input devices and the input thread, so a KWin that dies
+  takes none of them along. `libchameleon.so` keeps a crash reporter in KWin
+  that logs the last GL/EGL calls and a symbolised backtrace.
 
 Code: [`shim/core/`](shim/core/)
 </details>
@@ -242,7 +256,7 @@ Code: [`shim/core/input.c`](shim/core/input.c), [`shim/core/evdev.c`](shim/core/
 ```mermaid
 sequenceDiagram
     participant A as Chameleon app
-    participant S as libchameleon.so (in KWin)
+    participant S as chameleon-kernel
     participant U as libchameleon_udev.so (KWin's udev monitor)
     participant K as KWin
     A->>S: CONFIG 2340x1080 (rotated)
@@ -432,7 +446,7 @@ AHardwareBuffer and AImageReader support.
 |---|---|
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
-| [`shim/core/`](shim/core/) | `libchameleon.so`: fake KMS device, presenter link, input, screen size, clipboard, crash reporter |
+| [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard; `libchameleon.so`: the card node, app buffers, crash reporter |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |

@@ -13,15 +13,23 @@ CACHE=${CACHE:-$HOME/.cache/chameleon-refvm}
 OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
-cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/*.c -ldl -lpthread \
-    -Wl,-soname,libchameleon.so
+cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/interpose.c \
+    shim/core/clients.c shim/core/crash.c shim/core/ahb.c shim/core/wlpath.c -ldl -lpthread -Wl,-soname,libchameleon.so
+cc $CFLAGS -Ishim/include/libdrm -o "$OUT/chameleon-kernel" shim/core/main.c shim/core/card.c shim/core/kms.c \
+    shim/core/link.c shim/core/evdev.c shim/core/input.c shim/core/keymap.c shim/core/clipboard.c shim/core/text.c \
+    shim/core/ahb.c shim/core/wlpath.c -ldl -lpthread
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon \
     -Wl,-soname,libgbm.so
 cc -O1 -g -Wall -Wextra -o "$OUT/probe" shim/test/evdev_conformance.c
 cc -O1 -g -Wall -Wextra -Ishim/include -o "$OUT/kms_probe" shim/test/kms_conformance.c "$OUT/libgbm.so" \
     -Wl,-rpath,"$OUT"
-mkdir -p "$OUT/vm" "$OUT/runtime" && chmod 700 "$OUT/runtime"
+mkdir -p "$OUT/vm" "$OUT/runtime" "$OUT/runtime-kms" && chmod 700 "$OUT/runtime" "$OUT/runtime-kms"
+# The devices' service, as the launcher starts it (it exits with this
+# script): one with the evdev probe's stub app, one with no app.
+XDG_RUNTIME_DIR="$OUT/runtime" CHAMELEON_SOCKET="$OUT/presenter" "$OUT/chameleon-kernel" $$ 2>/dev/null
+XDG_RUNTIME_DIR="$OUT/runtime-kms" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMELEON_WAIT=0 "$OUT/chameleon-kernel" $$ \
+    2>/dev/null
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/probe" shim/test/evdev_conformance.c
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/kms_probe" shim/test/kms_conformance.c
 run_host() {
@@ -49,7 +57,7 @@ else
     failed=1
 fi
 
-CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMELEON_WAIT=0 XDG_RUNTIME_DIR="$OUT/runtime" \
+CHAMELEON_DRM_PATH="$OUT/card0" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_probe" 2>/dev/null > "$OUT/kms-chameleon.txt"
 sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./kms_probe > "$OUT/kms-kernel.txt"
 grep -q '^@@@ exit 0$' "$OUT/kms-kernel.txt" || { echo "the reference VM run failed:"; cat "$OUT/kms-kernel.txt"; exit 1; }

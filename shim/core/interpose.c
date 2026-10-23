@@ -3,17 +3,19 @@
  * libc entry points libchameleon.so overrides when LD_PRELOADed
  * into kwin_wayland.
  *
- * Opening the fake card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
- * libchameleon_udev.so lists it as a drm device) returns the read end of a
- * pipe: KWin polls and read()s DRM
- * events from it, and every DRM ioctl on it is answered by kms.c. Each open
- * is one file with its own state (DRM master, client caps, GEM handles),
- * shared by its dups, and released once no copy of the pipe's read end is
- * left. stat() and
- * fstat() make it look like a DRM character device; libdrm learns the rest
- * from the card's sysfs entries (shim/udev/sysfs.c). bind() is watched to
- * learn KWin's Wayland socket (input.c), and the constructor hands KWin's
- * children their original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides
+ * The card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
+ * libchameleon_udev.so lists it as a drm device) is served by
+ * chameleon-kernel (card.c), as a device node by the kernel: opening it
+ * returns the read end of a pipe the program polls and read()s DRM events
+ * from, and a DRM ioctl on it is sent there as the system call's
+ * arguments (the service reads and writes our memory itself). Each open is
+ * one file with its own state (DRM master, client caps, GEM handles),
+ * shared by its dups and by other processes it is passed to, and released
+ * once no copy of the pipe's read end is left. stat() and fstat() make it
+ * look like a DRM character device; libdrm learns the rest from the card's
+ * sysfs entries (shim/udev/sysfs.c). bind() is watched to learn KWin's
+ * Wayland socket (wlpath.c), and the constructor hands KWin's children
+ * their original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides
  * sigaction.)
  */
 #define _GNU_SOURCE
@@ -26,12 +28,14 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <xf86drm.h>
 
+#include "../../common/cham_io.h"
 #include "../../common/chameleon_drm.h"
 #include "internal.h"
 
@@ -40,8 +44,6 @@ static const dev_t fake_rdev = (dev_t)((226u << 8) | CHAM_DRM_MINOR);
 /* The overrides of libc symbols below must be exported. */
 #pragma GCC visibility push(default)
 
-static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct fake_fd *g_fake_fds;
 
 #define REAL(name) next_##name
 #define DECLARE_REAL(ret, name, ...)                                   \
@@ -81,50 +83,138 @@ __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
     return REAL(fstat)(fd, st);
 }
 
-/* Files whose every copy is closed (the pipe has no reader left): released
- * as the kernel does on the last close, noticed on the next open or ioctl. */
-static void reap_closed_files(void)
+/* ---- chameleon-kernel ---- */
+
+/* One connection per process, one call at a time (the service learns the
+ * caller from it, so a forked child makes its own). */
+static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_conn = -1;
+static pid_t g_conn_pid;
+
+/* Pipes known to be card files here, and pipes known not to be: pipe inode
+ * numbers aren't reused, so neither answer goes stale. Under g_conn_lock. */
+#define KNOWN 64
+static struct known {
+    dev_t dev;
+    ino_t ino;
+    uint32_t id; /* 0: not the card */
+} g_known[KNOWN];
+static unsigned g_known_next;
+
+static void lock_conn(void) { pthread_mutex_lock(&g_conn_lock); }
+static void unlock_conn(void) { pthread_mutex_unlock(&g_conn_lock); }
+
+__attribute__((constructor)) static void fork_safety(void)
 {
-    struct fake_fd *dead = NULL;
-    pthread_mutex_lock(&g_fd_lock);
-    for (struct fake_fd **p = &g_fake_fds; *p;) {
-        struct pollfd pfd = {(*p)->event_wfd, POLLOUT, 0};
-        if (poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLERR)) {
-            struct fake_fd *f = *p;
-            *p = f->next;
-            f->next = dead;
-            dead = f;
-        } else {
-            p = &(*p)->next;
-        }
+    /* Nobody may hold the connection across fork: the child would inherit it locked. */
+    pthread_atfork(lock_conn, unlock_conn, unlock_conn);
+}
+
+static void disconnect_locked(void)
+{
+    if (g_conn >= 0)
+        close(g_conn);
+    g_conn = -1;
+    memset(g_known, 0, sizeof g_known); /* a new service has new files */
+}
+
+static int connect_locked(void)
+{
+    if (g_conn >= 0 && g_conn_pid == getpid())
+        return g_conn;
+    if (g_conn >= 0) { /* the parent's, inherited: never speak for it */
+        close(g_conn);
+        g_conn = -1;
     }
-    pthread_mutex_unlock(&g_fd_lock);
-    while (dead) {
-        struct fake_fd *f = dead;
-        dead = f->next;
-        kms_file_close(f);
-        close(f->event_wfd);
-        free(f);
+    const char *dir = getenv("XDG_RUNTIME_DIR");
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    if (!dir || snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", dir, CHAM_CARD_SOCKET_NAME) >=
+                    (int)sizeof addr.sun_path)
+        return -1;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        close(s);
+        s = -1;
+    }
+    g_conn = s;
+    g_conn_pid = getpid();
+    return s;
+}
+
+/* Sends a request (with fd, or followed by a bo's AHardwareBuffer) and answers
+ * the service's questions until its CARD_DONE; returns that result, and its
+ * fd in *fd_out. -ENODEV when there is no service. */
+static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo, int *fd_out)
+{
+    if (fd_out)
+        *fd_out = -1;
+    int s = connect_locked();
+    if (s < 0 || cham_send(s, &req, fd) != 0 || (bo && bo_send(bo, s) != 0)) {
+        disconnect_locked();
+        return -ENODEV;
+    }
+    for (;;) {
+        struct cham_msg m;
+        int got = -1;
+        if (cham_recv(s, &m, &got) != 1) {
+            disconnect_locked();
+            return -ENODEV;
+        }
+        if (m.type == CARD_DONE) {
+            if (fd_out)
+                *fd_out = got;
+            else if (got >= 0)
+                close(got);
+            return (int64_t)m.a;
+        }
+        struct cham_msg reply = {CARD_FD, 0, 0, 0};
+        int send_fd = -1;
+        if (m.type == CARD_GET_FD) { /* fget: a copy of our fd */
+            send_fd = (int)(int64_t)m.a;
+            if (send_fd < 0 || fcntl(send_fd, F_GETFD) < 0)
+                reply.a = (uint64_t)(int64_t)-EBADF, send_fd = -1;
+        } else if (m.type == CARD_PUT_FD) { /* fd_install: it arrived close-on-exec */
+            if (got >= 0 && !m.a)
+                fcntl(got, F_SETFD, 0);
+            reply.a = got >= 0 ? (uint64_t)got : (uint64_t)(int64_t)-EMFILE;
+            got = -1; /* the program's now */
+        }
+        if (got >= 0)
+            close(got);
+        if (cham_send(s, &reply, send_fd) != 0) {
+            disconnect_locked();
+            return -ENODEV;
+        }
     }
 }
 
-static struct fake_fd *fake_fd_lookup(int fd)
+static void remember_locked(const struct stat *st, uint32_t id)
+{
+    g_known[g_known_next++ % KNOWN] = (struct known){st->st_dev, st->st_ino, id};
+}
+
+/* The card file `fd` is (its id), or 0. Only a pipe can be one. */
+static uint32_t card_file(int fd)
 {
     struct stat st;
     if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode))
-        return NULL;
-    pthread_mutex_lock(&g_fd_lock);
-    struct fake_fd *f = g_fake_fds;
-    while (f && !(f->dev == st.st_dev && f->ino == st.st_ino))
-        f = f->next;
-    pthread_mutex_unlock(&g_fd_lock);
-    return f;
-}
-
-__attribute__((visibility("hidden"))) struct fake_fd *fake_fd_get(int fd)
-{
-    reap_closed_files();
-    return fake_fd_lookup(fd);
+        return 0;
+    lock_conn();
+    for (int i = 0; i < KNOWN; i++) {
+        if (g_known[i].ino == st.st_ino && g_known[i].dev == st.st_dev) { /* st_ino is never 0 */
+            uint32_t id = g_known[i].id;
+            unlock_conn();
+            return id;
+        }
+    }
+    /* A copy we haven't seen here (inherited, passed): the service knows. */
+    struct cham_msg req = {CARD_ATTACH, 0, 0, 0};
+    int64_t ret = call_locked(req, fd, NULL, NULL);
+    uint32_t id = ret > 0 ? (uint32_t)ret : 0;
+    if (ret != -ENODEV)
+        remember_locked(&st, id);
+    unlock_conn();
+    return id;
 }
 
 static void fake_stat(struct stat *st)
@@ -139,25 +229,50 @@ static void fake_stat(struct stat *st)
 
 static int fake_open(void)
 {
-    kms_init_once();
-    reap_closed_files();
-    int p[2];
-    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
-        return -1;
+    struct cham_msg req = {CARD_OPEN, 0, 0, 0};
+    int fd;
     struct stat st;
-    real_fstat(p[0], &st);
-    struct fake_fd *f = calloc(1, sizeof *f);
-    f->dev = st.st_dev;
-    f->ino = st.st_ino;
-    f->event_wfd = p[1];
-    f->pid = getpid();
-    kms_file_open(f);
-    pthread_mutex_lock(&g_fd_lock);
-    f->next = g_fake_fds;
-    g_fake_fds = f;
-    pthread_mutex_unlock(&g_fd_lock);
-    cham_log("opened fake DRM device %s (fd %d%s)", fake_path(), p[0], f->master ? ", DRM master" : "");
-    return p[0];
+    lock_conn();
+    int64_t ret = call_locked(req, -1, NULL, &fd);
+    if (ret > 0 && fd >= 0 && real_fstat(fd, &st) == 0)
+        remember_locked(&st, (uint32_t)ret);
+    unlock_conn();
+    if (ret <= 0 || fd < 0) {
+        if (fd >= 0)
+            close(fd);
+        cham_log("cannot open the card: %s", ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
+        errno = ret < 0 ? (int)-ret : ENODEV;
+        return -1;
+    }
+    return fd;
+}
+
+/* ---- our gbm's buffers (cham_shim.h) ---- */
+
+uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+{
+    uint32_t id = card_file(fd);
+    if (!id)
+        return 0;
+    struct cham_msg req = {CARD_IMPORT, id, bo->format, 0};
+    lock_conn();
+    int64_t ret = call_locked(req, -1, bo, NULL);
+    unlock_conn();
+    return ret > 0 ? (uint32_t)ret : 0;
+}
+
+int ioctl(int fd, int request, ...); /* ours, below */
+
+void cham_bo_handle_close(int fd, uint32_t handle)
+{
+    struct drm_gem_close c = {.handle = handle};
+    ioctl(fd, (int)DRM_IOCTL_GEM_CLOSE, &c);
+}
+
+/* No app link in this process: buffers here are never shown from here. */
+void link_forget_bo_locked(struct cham_bo *bo)
+{
+    (void)bo;
 }
 
 /* ---- open ---- */
@@ -247,7 +362,7 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 int fstat(int fd, struct stat *st)
 {
     int ret = real_fstat(fd, st);
-    if (ret == 0 && S_ISFIFO(st->st_mode) && fake_fd_lookup(fd))
+    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd))
         fake_stat(st);
     return ret;
 }
@@ -288,14 +403,17 @@ int ioctl(int fd, int request, ...)
      * (TCGETS: ENOTTY as a DRM device; FIONREAD: a byte count where a DRM
      * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
-        struct fake_fd *f = fake_fd_get(fd);
-        if (f) {
-            int ret = kms_ioctl(f, (unsigned int)request, arg);
+        uint32_t id = card_file(fd);
+        if (id) {
+            struct cham_msg req = {CARD_IOCTL, id, (unsigned int)request, (uint64_t)(uintptr_t)arg};
+            lock_conn();
+            int64_t ret = call_locked(req, -1, NULL, NULL);
+            unlock_conn();
             if (ret < 0) {
-                errno = -ret;
+                errno = (int)-ret;
                 return -1;
             }
-            return ret;
+            return (int)ret;
         }
     }
     resolve_ioctl();
@@ -304,8 +422,20 @@ int ioctl(int fd, int request, ...)
 
 /* ---- KWin's Wayland socket ---- */
 
-/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N"; input.c connects
- * to it for the clipboard and the keyboard layout. */
+/* For clients.c here and chameleon-kernel's input thread (input.c), which
+ * connects to it for the clipboard and the keyboard layout. */
+static void note_socket(const char *path)
+{
+    input_note_socket(path);
+    struct cham_msg req = {CARD_WAYLAND, 0, 0, 0};
+    lock_conn();
+    int s = connect_locked();
+    if (s < 0 || cham_send(s, &req, -1) != 0 || send(s, path, strlen(path), MSG_NOSIGNAL) < 0)
+        disconnect_locked();
+    unlock_conn();
+}
+
+/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N". */
 int bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
     resolve_bind();
@@ -321,7 +451,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
         const char *base = strrchr(path, '/');
         base = base ? base + 1 : path;
         if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock / .chameleon */
-            input_note_socket(path);
+            note_socket(path);
     }
     return ret;
 }
@@ -332,7 +462,9 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
  * KWin starts must get Termux's normal Mesa, not this shim. */
 __attribute__((constructor)) static void restore_environment(void)
 {
-    evdev_start(); /* before KWin's libinput looks for devices */
+    const char *socket = getenv("CHAMELEON_WAYLAND_SOCKET"); /* bin/kwin_wayland: KWin won't bind() it */
+    if (socket && *socket == '/')
+        note_socket(socket);
     const char *saved = getenv("CHAMELEON_ORIG_LD_PRELOAD");
     if (saved) {
         if (*saved)

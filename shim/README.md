@@ -5,7 +5,8 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 
 | file | replaces | does |
 |---|---|---|
-| `libchameleon.so` (LD_PRELOAD) | the kernel | fake KMS device at `/dev/dri/card0`: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event |
+| `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event; the input devices, the link to the app and the input thread |
+| `libchameleon.so` (LD_PRELOAD, KWin) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers (`core/clients.c`), crash reporter |
 | `libgbm.so` (LD_LIBRARY_PATH) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, primary node only) inside KWin, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts |
 
@@ -27,8 +28,10 @@ chameleon startplasma-wayland        # a Plasma session
 ```
 
 `chameleon` puts its `bin/` directory first in `PATH`, clears `DISPLAY` /
-`WAYLAND_DISPLAY`, starts the app's broker (which hands KWin's connection to
-the app; log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and runs the command
+`WAYLAND_DISPLAY`, starts the app's broker (which hands `chameleon-kernel`'s
+connection to the app; log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and
+`chameleon-kernel` (the card, input devices and app link for the whole
+session; it exits with the session) and runs the command
 (in a new D-Bus session if there is none). Every `kwin_wayland` started inside - directly, by
 `kwin_wayland_wrapper` or by `startplasma-wayland` - is then
 `bin/kwin_wayland`, which attaches the shim to that one process and runs the

@@ -173,6 +173,9 @@ int main(void)
     result("GETRESOURCES counts", ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &(struct drm_mode_card_res){0}));
     result("GETRESOURCES count_crtcs 4, NULL pointer",
            ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &(struct drm_mode_card_res){.count_crtcs = 4}));
+    result("GETRESOURCES count_crtcs 4, unmapped pointer",
+           ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &(struct drm_mode_card_res){.count_crtcs = 4, .crtc_id_ptr = 16}));
+    result("GETRESOURCES, the argument itself unmapped", ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, (void *)16));
     uint32_t fb1 = framebuffer(fd);
     framebuffer(fd);
     uint32_t ids[4];

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The fake KMS device KWin drives with atomic mode setting.
+ * The fake KMS device KWin drives with atomic mode setting, in
+ * chameleon-kernel (card.c serves it to every process).
  *
  * One connector (DSI-1, the Chameleon app's surface) -> one encoder -> one
  * CRTC -> one primary plane. Everything is answered at the ioctl level, so
@@ -290,29 +291,15 @@ int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz)
 
 /* ---- helpers ---- */
 
-#define U2P(u) ((void *)(uintptr_t)(u))
-
-/* The kernel's copies to and from the caller's memory. In this process a
- * user pointer is memory we can reach; NULL is the one bad address we can
- * tell, and it gets the kernel's EFAULT. */
+/* The kernel's copies to and from the caller's memory (card.c). */
 static int copy_to_user(uint64_t to, const void *from, size_t n)
 {
-    if (!n)
-        return 0;
-    if (!to)
-        return -EFAULT;
-    memcpy(U2P(to), from, n);
-    return 0;
+    return n ? card_copy_to(to, from, n) : 0;
 }
 
 static int copy_from_user(void *to, uint64_t from, size_t n)
 {
-    if (!n)
-        return 0;
-    if (!from)
-        return -EFAULT;
-    memcpy(to, U2P(from), n);
-    return 0;
+    return n ? card_copy_from(to, from, n) : 0;
 }
 
 /* An id list as most getters return it: as many as fit, then the count. */
@@ -668,27 +655,14 @@ static int gem_close(struct fake_fd *f, uint32_t handle)
     return -EINVAL;
 }
 
-/* For libgbm: a gbm device on the card makes a handle for each buffer it
- * creates and closes it when the buffer goes, as Mesa's does. */
-uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+/* Our gbm's buffers: a gbm device on the card makes a handle for each
+ * buffer it creates (GEM_CLOSE closes it), as Mesa's asks its driver. */
+uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo)
 {
-    struct fake_fd *f = fake_fd_get(fd);
-    if (!f)
-        return 0;
     pthread_mutex_lock(&g_lock);
     uint32_t h = handle_for(f, bo);
     pthread_mutex_unlock(&g_lock);
     return h;
-}
-
-void cham_bo_handle_close(int fd, uint32_t handle)
-{
-    struct fake_fd *f = fake_fd_get(fd);
-    if (!f)
-        return;
-    pthread_mutex_lock(&g_lock);
-    gem_close(f, handle);
-    pthread_mutex_unlock(&g_lock);
 }
 
 /* ---- framebuffers ---- */
@@ -759,12 +733,14 @@ static int remove_fb(struct fake_fd *f, uint32_t id, int off_plane)
 
 static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
 {
-    /* cham_bo_from_fd takes the lock itself. */
+    /* Asking the caller and cham_bo_from_fd go without the lock. */
     pthread_mutex_unlock(&g_lock);
-    struct cham_bo *bo = cham_bo_from_fd(p->fd);
+    int fd = card_fd_get(p->fd);
+    struct cham_bo *bo = fd >= 0 ? cham_bo_from_fd(fd) : NULL;
+    if (fd >= 0)
+        close(fd);
     pthread_mutex_lock(&g_lock);
-    struct stat st;
-    if (!bo && real_fstat(p->fd, &st) != 0)
+    if (fd < 0)
         return -EBADF;
     if (!bo)
         return -EINVAL; /* not one of ours, e.g. a client buffer: no direct scanout */
@@ -779,13 +755,20 @@ static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
     struct cham_bo *bo = handle_bo(f, p->handle);
     if (!bo)
         return -ENOENT;
-    p->fd = cham_bo_export_fd(bo);
-    if (p->fd < 0)
+    int fd = cham_bo_export_fd(bo);
+    if (fd < 0)
         return -errno;
-    if (!(p->flags & DRM_CLOEXEC))
-        fcntl(p->fd, F_SETFD, 0); /* close-on-exec only when asked */
+    pthread_mutex_unlock(&g_lock); /* the caller takes it */
+    int ret = card_fd_install(fd, (p->flags & DRM_CLOEXEC) != 0); /* close-on-exec only when asked */
+    pthread_mutex_lock(&g_lock);
+    close(fd);
+    if (ret < 0)
+        return ret;
+    p->fd = ret;
     return 0;
 }
+
+static int g_in_fence = -1; /* our copy of the commit's IN_FENCE_FD, under g_lock */
 
 /* ---- atomic ---- */
 
@@ -830,9 +813,12 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         case P_CRTC_W: s->crtc_w = (uint32_t)v; return 0;
         case P_CRTC_H: s->crtc_h = (uint32_t)v; return 0;
         case P_IN_FENCE_FD:
-            if ((int64_t)v >= 0 && fcntl((int)v, F_GETFD) < 0)
+            if (g_in_fence >= 0)
+                close(g_in_fence);
+            g_in_fence = (int64_t)v >= 0 ? card_fd_get((int)v) : -1;
+            if (g_in_fence < 0 && (int64_t)v >= 0)
                 return -EINVAL; /* not an open file */
-            s->in_fence = (int64_t)(int32_t)v;
+            s->in_fence = g_in_fence;
             return 0;
         }
         return -EINVAL;
@@ -903,7 +889,7 @@ int kms_screen_off_locked(void)
     return g_screen_off;
 }
 
-static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
+static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (!f->atomic)
         return -EINVAL;
@@ -1032,6 +1018,15 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     return 0;
 }
 
+static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
+{
+    int ret = commit(f, a);
+    if (g_in_fence >= 0)
+        close(g_in_fence); /* the caller's fence stays the caller's */
+    g_in_fence = -1;
+    return ret;
+}
+
 /* ---- misc ---- */
 
 static int get_cap(struct drm_get_cap *c)
@@ -1062,8 +1057,9 @@ static int get_cap(struct drm_get_cap *c)
  * ("broken atomic modeset userspace"). */
 static int comm_starts_with_x(void)
 {
-    char comm[32] = "";
-    FILE *fp = fopen("/proc/self/comm", "re");
+    char comm[32] = "", path[64];
+    snprintf(path, sizeof path, "/proc/%d/comm", (int)card_caller_pid());
+    FILE *fp = fopen(path, "re");
     if (fp) {
         if (!fgets(comm, sizeof comm, fp))
             comm[0] = 0;
@@ -1147,7 +1143,7 @@ void kms_file_close(struct fake_fd *f)
  * that opened it, or anyone with CAP_SYS_ADMIN (root here). */
 static int master_perm(const struct fake_fd *f)
 {
-    return (f->was_master && f->pid == getpid()) || geteuid() == 0 ? 0 : -EACCES;
+    return (f->was_master && f->pid == card_caller_pid()) || card_caller_uid() == 0 ? 0 : -EACCES;
 }
 
 static int set_master(struct fake_fd *f)

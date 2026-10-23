@@ -130,12 +130,27 @@ static int host_recv(int sock, AHardwareBuffer **out)
     *out = b;
     return 0;
 }
-/* Stands in for the AHardwareBuffer packet that follows BUFFER_ADD. */
+/* ...and its sending side: the description and the memfd. */
+static int host_send_desc(const ahb_desc *d, int fd, int sock)
+{
+    struct iovec iov = {.iov_base = (void *)d, .iov_len = sizeof *d};
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    memset(&control, 0, sizeof control);
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &fd, sizeof(int));
+    return sendmsg(sock, &mh, MSG_NOSIGNAL) == (ssize_t)sizeof *d ? 0 : -1;
+}
 static int host_send(const AHardwareBuffer *b, int sock)
 {
-    (void)b;
-    char packet[16] = "fake-ahb";
-    return send(sock, packet, sizeof packet, MSG_NOSIGNAL) == (ssize_t)sizeof packet ? 0 : -1;
+    return host_send_desc(&b->desc, b->nh->data[0], sock);
 }
 static int ahb_load(void)
 {
@@ -226,6 +241,18 @@ int ahb_send(const AHardwareBuffer *b, int sock)
     return ahb_load() && ahb.send_handle ? ahb.send_handle(b, sock) : -1;
 }
 
+int bo_send(const struct cham_bo *bo, int sock)
+{
+#ifdef CHAM_HOST_TEST
+    /* Also the test driver's buffers (gbm surfaces), which aren't ours. */
+    ahb_desc d = {.width = bo->width, .height = bo->height, .layers = 1, .format = ahb_format(bo->format),
+                  .stride = bo->stride / 4};
+    return host_send_desc(&d, bo->dmabuf_fd, sock);
+#else
+    return ahb_send(bo->ahb, sock);
+#endif
+}
+
 AHardwareBuffer *ahb_recv(int sock)
 {
     AHardwareBuffer *b = NULL;
@@ -250,6 +277,35 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
     *dev = st.st_dev;
     *ino = st.st_ino;
     return 0;
+}
+
+static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t format);
+
+struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
+{
+    dev_t dev;
+    ino_t ino;
+    if (!cham_format_supported(format) || ahb_dmabuf_identity(b, &dev, &ino) != 0) {
+        ahb.release(b);
+        return NULL;
+    }
+    pthread_mutex_lock(&g_lock);
+    for (struct cham_bo *bo = g_bos; bo; bo = bo->next) {
+        if (bo->dmabuf_dev == dev && bo->dmabuf_ino == ino) {
+            bo_ref_locked(bo);
+            pthread_mutex_unlock(&g_lock);
+            ahb.release(b); /* already known */
+            return bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    ahb_desc d;
+    ahb.describe(b, &d);
+    struct cham_bo *bo = bo_new(b, ahb.get_native_handle(b), d.width, d.height, d.stride * 4, format);
+    if (!bo)
+        ahb.release(b);
+    return bo;
 }
 
 /* A bo for `buffer` (whose reference it takes over on success). */

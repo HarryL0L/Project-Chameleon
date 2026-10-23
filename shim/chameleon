@@ -8,16 +8,18 @@
 #   chameleon startplasma-wayland       # a Plasma session
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
-# Every kwin_wayland started inside - directly, by kwin_wayland_wrapper or by
-# startplasma-wayland - goes through bin/kwin_wayland, which attaches the shim
-# to KWin alone. The rest of the session gets only libchameleon_udev.so, its
-# udev: Chameleon's devices and working monitors.
+# chameleon-kernel serves the card, the input devices and the link to the app
+# for the whole session. Every kwin_wayland started inside - directly, by
+# kwin_wayland_wrapper or by startplasma-wayland - goes through
+# bin/kwin_wayland, which attaches the shim to KWin alone. The rest of the
+# session gets only libchameleon_udev.so, its udev: Chameleon's devices and
+# working monitors.
 set -e
 SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$1" in
 "" | -h | --help)
-    sed -n '2,14s/^# \{0,1\}//p' "$0"
+    sed -n '2,16s/^# \{0,1\}//p' "$0"
     exit 0
     ;;
 --install)
@@ -83,5 +85,13 @@ export CHAMELEON_SOCKET=${CHAMELEON_SOCKET:-$PREFIX/tmp/chameleon-0}
 CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
     /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET" \
     >"$XDG_RUNTIME_DIR/chameleon-broker.log" 2>&1 &
+
+# The card, the input devices and the link to the app, as the kernel would
+# be (shim/core/main.c): it answers before the command starts, and exits
+# with this process too.
+if ! env -u LD_PRELOAD -u LD_LIBRARY_PATH "$SHIM_DIR/chameleon-kernel" "$$"; then
+    echo "chameleon: chameleon-kernel didn't start" >&2
+    exit 1
+fi
 
 exec "$@"

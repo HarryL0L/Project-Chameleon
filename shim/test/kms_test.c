@@ -2,8 +2,8 @@
 /*
  * Desktop test for the fake KMS device, using the *real* libdrm the way
  * KWin 6.7's DRM backend does. Run through shim/test/run-host-test.sh, which
- * builds libchameleon.so with CHAM_HOST_TEST (memfd instead of
- * AHardwareBuffer) and LD_PRELOADs it.
+ * builds chameleon-kernel and libchameleon.so with CHAM_HOST_TEST (memfd
+ * instead of AHardwareBuffer), starts the one and LD_PRELOADs the other.
  *
  * A stub presenter thread plays the Chameleon app: it reports a
  * 1080x1800 @ 120 Hz surface and answers each PRESENT with RELEASE and a
@@ -22,6 +22,8 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -138,6 +140,16 @@ static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, u
     }
     drmModeFreeObjectProperties(props);
     return id;
+}
+
+static volatile int g_stop_calls;
+
+static void *calls_main(void *arg) /* a thread in card calls while another forks */
+{
+    int fd = (int)(intptr_t)arg;
+    while (!g_stop_calls)
+        drmModeFreeResources(drmModeGetResources(fd));
+    return NULL;
 }
 
 static int g_flips;
@@ -388,7 +400,7 @@ int main(void)
         drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)-1);
         if (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0)
             ok = 0;
-        if (!busy_checked) {
+        if (!busy_checked && i == 3) { /* the first flip after a modeset may complete at once */
             busy_checked = 1;
             CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0 &&
                       errno == EBUSY,
@@ -531,6 +543,90 @@ int main(void)
     int fd4 = open(dev_path, O_RDWR | O_CLOEXEC);
     CHECK(fd4 >= 0 && drmIsMaster(fd4), "after the master closed, a new open becomes master");
     close(fd4);
+
+    printf("other processes (chameleon-kernel)\n");
+    int fda = open(dev_path, O_RDWR | O_CLOEXEC);
+    struct gbm_device *gbm2 = gbm_create_device(fda);
+    struct gbm_bo *bo2 = gbm2 ? gbm_bo_create(gbm2, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT) : NULL;
+    int dmabuf2 = bo2 ? gbm_bo_get_fd(bo2) : -1;
+    uint32_t pitch = bo2 ? gbm_bo_get_stride(bo2) : 0;
+    pid_t pid = fork();
+    if (pid == 0) { /* the file and the dmabuf, inherited */
+        uint32_t h = 0, fb = 0, handles[4] = {0}, pitches[4] = {pitch}, offsets[4] = {0};
+        int ok = drmPrimeFDToHandle(fda, dmabuf2, &h) == 0 && h;
+        handles[0] = h;
+        ok = ok && drmModeAddFB2(fda, 64, 64, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0) == 0;
+        _exit(ok ? 0 : 1);
+    }
+    int status = -1;
+    waitpid(pid, &status, 0);
+    CHECK(dmabuf2 >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "a child imports a dmabuf on the card file it inherited and adds a framebuffer");
+    struct drm_mode_card_res bad = {.count_crtcs = 1, .crtc_id_ptr = 16};
+    CHECK(drmIoctl(fda, DRM_IOCTL_MODE_GETRESOURCES, &bad) != 0 && errno == EFAULT,
+          "a bad pointer gets EFAULT, as from the kernel");
+
+    CHECK(drmDropMaster(fda) == 0, "drop master for a child to take");
+    int ready[2];
+    if (pipe(ready) != 0)
+        return 1;
+    pid = fork();
+    if (pid == 0) {
+        int c = open(dev_path, O_RDWR | O_CLOEXEC);
+        char m = c >= 0 && drmIsMaster(c) ? 'm' : '-';
+        if (write(ready[1], &m, 1) != 1)
+            _exit(1);
+        for (;;)
+            pause();
+    }
+    char m = 0;
+    if (read(ready[0], &m, 1) != 1)
+        m = 0;
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    CHECK(m == 'm' && drmSetMaster(fda) == 0 && drmIsMaster(fda),
+          "a child became master; once it is killed the master is free at once");
+    close(ready[0]);
+    close(ready[1]);
+
+    pthread_t calls;
+    pthread_create(&calls, NULL, calls_main, (void *)(intptr_t)fda);
+    int forks_ok = 0;
+    for (int i = 0; i < 100; i++) {
+        pid = fork();
+        if (pid == 0) {
+            alarm(5); /* a deadlock ends as SIGALRM */
+            drmModeRes *r = drmModeGetResources(fda);
+            _exit(r && r->count_crtcs == 1 ? 0 : 1);
+        }
+        status = -1;
+        waitpid(pid, &status, 0);
+        forks_ok += WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    g_stop_calls = 1;
+    pthread_join(calls, NULL);
+    CHECK(forks_ok == 100, "fork while another thread is in card calls: the child's calls work (%d of 100)", forks_ok);
+
+    /* Last: chameleon-kernel goes away (its pid from the card socket). */
+    struct sockaddr_un kaddr = {.sun_family = AF_UNIX};
+    snprintf(kaddr.sun_path, sizeof kaddr.sun_path, "%s/chameleon-card", getenv("XDG_RUNTIME_DIR"));
+    int ks = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    struct ucred cred = {0};
+    socklen_t clen = sizeof cred;
+    int got = connect(ks, (struct sockaddr *)&kaddr, sizeof kaddr) == 0 &&
+              getsockopt(ks, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 && cred.pid > 0;
+    close(ks);
+    if (got)
+        kill(cred.pid, SIGKILL);
+    usleep(100000);
+    struct pollfd pfd = {fda, POLLIN, 0};
+    CHECK(got && drmModeGetResources(fda) == NULL && errno == ENODEV,
+          "chameleon-kernel gone: the card answers ENODEV, as an unplugged device");
+    CHECK(poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLHUP), "...and its event pipe hangs up");
+    close(dmabuf2);
+    gbm_bo_destroy(bo2);
+    gbm_device_destroy(gbm2);
+    close(fda);
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

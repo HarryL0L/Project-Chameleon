@@ -1,9 +1,9 @@
 #!/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Builds libchameleon.so + libgbm.so for the desktop (memfd instead of
-# AHardwareBuffer) and runs kms_test.c against the fake device with the
-# system's real libdrm, and the input and output paths against a real Wayland
-# server.
+# Builds chameleon-kernel, libchameleon.so and libgbm.so for the desktop
+# (memfd instead of AHardwareBuffer) and runs kms_test.c against the fake
+# device with the system's real libdrm, and the input and output paths
+# against a real Wayland server.
 # Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev, libudev-dev, libinput-dev.
 set -e
 cd "$(dirname "$0")/../.."
@@ -13,13 +13,25 @@ if [ -z "$OUT" ]; then
 fi
 mkdir -p "$OUT"
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
-cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/*.c -ldl -lpthread \
+LIB_SRC="shim/core/interpose.c shim/core/clients.c shim/core/crash.c shim/core/ahb.c shim/core/wlpath.c"
+KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
+cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" $LIB_SRC -ldl -lpthread \
     -Wl,-soname,libchameleon.so
+cc $CFLAGS -Ishim/include/libdrm -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl -lpthread
+# A test's chameleon-kernel, as the launcher starts one for a session: it
+# returns once it answers, and exits with this script. Each test has its own
+# runtime directory (the service's sockets) and presenter socket.
+start_kernel() {
+    mkdir -p "$1" && chmod 700 "$1"
+    XDG_RUNTIME_DIR="$1" CHAMELEON_SOCKET="$2" CHAMELEON_WAIT=${3:-30} "$OUT/chameleon-kernel" $$
+}
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon \
     -Wl,-soname,libgbm.so
 cc $CFLAGS -Ishim/include -o "$OUT/kms_test" shim/test/kms_test.c "$OUT/libgbm.so" $(pkg-config --libs libdrm) -lpthread \
     -Wl,-rpath,"$OUT"
-CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" CHAMELEON_WAIT=5 \
+start_kernel "$OUT/runtime-kms" "$OUT/presenter" 5
+CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
@@ -29,12 +41,12 @@ cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles
 "$OUT/glsl_fix_test"
 cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config --cflags --libs wayland-server)
 cc $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
-mkdir -p "$OUT/runtime" && chmod 700 "$OUT/runtime"
+start_kernel "$OUT/runtime" "$OUT/presenter-input"
 CHAMELEON_DRM_PATH="$OUT/card1" CHAMELEON_SOCKET="$OUT/presenter-input" XDG_RUNTIME_DIR="$OUT/runtime" \
     CHAMELEON_IME="$OUT/chameleon-ime" LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/input_test"
 # ...or, once something reads it, to the evdev touchscreen, through real libinput.
 cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(pkg-config --cflags --libs libinput libudev libdrm)
-mkdir -p "$OUT/runtime-ev" && chmod 700 "$OUT/runtime-ev"
+start_kernel "$OUT/runtime-ev" "$OUT/presenter-evdev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
@@ -49,8 +61,9 @@ printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' "$OUT
     > "$OUT/chameleon-vendor.json"
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" "$OUT/vendor_test"
+start_kernel "$OUT/runtime-vendor" "$OUT/presenter-none" 0
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
-    CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" \
+    CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" XDG_RUNTIME_DIR="$OUT/runtime-vendor" \
     CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_KWIN=1 \
     CHAMELEON_ANDROID_NATIVEWINDOW="$OUT/fake_android_gl.so" CHAMELEON_ANDROID_MEDIANDK="$OUT/fake_android_gl.so" \
     VENDOR_TEST_GBM="$OUT/libgbm.so" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
