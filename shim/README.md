@@ -111,6 +111,12 @@ screen keeps its first size instead of following the app's window).
   their buffers are registered with KWin's shim (`core/clients.c`) so KWin
   can import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
+- EGL is reported as 1.5 even where the driver says 1.4 (Mali): Android's
+  libEGL has every 1.5 function for any driver since Android 10, mapped to
+  the KHR ones, and libepoxy users (KWin 6.8's fence waits) need a 1.5
+  display. 1.5 features a driver lacks are still missing (Mali:
+  `EGL_KHR_gl_texture_3D_image`, `EGL_KHR_cl_event2`) and fail with an EGL
+  error.
 - A gbm buffer whose dmabuf is still held (KWin 6.8 keeps only the fd) stays
   usable after `gbm_bo_destroy`, as in the kernel, until the kernel's count
   of the dmabuf's references (fdinfo) drops to the buffer's own; on kernels

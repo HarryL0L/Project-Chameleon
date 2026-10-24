@@ -145,7 +145,11 @@ int main(void)
     EGLDisplay dpy = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
     CHECK(dpy != EGL_NO_DISPLAY, "surfaceless display");
     EGLint major = 0, minor = 0;
-    CHECK(eglInitialize(dpy, &major, &minor) && major == 1, "eglInitialize (EGL %d.%d)", major, minor);
+    CHECK(eglInitialize(dpy, &major, &minor) && major == 1 && minor == 5,
+          "eglInitialize: EGL %d.%d over the driver's 1.4 (Android's libEGL has the 1.5 functions)", major, minor);
+    const char *version = eglQueryString(dpy, EGL_VERSION);
+    CHECK(version && strncmp(version, "1.5 ", 4) == 0, "EGL_VERSION '%s'", version ? version : "?");
+    CHECK(eglWaitSync(dpy, (EGLSync)1, 0) == EGL_TRUE, "eglWaitSync reaches the driver");
     const char *vendor = eglQueryString(dpy, EGL_VENDOR);
     CHECK(vendor && strcmp(vendor, "fake Android") == 0, "display belongs to the Android driver");
     const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);

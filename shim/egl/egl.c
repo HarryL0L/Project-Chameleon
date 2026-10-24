@@ -88,13 +88,47 @@ FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
-FWD(EGLBoolean, eglInitialize, (EGLDisplay d, EGLint *major, EGLint *minor), (d, major, minor), EGL_FALSE)
 FWD(EGLBoolean, eglQueryContext, (EGLDisplay d, EGLContext c, EGLint a, EGLint *v), (d, c, a, v), EGL_FALSE)
 FWD(EGLBoolean, eglReleaseThread, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitClient, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitGL, (void), (), EGL_FALSE)
 FWD(EGLBoolean, eglWaitNative, (EGLint e), (e), EGL_FALSE)
 FWD(EGLBoolean, eglWaitSync, (EGLDisplay d, EGLSync s, EGLint f), (d, s, f), EGL_FALSE)
+
+/* ---- version ----
+ * EGL 1.5. Android reports its driver's version (Mali: 1.4), but since
+ * Android 10 its libEGL has every EGL 1.5 entry point for any driver, mapped
+ * to the KHR functions where the driver is 1.4 (eglWaitSync ->
+ * eglWaitSyncKHR, eglCreateSync -> eglCreateSyncKHR, ...), and this layer
+ * forwards them. Programs that resolve core 1.5 functions through libepoxy
+ * (KWin 6.8's eglWaitSync) only get them from a 1.5 display, as on Mesa.
+ * What a 1.4 driver may still lack shows in the extension string as before
+ * (Mali: EGL_KHR_gl_texture_3D_image, EGL_KHR_cl_event2). */
+
+EGLAPI EGLBoolean EGLAPIENTRY eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor)
+{
+    REAL(EGLBoolean, eglInitialize, (EGLDisplay, EGLint *, EGLint *))
+    CHAM_NOTE_CALL("eglInitialize");
+    EGLint ma = 0, mi = 0;
+    if (!p_eglInitialize || !p_eglInitialize(d, &ma, &mi))
+        return EGL_FALSE;
+    if (ma == 1 && mi < 5)
+        mi = 5;
+    if (major)
+        *major = ma;
+    if (minor)
+        *minor = mi;
+    return EGL_TRUE;
+}
+
+static const char *version_string(const char *android)
+{
+    static char version[96];
+    if (!android || strncmp(android, "1.", 2) != 0 || android[2] >= '5')
+        return android;
+    snprintf(version, sizeof version, "1.5 Chameleon (Android: %s)", android);
+    return version;
+}
 
 /* ---- contexts ----
  * KWin asks for robust access (+ lose-context-on-reset) and high priority.
@@ -424,6 +458,8 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
     if (name == EGL_VENDOR && cham_wl_vendor_string())
         return cham_wl_vendor_string();
     const char *s = p_eglQueryString ? p_eglQueryString(dpy, name) : NULL;
+    if (name == EGL_VERSION)
+        return version_string(s);
     if (name != EGL_EXTENSIONS || !s)
         return s;
 

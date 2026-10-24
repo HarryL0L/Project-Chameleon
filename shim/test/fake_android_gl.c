@@ -42,7 +42,7 @@ API EGLBoolean eglInitialize(EGLDisplay d, EGLint *major, EGLint *minor)
     if (major)
         *major = 1;
     if (minor)
-        *minor = 5;
+        *minor = 4; /* as Mali */
     return d == k_display;
 }
 API EGLint eglGetError(void) { return EGL_SUCCESS; }
@@ -57,7 +57,7 @@ API const char *eglQueryString(EGLDisplay d, EGLint name)
     case EGL_VENDOR:
         return "fake Android";
     case EGL_VERSION:
-        return "1.5 fake";
+        return "1.4 Android META-EGL";
     case EGL_CLIENT_APIS:
         return "OpenGL_ES";
     }
@@ -283,6 +283,13 @@ API EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface surface, EGLint attribut
         return EGL_FALSE;
     return EGL_TRUE;
 }
+/* Android's libEGL: the EGL 1.5 entry point, even on a 1.4 driver. */
+API EGLBoolean eglWaitSync(EGLDisplay d, EGLSync s, EGLint flags)
+{
+    (void)flags;
+    return d == k_display && s != EGL_NO_SYNC;
+}
+
 API EGLBoolean eglDestroyContext(EGLDisplay d, EGLContext c)
 {
     (void)d, (void)c;
