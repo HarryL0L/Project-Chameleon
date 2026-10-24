@@ -482,6 +482,19 @@ int ioctl(int fd, int request, ...)
      * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
         uint32_t id = card_file(fd);
+        struct drm_prime_handle prime;
+        if (id && (unsigned int)request == DRM_IOCTL_PRIME_FD_TO_HANDLE && read_own(&prime, (uint64_t)(uintptr_t)arg,
+                                                                                     sizeof prime) == 0) {
+            /* A dmabuf of a buffer this process allocated, as the kernel finds
+             * its own: the service gets the buffer itself (it can't rebuild one
+             * from a dmabuf), and gives the same handle each time. */
+            struct cham_bo *bo = cham_bo_from_fd(prime.fd);
+            uint32_t handle = bo ? cham_bo_handle_open(bo, fd) : 0;
+            if (handle) {
+                ((struct drm_prime_handle *)arg)->handle = handle;
+                return 0;
+            }
+        }
         if (id) {
             struct cham_msg req = {CARD_IOCTL, id, (unsigned int)request, (uint64_t)(uintptr_t)arg};
             int fence = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fence(fd, arg) : -1;

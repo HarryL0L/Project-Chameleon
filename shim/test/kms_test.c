@@ -192,6 +192,17 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
     g_flips++;
 }
 
+/* This process's fds of the file with inode `ino`. */
+static int fds_of(ino_t ino)
+{
+    int n = 0;
+    struct stat st;
+    for (int fd = 0; fd < 1024; fd++)
+        if (fstat(fd, &st) == 0 && st.st_ino == ino && !S_ISFIFO(st.st_mode) && !S_ISCHR(st.st_mode))
+            n++;
+    return n;
+}
+
 static void flip_to(int fd, uint32_t plane_id, uint32_t p_fb, uint32_t fb)
 {
     drmModeAtomicReq *req = drmModeAtomicAlloc();
@@ -362,6 +373,41 @@ int main(void)
     uint32_t h;
     CHECK(drmPrimeFDToHandle(fd, foreign, &h) != 0, "foreign dmabuf rejected (no direct scanout)");
     close(foreign);
+    /* As in the kernel, a dmabuf keeps its buffer after gbm_bo_destroy
+     * (KWin 6.8 keeps only the fd), until nothing holds it any more. */
+    {
+        struct gbm_bo *bo = gbm_bo_create(gbm, 256, 256, DRM_FORMAT_XBGR8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        uint32_t stride = bo ? gbm_bo_get_stride(bo) : 0, kept = 0;
+        int dmabuf = bo ? gbm_bo_get_fd(bo) : -1;
+        struct stat st = {0};
+        fstat(dmabuf, &st);
+        if (bo)
+            gbm_bo_destroy(bo);
+        uint32_t handles[4] = {0}, pitches[4] = {stride}, offsets[4] = {0}, fb = 0;
+        int ok = drmPrimeFDToHandle(fd, dmabuf, &handles[0]) == 0 && handles[0];
+        ok = ok && drmModeAddFB2(fd, 256, 256, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &fb, 0) == 0 &&
+             drmModeRmFB(fd, fb) == 0;
+        CHECK(ok, "after gbm_bo_destroy, its dmabuf still gives a handle and a framebuffer");
+        uint32_t again = 0;
+        CHECK(drmPrimeFDToHandle(fd, dmabuf, &again) == 0 && again == handles[0], "...the same handle again (%u, %u)",
+              handles[0], again);
+        int exported = -1;
+        struct stat est = {0};
+        CHECK(drmPrimeHandleToFD(fd, handles[0], DRM_CLOEXEC, &exported) == 0 && fstat(exported, &est) == 0 &&
+                  est.st_ino == st.st_ino,
+              "...exported again through the card, the same dmabuf");
+        if (exported >= 0)
+            close(exported);
+        drmCloseBufferHandle(fd, handles[0]);
+        kept = (uint32_t)fds_of(st.st_ino);
+        close(dmabuf);
+        struct gbm_bo *next = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING); /* frees the rest */
+        if (next)
+            gbm_bo_destroy(next);
+        CHECK(kept > 1 && fds_of(st.st_ino) == 0, "freed once its last fd is closed (%u fds while held, %d after)", kept,
+              fds_of(st.st_ino));
+    }
+
     printf("modeset\n");
     uint32_t blob = 0;
     CHECK(drmModeCreatePropertyBlob(fd, &mode, sizeof mode, &blob) == 0, "mode blob %u", blob);

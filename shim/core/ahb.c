@@ -8,6 +8,7 @@
  * Any dup of that dmabuf identifies the buffer through (st_dev, st_ino).
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -282,6 +283,105 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
 static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, uint32_t width, uint32_t height,
                               uint32_t stride, uint32_t format);
 
+/* ---- buffers whose dmabuf outlives them ----
+ * As in the kernel, a dmabuf someone still holds keeps its buffer: KWin 6.8
+ * destroys each gbm_bo right after taking its fd, then imports the fd. The
+ * AHardwareBuffer can't be rebuilt from a dmabuf, so a buffer this process
+ * allocated and handed out stays (refs 0) while its dmabuf has more
+ * references than the buffer holds itself: the kernel's own count
+ * (fdinfo "count:", every process, mapping and driver import), or where the
+ * kernel shows none, the fds of this process. */
+
+/* The kernel's reference count of the dmabuf `fd` is, or -1. */
+static int fdinfo_count(int fd)
+{
+    char path[64], buf[512];
+    snprintf(path, sizeof path, "/proc/self/fdinfo/%d", fd);
+    int f = open(path, O_RDONLY | O_CLOEXEC);
+    if (f < 0)
+        return -1;
+    ssize_t n = read(f, buf, sizeof buf - 1);
+    close(f);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+    const char *c = strstr(buf, "\ncount:");
+    return c ? atoi(c + 7) : -1;
+}
+
+/* This process's fds of the file (dev, ino). */
+static int fds_of(dev_t dev, ino_t ino)
+{
+    int dfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *d = dfd >= 0 ? fdopendir(dfd) : NULL;
+    if (!d) {
+        if (dfd >= 0)
+            close(dfd);
+        return -1;
+    }
+    int n = 0;
+    struct dirent *e;
+    struct stat st;
+    while ((e = readdir(d))) {
+        int fd = atoi(e->d_name);
+        if (e->d_name[0] != '.' && fd != dfd && real_fstat(fd, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static int dmabuf_refs(const struct cham_bo *bo)
+{
+    int n = fdinfo_count(bo->dmabuf_fd);
+    static int logged;
+    if (!logged++)
+        cham_log("buffers: a handed-out dmabuf keeps its buffer while %s", n >= 0 ? "the kernel counts other references"
+                                                                         : "fds of this process refer to it");
+    return n >= 0 ? n : fds_of(bo->dmabuf_dev, bo->dmabuf_ino);
+}
+
+/* The references the buffer holds itself: our dup and the handle's fds of
+ * the same dmabuf. Counted, not measured: right after allocating, Android's
+ * allocator may still hold one more for a moment. */
+static int own_refs(const struct cham_bo *bo)
+{
+    const native_handle *nh = ahb.get_native_handle(bo->ahb);
+    int n = 1;
+    struct stat st;
+    for (int i = 0; nh && i < nh->numFds; i++)
+        if (real_fstat(nh->data[i], &st) == 0 && st.st_dev == bo->dmabuf_dev && st.st_ino == bo->dmabuf_ino)
+            n++;
+    return n;
+}
+
+static void bo_free_locked(struct cham_bo *bo)
+{
+    link_forget_bo_locked(bo);
+    if (bo->release_fence >= 0)
+        close(bo->release_fence);
+    close(bo->dmabuf_fd);
+    if (bo->release)
+        bo->release(bo->ahb);
+    else
+        ahb.release(bo->ahb);
+    free(bo);
+}
+
+/* Frees the buffers nobody holds any more. */
+static void reap_locked(void)
+{
+    for (struct cham_bo **p = &g_bos; *p;) {
+        struct cham_bo *bo = *p;
+        if (bo->refs == 0 && dmabuf_refs(bo) <= bo->base_refs) {
+            *p = bo->next;
+            bo_free_locked(bo);
+        } else {
+            p = &bo->next;
+        }
+    }
+}
+
 struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
 {
     dev_t dev;
@@ -403,6 +503,9 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     if (usage & (CHAM_USE_LINEAR | CHAM_USE_WRITE | CHAM_USE_CURSOR))
         desc.usage |= AHB_USAGE_CPU_READ_OFTEN | AHB_USAGE_CPU_WRITE_OFTEN;
 
+    pthread_mutex_lock(&g_lock);
+    reap_locked();
+    pthread_mutex_unlock(&g_lock);
     AHardwareBuffer *buffer = NULL;
     if (ahb.allocate(&desc, &buffer) != 0 || !buffer) {
         cham_log("AHardwareBuffer_allocate %ux%u format 0x%x failed", width, height, format);
@@ -414,6 +517,8 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     struct cham_bo *bo = bo_new(buffer, ahb.get_native_handle(buffer), width, height, desc.stride * 4, format);
     if (!bo)
         ahb.release(buffer);
+    else
+        bo->base_refs = own_refs(bo);
     return bo;
 }
 
@@ -426,21 +531,15 @@ void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
-    link_forget_bo_locked(bo);
+    if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && bo->base_refs > 0 && dmabuf_refs(bo) > bo->base_refs)
+        return; /* its dmabuf is still held: kept, freed by reap_locked() */
     for (struct cham_bo **p = &g_bos; *p; p = &(*p)->next) {
         if (*p == bo) {
             *p = bo->next;
             break;
         }
     }
-    if (bo->release_fence >= 0)
-        close(bo->release_fence);
-    close(bo->dmabuf_fd);
-    if (bo->release)
-        bo->release(bo->ahb);
-    else
-        ahb.release(bo->ahb);
-    free(bo);
+    bo_free_locked(bo);
 }
 
 void cham_bo_unref(struct cham_bo *bo)
@@ -471,6 +570,7 @@ struct cham_bo *cham_bo_from_fd(int fd)
 
 int cham_bo_export_fd(struct cham_bo *bo)
 {
+    __atomic_store_n(&bo->exported, 1, __ATOMIC_RELAXED); /* callers may hold g_lock (PRIME) */
     return fcntl(bo->dmabuf_fd, F_DUPFD_CLOEXEC, 0);
 }
 

@@ -111,6 +111,10 @@ screen keeps its first size instead of following the app's window).
   their buffers are registered with KWin's shim (`core/clients.c`) so KWin
   can import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
+- A gbm buffer whose dmabuf is still held (KWin 6.8 keeps only the fd) stays
+  usable after `gbm_bo_destroy`, as in the kernel, until the kernel's count
+  of the dmabuf's references (fdinfo) drops to the buffer's own; on kernels
+  without that count, only this process's fds are seen (`core/ahb.c`).
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.

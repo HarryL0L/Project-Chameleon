@@ -33,6 +33,8 @@ struct cham_bo {
     uint64_t slot_gen; /* presenter connection the slot belongs to */
     int release_fence; /* last RELEASE fence from the presenter */
     void (*release)(AHardwareBuffer *); /* for cham_bo_wrap()'s buffers */
+    int base_refs;     /* cham_bo_create(): references to the dmabuf the buffer holds itself */
+    int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */
     struct cham_bo *next;
 };
 
