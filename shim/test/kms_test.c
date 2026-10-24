@@ -224,9 +224,17 @@ int main(void)
     drmModeRes *res = drmModeGetResources(fd);
     CHECK(res && res->count_crtcs == 1 && res->count_connectors == 1 && res->count_encoders == 1,
           "resources: 1 crtc / connector / encoder");
+    if (!res || !res->count_crtcs || !res->count_connectors) {
+        printf("\nFAILED: no card objects to test\n");
+        return 1;
+    }
     uint32_t crtc_id = res->crtcs[0], conn_id = res->connectors[0];
     drmModeConnector *conn = drmModeGetConnector(fd, conn_id);
     CHECK(conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes == 1, "connector connected, 1 mode");
+    if (!conn || !conn->count_modes) {
+        printf("\nFAILED: no connector mode to test\n");
+        return 1;
+    }
     drmModeModeInfo mode = conn->modes[0];
     CHECK(mode.hdisplay == 1080 && mode.vdisplay == 1800 && mode.vrefresh == 120, "mode %s @ %u Hz (from the app)",
           mode.name, mode.vrefresh);

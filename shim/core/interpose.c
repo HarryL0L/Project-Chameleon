@@ -29,6 +29,7 @@
 #include <sys/stat.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <sys/un.h>
@@ -137,6 +138,12 @@ static int connect_locked(void)
         close(s);
         s = -1;
     }
+    /* The service copies to and from our memory as the kernel would; let it
+     * where Yama lets only ancestors do that (ptrace_scope 1). */
+    struct ucred cred;
+    socklen_t len = sizeof cred;
+    if (s >= 0 && getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0)
+        prctl(PR_SET_PTRACER, (unsigned long)cred.pid, 0, 0, 0);
     g_conn = s;
     g_conn_pid = getpid();
     return s;
