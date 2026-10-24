@@ -86,3 +86,19 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev
       - name: Fake KMS device against the real libdrm
         run: shim/test/run-host-test.sh
+
+  conformance:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install libdrm, libwayland, glvnd, QEMU
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev \
+            qemu-system-x86 busybox-static cpio zstd
+      - uses: actions/cache@v6 # the reference kernel's packages
+        with:
+          path: ~/.cache/chameleon-refvm/debs
+          key: refvm-${{ hashFiles('shim/test/refvm.sh') }}
+      - name: Chameleon's devices against the real kernel's (QEMU)
+        run: shim/test/run-conformance.sh

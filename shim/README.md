@@ -153,7 +153,8 @@ real kernel's: `evdev_conformance.c` runs the same reader-side checks on
 the host against Chameleon's keyboard and touchscreen and, in a QEMU VM
 running a real Linux kernel (`refvm.sh`), against uinput devices with the
 same capabilities, and the two transcripts are diffed. Needs QEMU, a static
-busybox, cpio, zstd and apt (it downloads Ubuntu's kernel once).
+busybox, cpio, zstd and curl (it downloads Ubuntu's kernel from Launchpad
+once). CI runs it on every push too.
 
 - the EGL vendor through the system's real glvnd, with a stand-in for
   Android's driver, both as any program and as KWin;
