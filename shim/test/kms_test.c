@@ -63,6 +63,10 @@ static uint64_t now_ns(void)
 static const char *g_sock_path;
 static int g_presents, g_buffers_added, g_copy_mode, g_accepts;
 static volatile int g_stop_presenter;
+/* Set by the test: Android holds the frames it got (no FRAME_DONE until
+ * cleared), the app is frozen (presents get no answer), the app's connection
+ * drops, the app sends a CONFIG with these flags (-1: none). */
+static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
 
 static void *presenter_main(void *arg)
 {
@@ -78,7 +82,27 @@ static void *presenter_main(void *arg)
     struct cham_msg cfg = {CHAM_CONFIG, 0, 1080ull | (1800ull << 32), 120000};
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
+    uint64_t held = 0; /* the newest frame Android holds, 0 for none */
     while (!g_stop_presenter) {
+        if (g_send_flags >= 0) {
+            struct cham_msg flags = cfg;
+            flags.id = (uint32_t)g_send_flags;
+            cham_send(c, &flags, -1);
+            g_send_flags = -1;
+        }
+        if (held && !g_hold_latch) {
+            struct cham_msg done = {CHAM_FRAME_DONE, 0, held, now_ns()};
+            cham_send(c, &done, -1);
+            held = 0;
+        }
+        if (g_drop) {
+            close(c);
+            c = accept(l, NULL, NULL);
+            g_accepts++;
+            cham_send(c, &cfg, -1);
+            g_drop = 0;
+            continue;
+        }
         struct pollfd p[2] = {{c, POLLIN, 0}, {l, POLLIN, 0}};
         if (poll(p, 2, 50) <= 0)
             continue;
@@ -105,7 +129,7 @@ static void *presenter_main(void *arg)
             char packet[64];
             recv(c, packet, sizeof packet, 0); /* the (fake) AHardwareBuffer */
             g_buffers_added++;
-        } else if (m.type == CHAM_PRESENT) {
+        } else if (m.type == CHAM_PRESENT && !g_frozen) {
             g_presents++;
             struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
             cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
@@ -114,6 +138,10 @@ static void *presenter_main(void *arg)
             cham_send(c, &rel, -1); /* copy mode: released right after the "blit" */
             (void)displayed;
             displayed = m.id;
+            if (g_hold_latch) {
+                held = m.a;
+                continue;
+            }
             struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, now_ns()};
             cham_send(c, &done, -1);
         }
@@ -162,6 +190,20 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
         g_max_gap_ns = t - g_last_flip_ns;
     g_last_flip_ns = t;
     g_flips++;
+}
+
+static void flip_to(int fd, uint32_t plane_id, uint32_t p_fb, uint32_t fb)
+{
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fb);
+    if (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0)
+        printf("       (flip commit: %s)\n", strerror(errno));
+    drmModeAtomicFree(req);
+}
+
+static double ms_since(uint64_t t)
+{
+    return (now_ns() - t) / 1e6;
 }
 
 static int wait_flip(int fd, int timeout_ms)
@@ -320,7 +362,6 @@ int main(void)
     uint32_t h;
     CHECK(drmPrimeFDToHandle(fd, foreign, &h) != 0, "foreign dmabuf rejected (no direct scanout)");
     close(foreign);
-
     printf("modeset\n");
     uint32_t blob = 0;
     CHECK(drmModeCreatePropertyBlob(fd, &mode, sizeof mode, &blob) == 0, "mode blob %u", blob);
@@ -440,13 +481,83 @@ int main(void)
           g_buffers_added);
     CHECK(g_copy_mode, "shim asked for copy mode");
 
+    /* A flip completes once Android latched the frames it must have by then:
+     * the one before (one frame may wait in Android), or with back pressure
+     * the one before that (two may), else the watchdog completes it. */
+    printf("frames waiting in Android\n");
+    usleep(50000); /* the last flip completed when its frame was copied; Android shows it now */
+    g_hold_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "a frame copied, not shown yet: its flip completes");
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    uint64_t t = now_ns();
+    int early = wait_flip(fd, 120), late = !early && wait_flip(fd, 500);
+    double ms = ms_since(t);
+    CHECK(!early, "the next one waits for Android to show the first");
+    CHECK(late && ms > 200 && ms < 400, "...until the watchdog completes it (%.0f ms)", ms);
+    g_hold_latch = 0;
+    usleep(150000);
+    g_send_flags = CHAM_CONFIG_BACK_PRESSURE;
+    usleep(150000);
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    wait_flip(fd, 100);
+    usleep(50000);
+    g_hold_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    int first = wait_flip(fd, 100);
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(first && wait_flip(fd, 60), "with back pressure, a second frame may wait in Android");
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    t = now_ns();
+    early = wait_flip(fd, 120);
+    late = !early && wait_flip(fd, 500);
+    CHECK(!early && late, "...a third waits (%.0f ms)", ms_since(t));
+    g_hold_latch = 0;
+    usleep(150000);
+    g_send_flags = 0;
+    usleep(150000);
+
+    /* A flip needs the frame before it copied, not its own: the first one
+     * after the app froze still completes, the next waits for the watchdog. */
+    printf("app frozen\n");
+    g_frozen = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    first = wait_flip(fd, 100);
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    t = now_ns();
+    ok = wait_flip(fd, 500);
+    ms = ms_since(t);
+    CHECK(first && ok && ms > 200 && ms < 400, "the watchdog completes the next flip (%.0f ms)", ms);
+    g_frozen = 0;
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "the app answers again: flips complete at once");
+
+    printf("app reconnects\n");
+    int added = g_buffers_added, accepts = g_accepts;
+    g_drop = 1;
+    for (int i = 0; i < 30 && g_accepts == accepts; i++)
+        usleep(100000);
+    CHECK(g_accepts == accepts + 1, "the shim reconnects after the app's connection dropped");
+    usleep(100000);
+    ok = 1;
+    t = now_ns();
+    for (int i = 1; i <= 10; i++) {
+        flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+        if (!wait_flip(fd, 100))
+            ok = 0;
+    }
+    CHECK(ok, "10 flips completed by the app again (%.0f ms)", ms_since(t));
+    CHECK(g_buffers_added == added + 3, "its 3 buffers sent again (%d)", g_buffers_added - added);
+
     printf("second producer takes over\n");
+    accepts = g_accepts;
     int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     strncpy(addr.sun_path, g_sock_path, sizeof addr.sun_path - 1);
     connect(intruder, (struct sockaddr *)&addr, sizeof addr);
     usleep(2500000);
-    CHECK(g_accepts == 2, "replaced shim does not reconnect (%d connections, want 2)", g_accepts);
+    CHECK(g_accepts == accepts + 1, "replaced shim does not reconnect (%d connections, want %d)", g_accepts,
+          accepts + 1);
     close(intruder);
 
     printf("presenter gone -> simulated vblank\n");

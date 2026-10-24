@@ -29,27 +29,37 @@
 
 static const struct wl_interface *k_null[8];
 
-/* ---- a seat whose keyboard has a US layout ---- */
+/* ---- a seat whose keyboard has a US layout (or another, later) ---- */
 
-static void get_keyboard(struct wl_client *client, struct wl_resource *seat, uint32_t id)
+static struct wl_resource *g_keyboard;
+
+/* Sends the keyboard the keymap of `layout` (evdev rules), as a compositor
+ * does on bind and when the user changes the layout. */
+static void send_keymap(const char *layout)
 {
-    struct wl_resource *kb = wl_resource_create(client, &wl_keyboard_interface, wl_resource_get_version(seat), id);
     void *lib = dlopen("libxkbcommon.so.0", RTLD_NOW);
     void *(*context_new)(int) = lib ? dlsym(lib, "xkb_context_new") : NULL;
     void *(*from_names)(void *, const void *, int) = lib ? dlsym(lib, "xkb_keymap_new_from_names") : NULL;
     char *(*as_string)(void *, int) = lib ? dlsym(lib, "xkb_keymap_get_as_string") : NULL;
-    void *km = context_new && from_names ? from_names(context_new(0), NULL, 0) : NULL; /* evdev rules, us */
+    const char *names[5] = {"evdev", "pc105", layout, "", ""}; /* struct xkb_rule_names */
+    void *km = context_new && from_names ? from_names(context_new(0), names, 0) : NULL;
     char *text = km && as_string ? as_string(km, 1) : NULL;
-    if (!text) {
+    if (!text || !g_keyboard) {
         fprintf(stderr, "no libxkbcommon keymap\n");
         return;
     }
     int fd = memfd_create("keymap", MFD_CLOEXEC);
     size_t size = strlen(text) + 1;
     if (fd >= 0 && write(fd, text, size) == (ssize_t)size)
-        wl_keyboard_send_keymap(kb, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
+        wl_keyboard_send_keymap(g_keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, (uint32_t)size);
     if (fd >= 0)
         close(fd);
+}
+
+static void get_keyboard(struct wl_client *client, struct wl_resource *seat, uint32_t id)
+{
+    g_keyboard = wl_resource_create(client, &wl_keyboard_interface, wl_resource_get_version(seat), id);
+    send_keymap("us");
 }
 
 static void get_none(struct wl_client *client, struct wl_resource *seat, uint32_t id)
@@ -144,12 +154,174 @@ static void bind_im(struct wl_client *client, void *data, uint32_t version, uint
     ime.im = wl_resource_create(client, &k_im, (int)version, id);
 }
 
+/* ---- ext_data_control_v1, the clipboard protocol KWin offers ---- */
+
+static const struct wl_interface k_dc_source, k_dc_device, k_dc_offer;
+static const struct wl_interface *k_dc_source_types[] = {&k_dc_source};
+static const struct wl_interface *k_dc_device_types[] = {&k_dc_device, &wl_seat_interface};
+static const struct wl_interface *k_dc_offer_types[] = {&k_dc_offer};
+static const struct wl_message k_dc_manager_requests[] = {
+    {"create_data_source", "n", k_dc_source_types}, {"get_data_device", "no", k_dc_device_types}, {"destroy", "", k_null}};
+static const struct wl_interface k_dc_manager = {"ext_data_control_manager_v1", 1, 3, k_dc_manager_requests, 0, NULL};
+static const struct wl_message k_dc_device_requests[] = {
+    {"set_selection", "?o", k_dc_source_types}, {"destroy", "", k_null}, {"set_primary_selection", "?o", k_dc_source_types}};
+static const struct wl_message k_dc_device_events[] = {{"data_offer", "n", k_dc_offer_types},
+                                                       {"selection", "?o", k_dc_offer_types},
+                                                       {"finished", "", k_null},
+                                                       {"primary_selection", "?o", k_dc_offer_types}};
+static const struct wl_interface k_dc_device = {"ext_data_control_device_v1", 1, 3, k_dc_device_requests, 4,
+                                                k_dc_device_events};
+static const struct wl_message k_dc_source_requests[] = {{"offer", "s", k_null}, {"destroy", "", k_null}};
+static const struct wl_message k_dc_source_events[] = {{"send", "sh", k_null}, {"cancelled", "", k_null}};
+static const struct wl_interface k_dc_source = {"ext_data_control_source_v1", 1, 2, k_dc_source_requests, 2,
+                                                k_dc_source_events};
+static const struct wl_message k_dc_offer_requests[] = {{"receive", "sh", k_null}, {"destroy", "", k_null}};
+static const struct wl_message k_dc_offer_events[] = {{"offer", "s", k_null}};
+static const struct wl_interface k_dc_offer = {"ext_data_control_offer_v1", 1, 2, k_dc_offer_requests, 1,
+                                               k_dc_offer_events};
+
+static struct {
+    struct wl_resource *device, *selection; /* the shim's device, and the source it made the selection */
+    char offered[256];                      /* the types that source offers */
+    int received;                           /* times the shim asked an offer of ours for its text */
+} dc;
+
+static void dc_destroy(struct wl_client *c, struct wl_resource *r)
+{
+    (void)c;
+    wl_resource_destroy(r);
+}
+
+static void dc_source_offer(struct wl_client *c, struct wl_resource *r, const char *mime)
+{
+    (void)c;
+    (void)r;
+    snprintf(dc.offered + strlen(dc.offered), sizeof dc.offered - strlen(dc.offered), "%s ", mime);
+}
+
+static const struct {
+    void *fns[2];
+} k_dc_source_impl = {{dc_source_offer, dc_destroy}};
+
+static void dc_set_selection(struct wl_client *c, struct wl_resource *r, struct wl_resource *source)
+{
+    (void)c;
+    (void)r;
+    dc.selection = source;
+}
+
+static void dc_set_primary(struct wl_client *c, struct wl_resource *r, struct wl_resource *source)
+{
+    (void)c;
+    (void)r;
+    (void)source;
+}
+
+static const struct {
+    void *fns[3];
+} k_dc_device_impl = {{dc_set_selection, dc_destroy, dc_set_primary}};
+
+static void dc_create_source(struct wl_client *c, struct wl_resource *r, uint32_t id)
+{
+    struct wl_resource *s = wl_resource_create(c, &k_dc_source, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(s, &k_dc_source_impl, NULL, NULL);
+}
+
+static void dc_get_device(struct wl_client *c, struct wl_resource *r, uint32_t id, struct wl_resource *seat)
+{
+    (void)seat;
+    dc.device = wl_resource_create(c, &k_dc_device, wl_resource_get_version(r), id);
+    wl_resource_set_implementation(dc.device, &k_dc_device_impl, NULL, NULL);
+}
+
+static const struct {
+    void *fns[3];
+} k_dc_manager_impl = {{dc_create_source, dc_get_device, dc_destroy}};
+
+static void bind_dc(struct wl_client *client, void *data, uint32_t version, uint32_t id)
+{
+    (void)data;
+    struct wl_resource *r = wl_resource_create(client, &k_dc_manager, (int)version, id);
+    wl_resource_set_implementation(r, &k_dc_manager_impl, NULL, NULL);
+}
+
+/* An app's copied text: the offer writes `text` when the shim receives it. */
+static void dc_offer_receive(struct wl_client *c, struct wl_resource *r, const char *mime, int32_t fd)
+{
+    (void)c;
+    (void)mime;
+    const char *text = wl_resource_get_user_data(r);
+    if (write(fd, text, strlen(text)) < 0)
+        perror("write");
+    close(fd);
+    dc.received++;
+}
+
+static const struct {
+    void *fns[2];
+} k_dc_offer_impl = {{dc_offer_receive, dc_destroy}};
+
+/* An app copies `text`, offered as the types in `mimes` (space-separated). */
+static void dc_copy(const char *text, const char *mimes)
+{
+    struct wl_resource *o = wl_resource_create(wl_resource_get_client(dc.device), &k_dc_offer, 1, 0);
+    wl_resource_set_implementation(o, &k_dc_offer_impl, (void *)text, NULL);
+    wl_resource_post_event(dc.device, 0 /* data_offer */, o);
+    char list[128];
+    snprintf(list, sizeof list, "%s", mimes);
+    for (char *m = strtok(list, " "); m; m = strtok(NULL, " "))
+        wl_resource_post_event(o, 0 /* offer */, m);
+    wl_resource_post_event(dc.device, 1 /* selection */, o);
+}
+
 /* ---- stub presenter ---- */
 
 static void send_input(int c, uint32_t kind, uint64_t a, uint64_t b)
 {
     struct cham_msg m = {CHAM_INPUT, kind, a, b};
     cham_send(c, &m, -1);
+}
+
+static struct wl_display *g_display;
+
+static void pump(int times)
+{
+    for (int i = 0; i < times; i++) {
+        wl_event_loop_dispatch(wl_display_get_event_loop(g_display), 20);
+        wl_display_flush_clients(g_display);
+    }
+}
+
+/* The next message of `type` from the shim within ~1 s (others are skipped),
+ * keeping the compositor running meanwhile; its fd, or -1. */
+static int wait_msg(int c, uint32_t type, struct cham_msg *out)
+{
+    for (int i = 0; i < 50; i++) {
+        struct pollfd p = {c, POLLIN, 0};
+        while (poll(&p, 1, 0) == 1) {
+            struct cham_msg m;
+            int fd = -1;
+            if (cham_recv(c, &m, &fd) <= 0)
+                return -1;
+            if (m.type == type) {
+                *out = m;
+                return fd;
+            }
+            if (fd >= 0)
+                close(fd);
+        }
+        pump(1);
+    }
+    return -1;
+}
+
+static void read_all(int fd, char *buf, size_t size)
+{
+    size_t n = 0;
+    ssize_t r;
+    while (n < size - 1 && (r = read(fd, buf + n, size - 1 - n)) > 0)
+        n += (size_t)r;
+    buf[n] = 0;
 }
 
 int main(void)
@@ -162,8 +334,10 @@ int main(void)
     }
 
     struct wl_display *display = wl_display_create();
+    g_display = display;
     CHECK(wl_display_add_socket(display, "wayland-chameleon-test") == 0, "Wayland socket");
     wl_global_create(display, &wl_seat_interface, 1, NULL, bind_seat);
+    wl_global_create(display, &k_dc_manager, 1, NULL, bind_dc);
     struct wl_event_loop *loop = wl_display_get_event_loop(display);
 
     int l = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -207,6 +381,69 @@ int main(void)
     }
     CHECK(strcmp(got, "42=1 30=1 30=0 42=0 42=1 5=1 5=0 42=0 ") == 0,
           "'A' typed as Shift+A, '$' as Shift+4 (not KEY_DOLLAR), no key for the lambda (%s)", got);
+
+    /* A layout change: characters on the AltGr level are typed with it. */
+    send_keymap("de");
+    pump(10);
+    send_input(c, CHAM_INPUT_KEYSYM, '@', 1);
+    send_input(c, CHAM_INPUT_KEYSYM, '@', 0);
+    got[0] = 0;
+    for (int i = 0; i < 25 && strlen(got) < sizeof got - 8; i++) {
+        pump(1);
+        while (kfd >= 0 && read(kfd, &ev, sizeof ev) == (ssize_t)sizeof ev)
+            if (ev.type == EV_KEY)
+                snprintf(got + strlen(got), sizeof got - strlen(got), "%d=%d ", ev.code, ev.value);
+    }
+    CHECK(strcmp(got, "100=1 16=1 16=0 100=0 ") == 0, "German layout: '@' typed as AltGr+Q (%s)", got);
+    send_keymap("us");
+    pump(10);
+
+    /* The clipboard, both ways, through ext_data_control_v1. */
+    printf("clipboard\n");
+    CHECK(dc.device != NULL, "the shim takes part in the clipboard (ext_data_control_v1 device)");
+    struct cham_msg cm;
+    int pfd = -1;
+    if (dc.device) {
+        dc_copy("from the desktop", "text/plain TEXT text/plain;charset=utf-8");
+        pfd = wait_msg(c, CHAM_CLIPBOARD_DATA, &cm);
+    }
+    char text[64] = "";
+    if (pfd >= 0) {
+        read_all(pfd, text, sizeof text);
+        close(pfd);
+    }
+    CHECK(strcmp(text, "from the desktop") == 0, "copied on the desktop: the app gets a pipe with the text (\"%s\")",
+          text);
+    struct cham_msg offer = {CHAM_CLIPBOARD_OFFER, 0, 0, 0};
+    cham_send(c, &offer, -1);
+    for (int i = 0; i < 25 && !dc.selection; i++)
+        pump(1);
+    CHECK(dc.selection && strstr(dc.offered, "text/plain;charset=utf-8 ") &&
+              strstr(dc.offered, "application/x-chameleon-android "),
+          "copied on Android: the shim owns the desktop's clipboard (%s)", dc.offered);
+    int paste[2] = {-1, -1};
+    text[0] = 0;
+    if (dc.selection && pipe(paste) == 0) {
+        wl_resource_post_event(dc.selection, 0 /* send */, "text/plain;charset=utf-8", paste[1]);
+        close(paste[1]);
+        int wfd = wait_msg(c, CHAM_CLIPBOARD_REQUEST, &cm);
+        if (wfd >= 0) {
+            if (write(wfd, "from Android", 12) < 0)
+                perror("write");
+            close(wfd);
+        }
+        read_all(paste[0], text, sizeof text);
+        close(paste[0]);
+    }
+    CHECK(strcmp(text, "from Android") == 0, "a desktop app pastes it: the app writes into its pipe (\"%s\")", text);
+    int before = dc.received;
+    if (dc.device) {
+        dc_copy("echo", "text/plain;charset=utf-8 application/x-chameleon-android");
+        pfd = wait_msg(c, CHAM_CLIPBOARD_DATA, &cm);
+        if (pfd >= 0)
+            close(pfd);
+    }
+    CHECK(pfd < 0 && dc.received == before, "the shim's own clipboard isn't sent back to Android");
 
     /* Chameleon's input method, started the way KWin starts one: with a
      * private connection that offers zwp_input_method_v1. While a text field
@@ -288,8 +525,16 @@ int main(void)
     if (kfd >= 0)
         close(kfd);
 
+    /* An app built from another protocol version says so and closes; the
+     * shim must not keep reconnecting. */
+    printf("app of another protocol version\n");
+    struct cham_msg bye = {CHAM_BYE, 0, CHAM_BYE_VERSION, CHAM_PROTO_VERSION + 1};
+    cham_send(c, &bye, -1);
     close(c);
+    p = (struct pollfd){l, POLLIN, 0};
+    CHECK(poll(&p, 1, 2500) == 0, "the shim doesn't reconnect");
     close(fd);
+    close(l);
     wl_display_destroy(display);
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures != 0;

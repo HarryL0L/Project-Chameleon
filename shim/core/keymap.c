@@ -80,12 +80,14 @@ static struct xkb_keymap *g_keymap;
 static uint32_t g_shift_mask, g_level3_mask;
 static unsigned g_shift_key, g_level3_key; /* Linux key codes, 0 = none in the layout */
 
-/* A key of the layout's first group whose plain level produces `sym`. */
+/* A key of the Chameleon keyboard whose plain level in the layout's first
+ * group produces `sym` (AltGr: Right Alt, not xkb's virtual <LVL3>). */
 static unsigned plain_key(uint32_t sym)
 {
     for (uint32_t k = xkb.min_keycode(g_keymap); k <= xkb.max_keycode(g_keymap); k++) {
         const uint32_t *syms;
-        if (xkb.key_get_syms_by_level(g_keymap, k, 0, 0, &syms) == 1 && syms[0] == sym)
+        if (k >= 8 && evdev_keyboard_has(k - 8) && xkb.key_get_syms_by_level(g_keymap, k, 0, 0, &syms) == 1 &&
+            syms[0] == sym)
             return k - 8;
     }
     return 0;

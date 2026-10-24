@@ -119,7 +119,8 @@ static void describe(void)
     cham_bit_set(d->ev, EV_SYN);
     cham_bit_set(d->ev, EV_KEY);
     for (unsigned k = KEY_ESC; k <= KEY_MICMUTE; k++)
-        cham_bit_set(d->key, k);
+        if (k != 84 && (k < 195 || k > 199)) /* codes the kernel doesn't define: no keyboard has them */
+            cham_bit_set(d->key, k);
 
     d = &g_dev[DEV_MOUSE].info;
     snprintf(d->name, sizeof d->name, "Chameleon mouse");
