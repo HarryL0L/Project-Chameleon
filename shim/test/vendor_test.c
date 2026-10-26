@@ -183,6 +183,20 @@ int main(void)
         CHECK(visual == 0x34324241, "native visual of an RGBA_8888 config: ABGR8888 for GBM (0x%x)", visual);
     else
         CHECK(visual == 1, "native visual left Android's outside KWin (0x%x)", visual);
+    /* Window configs are those of the window buffers' formats: the driver's
+     * 10-bit config, which sorts first, is for off-screen use only. */
+    EGLConfig two[2] = {0};
+    EGLint type = 0, count = 0;
+    eglChooseConfig(dpy, (const EGLint[]){EGL_RED_SIZE, 1, EGL_NONE}, NULL, 0, &count);
+    CHECK(nconfigs == 1 && count == 1 && config == (EGLConfig)0x77,
+          "a window config for 1 bit per colour is the 8-bit one (%d of them)", count);
+    eglChooseConfig(dpy, (const EGLint[]){EGL_SURFACE_TYPE, EGL_PBUFFER_BIT, EGL_NONE}, two, 2, &count);
+    eglGetConfigAttrib(dpy, (EGLConfig)0x76, EGL_SURFACE_TYPE, &type);
+    CHECK(count == 2 && two[0] == (EGLConfig)0x76 && type == EGL_PBUFFER_BIT,
+          "the 10-bit config stays for pbuffers, without EGL_WINDOW_BIT (0x%x)", type);
+    CHECK(eglCreateWindowSurface(dpy, (EGLConfig)0x76, (EGLNativeWindowType)0, NULL) == EGL_NO_SURFACE &&
+              eglGetError() == EGL_BAD_MATCH,
+          "a window surface with it: EGL_BAD_MATCH");
 
     CHECK(eglBindAPI(EGL_OPENGL_ES_API), "eglBindAPI(GLES)");
     const EGLint attribs[] = {EGL_CONTEXT_CLIENT_VERSION, 2, EGL_CONTEXT_OPENGL_ROBUST_ACCESS_EXT, EGL_TRUE, EGL_NONE};

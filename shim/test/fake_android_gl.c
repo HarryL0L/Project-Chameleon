@@ -95,18 +95,31 @@ API EGLBoolean eglSwapInterval(EGLDisplay d, EGLint interval)
     fake_state.last_swap_interval = interval;
     return EGL_TRUE;
 }
+/* Like Mali: a 10-bit config sorts before the RGBA_8888 one when an app
+ * asks for a few bits per colour. */
+#define CONFIG_10BIT ((EGLConfig)0x76)
+#define CONFIG_RGBA8 ((EGLConfig)0x77)
 API EGLBoolean eglChooseConfig(EGLDisplay d, const EGLint *a, EGLConfig *configs, EGLint size, EGLint *n)
 {
     (void)d, (void)a;
-    if (configs && size > 0)
-        configs[0] = (EGLConfig)0x77;
-    *n = 1;
+    const EGLConfig all[] = {CONFIG_10BIT, CONFIG_RGBA8};
+    *n = 2;
+    if (configs) {
+        *n = size < 2 ? size : 2;
+        for (EGLint i = 0; i < *n; i++)
+            configs[i] = all[i];
+    }
     return EGL_TRUE;
 }
 API EGLBoolean eglGetConfigAttrib(EGLDisplay d, EGLConfig c, EGLint attribute, EGLint *value)
 {
-    (void)d, (void)c;
-    *value = attribute == EGL_NATIVE_VISUAL_ID ? 1 /* RGBA_8888 */ : 8;
+    (void)d;
+    if (attribute == EGL_NATIVE_VISUAL_ID)
+        *value = c == CONFIG_10BIT ? 0x2b /* RGBA_1010102 */ : 1 /* RGBA_8888 */;
+    else if (attribute == EGL_SURFACE_TYPE)
+        *value = EGL_WINDOW_BIT | EGL_PBUFFER_BIT;
+    else
+        *value = 8;
     return EGL_TRUE;
 }
 

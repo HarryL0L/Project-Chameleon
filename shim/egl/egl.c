@@ -10,6 +10,7 @@
  *  - eglTerminate is a no-op, because the Android display is process-wide
  *  - on the GBM platform a config's EGL_NATIVE_VISUAL_ID is a GBM (DRM)
  *    format, as EGL_KHR_platform_gbm says, not an Android one
+ *  - only configs in the window buffers' formats are window configs
  *
  * Nothing here is exported: glvnd's libEGL.so.1 gets every entry point
  * through cham_egl_get_proc(), and displays through vendor/vendor.c's
@@ -33,6 +34,8 @@
 
 static void *g_lib;
 static __thread EGLint t_error; /* error raised by the shim itself */
+
+static int not_for_windows(EGLDisplay dpy, EGLConfig config);
 
 static void *(*real_get_proc)(const char *);
 
@@ -77,7 +80,6 @@ static void *real(const char *name)
     }
 
 FWD(EGLBoolean, eglBindAPI, (EGLenum api), (api), EGL_FALSE)
-FWD(EGLBoolean, eglChooseConfig, (EGLDisplay d, const EGLint *a, EGLConfig *c, EGLint n, EGLint *num), (d, a, c, n, num), EGL_FALSE)
 FWD(EGLint, eglClientWaitSync, (EGLDisplay d, EGLSync s, EGLint f, EGLTime t), (d, s, f, t), EGL_FALSE)
 FWD(EGLSurface, eglCreatePbufferFromClientBuffer, (EGLDisplay d, EGLenum t, EGLClientBuffer b, EGLConfig c, const EGLint *a), (d, t, b, c, a), EGL_NO_SURFACE)
 FWD(EGLSurface, eglCreatePbufferSurface, (EGLDisplay d, EGLConfig c, const EGLint *a), (d, c, a), EGL_NO_SURFACE)
@@ -231,6 +233,10 @@ EGLAPI EGLSurface EGLAPIENTRY eglCreateWindowSurface(EGLDisplay dpy, EGLConfig c
                                                      const EGLint *attribs)
 {
     CHAM_NOTE_CALL("eglCreateWindowSurface");
+    if (not_for_windows(dpy, config)) {
+        t_error = EGL_BAD_MATCH; /* no EGL_WINDOW_BIT */
+        return EGL_NO_SURFACE;
+    }
     int handled;
     EGLSurface s = cham_wl_create_window_surface(dpy, config, (void *)win, &handled);
     if (!handled)
@@ -245,6 +251,10 @@ EGLAPI EGLSurface EGLAPIENTRY eglCreatePlatformWindowSurface(EGLDisplay dpy, EGL
                                                              const EGLAttrib *attribs)
 {
     CHAM_NOTE_CALL("eglCreatePlatformWindowSurface");
+    if (not_for_windows(dpy, config)) {
+        t_error = EGL_BAD_MATCH; /* no EGL_WINDOW_BIT */
+        return EGL_NO_SURFACE;
+    }
     int handled;
     EGLint ints[64];
     EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
@@ -261,6 +271,10 @@ static EGLSurface EGLAPIENTRY shim_eglCreatePlatformWindowSurfaceEXT(EGLDisplay 
                                                                       const EGLint *attribs)
 {
     CHAM_NOTE_CALL("eglCreatePlatformWindowSurfaceEXT");
+    if (not_for_windows(dpy, config)) {
+        t_error = EGL_BAD_MATCH; /* no EGL_WINDOW_BIT */
+        return EGL_NO_SURFACE;
+    }
     int handled;
     EGLSurface s = cham_wl_create_window_surface(dpy, config, win, &handled);
     if (!handled)
@@ -407,6 +421,65 @@ static EGLint drm_format(EGLint android, EGLint alpha)
     return 0;
 }
 
+/* ---- configs ----
+ * Window surfaces here render into Android buffers in RGBA_8888 or
+ * RGBX_8888 (a Wayland window's AImageReader, a gbm_surface), which a config
+ * of another format (10-bit, RGB565) can't render into: as with Mesa, which
+ * offers windows only in formats the compositor takes, those aren't window
+ * configs. Apps asking for "at least 1 bit" per colour then get an 8-bit
+ * one instead of the 10-bit config EGL's sort order puts first. */
+
+#define ANDROID_RGBA_8888 1
+#define ANDROID_RGBX_8888 2
+
+/* A config whose format no window buffer here has (a bad config is left to
+ * the driver to report). */
+static int not_for_windows(EGLDisplay dpy, EGLConfig config)
+{
+    REAL(EGLBoolean, eglGetConfigAttrib, (EGLDisplay, EGLConfig, EGLint, EGLint *))
+    EGLint visual = 0;
+    return p_eglGetConfigAttrib && p_eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID, &visual) &&
+           visual != ANDROID_RGBA_8888 && visual != ANDROID_RGBX_8888;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglChooseConfig(EGLDisplay dpy, const EGLint *attribs, EGLConfig *configs, EGLint size,
+                                              EGLint *num)
+{
+    REAL(EGLBoolean, eglChooseConfig, (EGLDisplay, const EGLint *, EGLConfig *, EGLint, EGLint *))
+    CHAM_NOTE_CALL("eglChooseConfig");
+    if (!p_eglChooseConfig)
+        return EGL_FALSE;
+    EGLint type = EGL_WINDOW_BIT, by_id = 0;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2) {
+        if (a[0] == EGL_SURFACE_TYPE)
+            type = a[1];
+        else if (a[0] == EGL_CONFIG_ID && a[1] != EGL_DONT_CARE)
+            by_id = 1; /* the other attributes don't count then */
+    }
+    if (!num || by_id || type == EGL_DONT_CARE || !(type & EGL_WINDOW_BIT))
+        return p_eglChooseConfig(dpy, attribs, configs, size, num);
+    EGLint all = 0;
+    if (!p_eglChooseConfig(dpy, attribs, NULL, 0, &all))
+        return EGL_FALSE;
+    EGLConfig *list = all > 0 ? malloc(sizeof *list * (size_t)all) : NULL;
+    if (all > 0 && (!list || !p_eglChooseConfig(dpy, attribs, list, all, &all))) {
+        free(list);
+        t_error = EGL_BAD_ALLOC;
+        return EGL_FALSE;
+    }
+    EGLint matching = 0, returned = 0;
+    for (EGLint i = 0; i < all; i++) {
+        if (not_for_windows(dpy, list[i]))
+            continue;
+        matching++;
+        if (configs && returned < size)
+            configs[returned++] = list[i];
+    }
+    free(list);
+    *num = configs ? returned : matching;
+    return EGL_TRUE;
+}
+
 /* A compositor on the fake card (the only process with the GBM platform)
  * picks configs by their GBM format, which its window surfaces render in. */
 EGLAPI EGLBoolean EGLAPIENTRY eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value)
@@ -417,6 +490,8 @@ EGLAPI EGLBoolean EGLAPIENTRY eglGetConfigAttrib(EGLDisplay dpy, EGLConfig confi
         return EGL_FALSE;
     if (!p_eglGetConfigAttrib(dpy, config, attribute, value))
         return EGL_FALSE;
+    if (attribute == EGL_SURFACE_TYPE && not_for_windows(dpy, config))
+        *value &= ~EGL_WINDOW_BIT;
     if (attribute == EGL_NATIVE_VISUAL_ID && cham_core_present()) {
         EGLint alpha = 0;
         p_eglGetConfigAttrib(dpy, config, EGL_ALPHA_SIZE, &alpha);
