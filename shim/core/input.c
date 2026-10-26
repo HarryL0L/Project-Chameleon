@@ -9,8 +9,8 @@
  * connects to KWin's Wayland socket as an ordinary client, for clipboard.c's
  * clipboard sharing and keymap.c's view of the desktop's keyboard layout.
  *
- * The socket path comes from KWin's process (its bind() or
- * $CHAMELEON_WAYLAND_SOCKET, reported by libchameleon.so; wlpath.c), and
+ * The socket path comes from the process that bound it (its bind(),
+ * reported by libchameleon.so) or $CHAMELEON_WAYLAND_SOCKET (wlpath.c), and
  * libwayland-client is loaded with dlopen(), so nothing here depends on how
  * KWin was started. The link reader thread only writes messages into a pipe;
  * all Wayland calls happen on the input thread.

@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Crash reporter for kwin_wayland under the shim. On SIGSEGV/SIGBUS it writes
- * the fault, the last GL entry point the EGL vendor forwarded, the last
- * texture upload and a symbolized backtrace to stderr (kwin.log), then hands
- * the signal on to whoever had it before (debuggerd's tombstone, KCrash).
+ * Crash reporter for programs rendering with Android's driver through the EGL
+ * vendor (the compositor, GPU apps): installed when the vendor hands over
+ * its breadcrumbs, not in every program libchameleon.so is preloaded into.
+ * On SIGSEGV/SIGBUS it writes the fault, the last GL entry point the EGL
+ * vendor forwarded, the last texture upload and a symbolized backtrace to
+ * stderr (kwin.log), then hands the signal on to whoever had it before
+ * (debuggerd's tombstone, KCrash).
  *
  * The backtrace is a frame-pointer walk plus a stack scan for return
  * addresses (words just after a BL/BLR), since vendor drivers often have no
@@ -22,15 +25,20 @@
 
 #include "internal.h"
 
-/* Set by the glvnd vendor library once glvnd loads it. */
+/* Set by the glvnd vendor library once it renders with Android's driver. */
 static const struct cham_crash_breadcrumbs *volatile g_crumbs;
+
+static void install(void);
 
 CHAM_EXPORT void cham_crash_attach(const struct cham_crash_breadcrumbs *crumbs)
 {
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
     g_crumbs = crumbs;
+    pthread_once(&once, install);
 }
 
 static int (*real_sigaction)(int, const struct sigaction *, struct sigaction *);
+
 static struct sigaction g_prev[2];  /* what was installed before us */
 static struct sigaction g_chain[2]; /* installed after us (e.g. KCrash) */
 static int g_have_chain[2];
@@ -277,7 +285,7 @@ CHAM_EXPORT int sigaction(int sig, const struct sigaction *act, struct sigaction
     return 0;
 }
 
-__attribute__((constructor)) static void install(void)
+static void install(void)
 {
     const char *env = getenv("CHAMELEON_CRASH");
     if (env && strcmp(env, "0") == 0)

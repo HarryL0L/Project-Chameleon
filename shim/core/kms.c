@@ -1109,6 +1109,14 @@ void kms_file_open(struct fake_fd *f)
     pthread_mutex_unlock(&g_lock);
 }
 
+pid_t kms_master_pid(void)
+{
+    pthread_mutex_lock(&g_lock);
+    pid_t pid = g_master ? g_master->pid : 0;
+    pthread_mutex_unlock(&g_lock);
+    return pid;
+}
+
 void kms_file_close(struct fake_fd *f)
 {
     pthread_mutex_lock(&g_lock);

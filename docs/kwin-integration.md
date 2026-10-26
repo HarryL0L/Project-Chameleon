@@ -12,8 +12,8 @@ Target: KWin 6.7.5 as packaged in
 - `addGpu` → `Session::openRestricted(path)` (noop session = plain `open`)
   → `drmIsKMS(fd)` → `DrmDevice::openWithAuthentication` (`drmGetVersion`,
   GBM device) → `EGL_PLATFORM_GBM_KHR` display.
-- `chameleon-kernel` serves that device and `libchameleon.so` (LD_PRELOAD)
-  makes `/dev/dri/card0` its node (DRM ioctls go there as system calls), the
+- `chameleon-kernel` serves that device and `libchameleon.so` (LD_PRELOAD,
+  every program of the session) makes `/dev/dri/card0` its node (DRM ioctls go there as system calls), the
   fake `libgbm.so` (LD_LIBRARY_PATH) makes a bo an AHardwareBuffer (fd = the
   gralloc handle's dmabuf fd), and EGL goes through glvnd to the
   `libEGL_chameleon.so` vendor, which forwards to Android's libEGL.
@@ -39,10 +39,10 @@ Target: KWin 6.7.5 as packaged in
   text as keys of the keymap KWin sends every `wl_keyboard`
   (`shim/core/keymap.c`).
 - `shim/core/input.c` connects to KWin's own Wayland socket as a client, for
-  the clipboard and that keymap. The socket path comes from KWin's own
-  `bind()` of `$XDG_RUNTIME_DIR/wayland-N` (interposed), or from
-  `$CHAMELEON_WAYLAND_SOCKET` when `kwin_wayland_wrapper` created the socket
-  and passed KWin only its fd (`bin/kwin_wayland` sets it from `--socket`);
+  the clipboard and that keymap. The socket path comes from the `bind()` of
+  `$XDG_RUNTIME_DIR/wayland-N` (interposed in every program; for Plasma,
+  `kwin_wayland_wrapper` binds it and passes KWin only its fd), or from
+  `$CHAMELEON_WAYLAND_SOCKET`;
   libwayland-client is `dlopen()`ed, and the protocol tables are written out
   by hand (no wayland-scanner at build time).
 - `shim/test/evdev_test.c` runs the devices against the system's libinput,

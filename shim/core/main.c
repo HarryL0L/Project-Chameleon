@@ -3,8 +3,8 @@
  * chameleon-kernel: what the kernel would be for a Chameleon session, in one
  * process the launcher starts (shim/chameleon) before the session's command:
  * the card (kms.c, served to every process by card.c), the input devices and
- * udev monitors (evdev.c), the link to the app (link.c) and the input thread
- * (input.c). Programs reach it through standard interfaces only, by way of
+ * udev monitors (evdev.c), the link to the app (link.c), the input thread
+ * (input.c) and Wayland apps' GPU buffers (clients.c). Programs reach it through standard interfaces only, by way of
  * libchameleon.so (the card node) and libchameleon_udev.so (udev, evdev).
  *
  *   chameleon-kernel SESSION_PID
@@ -51,6 +51,7 @@ int main(int argc, char **argv)
     evdev_start();
     if (card_start() != 0)
         return 1;
+    clients_start();
     if (write(ready[1], "", 1) != 1)
         return 1;
     close(ready[1]);

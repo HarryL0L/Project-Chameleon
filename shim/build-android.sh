@@ -9,11 +9,11 @@ mkdir -p "$OUT"
 : "${CC:?set CC to the NDK aarch64-linux-android29-clang}"
 CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -fno-emulated-tls \
     -Ishim/include -Ishim/include/libdrm"
-# The card node, gbm's buffers and clients' buffers in the compositor; the
-# card itself, input and the app link in chameleon-kernel.
-LIB_SRC="shim/core/interpose.c shim/core/clients.c shim/core/crash.c shim/core/ahb.c shim/core/wlpath.c"
+# The card node and gbm's buffers in every program of the session; the card
+# itself, input, the app link and apps' buffers in chameleon-kernel.
+LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
-    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/clients.c shim/core/ahb.c shim/core/wlpath.c"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" $LIB_SRC -ldl -Wl,-soname,libchameleon.so
 "$CC" $CFLAGS -fPIE -pie -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
@@ -23,10 +23,9 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
-# Chameleon's input method, started by KWin (bin/kwin_wayland).
+# Chameleon's input method, started by the compositor (packaging/kwinrc).
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
-mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland "$OUT/bin/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
 # missing symbol breaks KWin at load time. The vendor exports only its entry.

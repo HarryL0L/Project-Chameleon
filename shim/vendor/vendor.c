@@ -12,16 +12,15 @@
  *
  * Which displays it takes (anything else is left to the next vendor, e.g.
  * Mesa):
- *  - EGL_PLATFORM_GBM_KHR, and eglGetDisplay(EGL_DEFAULT_DISPLAY): only in a
- *    process running on Chameleon's fake KMS device (kwin_wayland started
- *    through bin/kwin_wayland, where libchameleon.so provides the gbm
- *    buffers);
- *    CHAMELEON_EGL_DEFAULT=1 also takes the default display elsewhere.
+ *  - EGL_PLATFORM_GBM_KHR: only in a Chameleon session, where
+ *    libchameleon.so provides the gbm buffers (the compositor's display).
+ *  - eglGetDisplay(EGL_DEFAULT_DISPLAY): only with CHAMELEON_EGL_DEFAULT=1
+ *    (no compositor asks for it; X11 apps under Xwayland need Mesa's).
  *  - EGL_PLATFORM_SURFACELESS_MESA and EGL_PLATFORM_ANDROID_KHR: always
  *    (off-screen rendering on the GPU).
- *  - EGL_PLATFORM_WAYLAND_KHR: when the app's compositor is a KWin running
- *    with the Chameleon shim (wayland.c): windows render on the GPU and
- *    reach KWin as AHardwareBuffers, without copies.
+ *  - EGL_PLATFORM_WAYLAND_KHR: when the app's compositor runs on Chameleon
+ *    (wayland.c): windows render on the GPU and reach the compositor as
+ *    AHardwareBuffers, without copies.
  * X11 windows are not handled.
  *
  * Only __egl_Main is exported (see vendor.map).
@@ -169,7 +168,7 @@ static void set_dispatch_index(const char *name, int index)
 static int claim_default_display(void)
 {
     const char *env = getenv("CHAMELEON_EGL_DEFAULT");
-    return cham_core_present() || (env && strcmp(env, "1") == 0);
+    return env && strcmp(env, "1") == 0;
 }
 
 static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGLAttrib *attribs)
@@ -186,7 +185,7 @@ static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGL
     case EGL_PLATFORM_ANDROID_KHR:
         return cham_egl_android_display();
     case EGL_PLATFORM_WAYLAND_KHR:
-        /* only under a KWin running with the Chameleon shim */
+        /* only under a compositor running on Chameleon */
         return cham_wl_get_display(native);
     }
     return EGL_NO_DISPLAY;

@@ -110,7 +110,12 @@ int main(void)
     CHECK(client && strstr(client, "EGL_MESA_platform_surfaceless"), "client extensions: surfaceless platform");
     if (kwin) {
         CHECK(client && strstr(client, "EGL_KHR_platform_gbm"), "GBM platform for KWin");
-        CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) != EGL_NO_DISPLAY, "default display for KWin");
+        /* libchameleon.so is in every program of a session: the default
+         * display stays Mesa's (X11 apps) unless asked for. */
+        CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == EGL_NO_DISPLAY, "default display left to other vendors");
+        setenv("CHAMELEON_EGL_DEFAULT", "1", 1);
+        CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) != EGL_NO_DISPLAY, "...taken with CHAMELEON_EGL_DEFAULT=1");
+        unsetenv("CHAMELEON_EGL_DEFAULT");
         EGLDisplay gbm_dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL);
         CHECK(gbm_dpy != EGL_NO_DISPLAY, "GBM display for KWin");
         /* The card as an EGLDevice, as Mesa describes a KMS-only card. */

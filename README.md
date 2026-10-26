@@ -51,12 +51,13 @@ flowchart TB
             direction TB
             CORE["KWin compositor<br/>scene · windows · DRM backend"]
             GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
-            NODE["libchameleon.so<br/>card node · app buffers"]
+            NODE["libchameleon.so<br/>card node (in every program of the session)"]
         end
         subgraph KS["chameleon-kernel process: what the kernel would be"]
             direction TB
             KMS["fake KMS device<br/>per-file DRM state · page flips"]
             INP["input thread<br/>evdev devices · text · clipboard"]
+            REG["apps' GPU buffers"]
         end
         GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
         VEND["libEGL_chameleon.so<br/>glvnd EGL vendor (KWin and apps)"]
@@ -73,7 +74,8 @@ flowchart TB
     CMD --> CORE
     APPS <-->|Wayland| CORE
     APPS -->|EGL / GLES| GLVND
-    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| NODE
+    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| REG
+    NODE -.->|"dmabuf import"| REG
     CORE -->|EGL / GLES| GLVND --> VEND --> DRV
     CORE -->|buffers| GBM
     GBM -.->|gralloc| DRV
@@ -88,7 +90,7 @@ flowchart TB
     classDef kwin fill:#6C4CF1,stroke:#4b32b8,color:#fff
     classDef shim fill:#22B8E6,stroke:#1789ad,color:#06222c
     classDef android fill:#3DDC84,stroke:#2aa862,color:#06220f
-    class KMS,GBM,VEND,INP,NODE shim
+    class KMS,GBM,VEND,INP,NODE,REG shim
     class CORE,GLVND,APPS,CMD kwin
     class DRV,APP,SF,TOUCH android
 ```
@@ -141,8 +143,9 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
 <summary><b>🖥️ chameleon-kernel</b>: a fake KMS display device</summary>
 
 - A process `chameleon` starts before the session, like the kernel under
-  any program. `libchameleon.so`, preloaded into `kwin_wayland`, makes
-  `/dev/dri/card0` (KWin finds it in udev, like any GPU) a device node:
+  any program. `libchameleon.so`, preloaded into every program of the
+  session, makes `/dev/dri/card0` (compositors find it in udev, like any
+  GPU) a device node:
   opening it returns a pipe that behaves like a DRM card, `stat()` says it's
   a character device, and each DRM `ioctl` goes to the service as the system
   call's arguments. The service reads and writes the caller's memory itself,
@@ -157,9 +160,11 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's
   `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
   vblank keeps KWin running.
-- It also runs the input devices and the input thread, so a KWin that dies
-  takes none of them along. `libchameleon.so` keeps a crash reporter in KWin
-  that logs the last GL/EGL calls and a symbolised backtrace.
+- It also runs the input devices, the input thread and the registry of
+  apps' GPU buffers, so a KWin that dies takes none of them along.
+  `libchameleon.so` keeps a crash reporter in programs that render with
+  Android's driver, which logs the last GL/EGL calls and a symbolised
+  backtrace.
 
 Code: [`shim/core/`](shim/core/)
 </details>
@@ -327,17 +332,18 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    U(["chameleon startplasma-wayland"]) --> P["PATH = lib/chameleon/bin:$PATH<br/>unset DISPLAY, WAYLAND_DISPLAY<br/>+ D-Bus session"]
+    U(["chameleon startplasma-wayland"]) --> P["LD_PRELOAD = libchameleon.so, libchameleon_udev.so<br/>unset DISPLAY, WAYLAND_DISPLAY<br/>+ D-Bus session + chameleon-kernel"]
     P --> SP["startplasma-wayland"]
     SP --> W["kwin_wayland_wrapper --xwayland"]
-    W -->|"starts kwin_wayland by name"| B["lib/chameleon/bin/kwin_wayland<br/>attaches the shim to this process only"]
-    B --> R["real kwin_wayland --drm"]
-    SP --> PS["plasmashell, apps …<br/>(Chameleon EGL vendor, no shim)"]
+    W --> R["kwin_wayland: finds /dev/dri/card0 in udev,<br/>picks its DRM backend"]
+    SP --> PS["plasmashell, apps …<br/>(same device layer, Chameleon EGL vendor)"]
 ```
 
+Every program in the session sees the same device layer, so nothing picks
+out KWin, and the same works for `chameleon weston` or `chameleon sway`.
 Nothing in plasma-workspace changes, and you never pass `--drm` yourself:
-the `kwin_wayland` wrapper adds it (with neither `WAYLAND_DISPLAY` nor
-`DISPLAY` set, KWin would pick its DRM backend anyway).
+with neither `WAYLAND_DISPLAY` nor `DISPLAY` set, a compositor picks its
+DRM backend.
 
 ## What a phone needs
 
@@ -446,7 +452,7 @@ AHardwareBuffer and AImageReader support.
 |---|---|
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
-| [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard; `libchameleon.so`: the card node, app buffers, crash reporter |
+| [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard, apps' GPU buffers; `libchameleon.so`: the card node, crash reporter |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |

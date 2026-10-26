@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Host test of GPU rendering for Wayland apps (vendor/wayland.c + the
- * buffer registry in core/clients.c), end to end in one process:
+ * buffer registry in core/clients.c, inside chameleon-kernel), end to end:
  *
  *  - a compositor thread (real libwayland-server) with wl_compositor and a
  *    zwp_linux_dmabuf_v1 that, like KWin's EGL import, only accepts a dmabuf
- *    that libchameleon.so knows as a registered app buffer;
+ *    that chameleon-kernel knows as a registered app buffer (asked through
+ *    libchameleon.so, which also tells it the socket from our bind());
  *  - the app: real libwayland-client + libwayland-egl, EGL through the
  *    system's glvnd -> libEGL_chameleon.so -> fake Android driver whose
  *    window surfaces render into (fake) AImageReaders.
@@ -15,11 +16,15 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -69,7 +74,8 @@ static struct {
     volatile int stop;
 } srv;
 
-static void *(*client_ahb_from_fd)(int); /* libchameleon: AHardwareBuffer * or NULL */
+static void *(*client_ahb_acquire)(int); /* libchameleon: AHardwareBuffer * or NULL */
+static void (*client_ahb_release)(void *);
 
 struct buffer {
     struct wl_resource *resource;
@@ -119,10 +125,13 @@ static void params_create_immed(struct wl_client *client, struct wl_resource *r,
     (void)flags;
     struct params *p = wl_resource_get_user_data(r);
     /* What KWin's EGL import does through the vendor: find the AHB. */
-    if (p->fd >= 0 && client_ahb_from_fd && client_ahb_from_fd(p->fd))
+    void *ahb = p->fd >= 0 && client_ahb_acquire ? client_ahb_acquire(p->fd) : NULL;
+    if (ahb)
         srv.buffers_known_to_kwin++;
     else
         srv.buffers_unknown++;
+    if (ahb)
+        client_ahb_release(ahb);
     srv.buffers_created++;
     srv.last_width = w;
     srv.last_height = h;
@@ -303,10 +312,14 @@ int main(void)
         fprintf(stderr, "run via run-host-test.sh\n");
         return 2;
     }
-    *(void **)&client_ahb_from_fd = dlsym(RTLD_DEFAULT, "cham_client_ahb_from_fd");
+    *(void **)&client_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_client_ahb_acquire");
+    *(void **)&client_ahb_release = dlsym(RTLD_DEFAULT, "cham_client_ahb_release");
 
+    /* As a compositor: DRM master first, then its socket. */
+    const char *card_path = getenv("CHAMELEON_DRM_PATH");
+    int card = open(card_path ? card_path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
     struct wl_display *server = wl_display_create();
-    if (wl_display_add_socket(server, socket_name) != 0) {
+    if (card < 0 || wl_display_add_socket(server, socket_name) != 0) {
         fprintf(stderr, "cannot create the Wayland socket\n");
         return 1;
     }
@@ -316,14 +329,33 @@ int main(void)
     pthread_create(&thread, NULL, server_main, server);
 
     printf("GPU rendering for Wayland apps\n");
-    /* libchameleon.so (as in KWin) opens its buffer socket next to KWin's. */
+    /* chameleon-kernel opens its buffer socket next to ours once told. */
     char registry[256];
     snprintf(registry, sizeof registry, "%s/%s.chameleon", runtime, socket_name);
     struct stat st;
     for (int i = 0; i < 100 && stat(registry, &st) != 0; i++)
         usleep(20 * 1000);
-    CHECK(client_ahb_from_fd && stat(registry, &st) == 0, "KWin side accepts app buffers at %s.chameleon",
+    CHECK(client_ahb_acquire && stat(registry, &st) == 0, "chameleon-kernel accepts app buffers at %s.chameleon",
           socket_name);
+
+    /* Another program's Wayland socket (Firefox's proxy, a nested
+     * compositor): not the master's or an ancestor's, so it doesn't count. */
+    pid_t proxy = fork();
+    if (proxy == 0) {
+        struct sockaddr_un addr = {.sun_family = AF_UNIX};
+        snprintf(addr.sun_path, sizeof addr.sun_path, "%s/wayland-proxy-1", runtime);
+        int s = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof addr) != 0)
+            _exit(1);
+        sleep(2);
+        _exit(0);
+    }
+    usleep(800 * 1000);
+    char proxy_registry[256];
+    snprintf(proxy_registry, sizeof proxy_registry, "%s/wayland-proxy-1.chameleon", runtime);
+    CHECK(stat(proxy_registry, &st) != 0 && stat(registry, &st) == 0,
+          "a program binding wayland-proxy-1 doesn't take the compositor's place");
+    waitpid(proxy, NULL, 0);
 
     struct wl_display *display = wl_display_connect(socket_name);
     struct wl_registry *reg = wl_display_get_registry(display);

@@ -13,9 +13,9 @@ if [ -z "$OUT" ]; then
 fi
 mkdir -p "$OUT"
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
-LIB_SRC="shim/core/interpose.c shim/core/clients.c shim/core/crash.c shim/core/ahb.c shim/core/wlpath.c"
+LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
-    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/clients.c shim/core/ahb.c shim/core/wlpath.c"
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" $LIB_SRC -ldl -lpthread \
     -Wl,-soname,libchameleon.so
 cc $CFLAGS -Ishim/include/libdrm -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl -lpthread
@@ -68,28 +68,25 @@ __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EG
     CHAMELEON_ANDROID_NATIVEWINDOW="$OUT/fake_android_gl.so" CHAMELEON_ANDROID_MEDIANDK="$OUT/fake_android_gl.so" \
     VENDOR_TEST_GBM="$OUT/libgbm.so" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
 # GPU rendering for Wayland apps: the vendor's Wayland platform against a
-# real libwayland-server compositor, buffers registered with libchameleon.so.
+# real libwayland-server compositor, buffers registered with chameleon-kernel
+# (which learns the socket from the compositor's bind()).
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers $(pkg-config --cflags libdrm) -o "$OUT/wayland_client_test" \
     shim/test/wayland_client_test.c -lEGL $(pkg-config --libs wayland-server wayland-client wayland-egl) -ldl -lpthread
-mkdir -p "$OUT/runtime-wl" && chmod 700 "$OUT/runtime-wl"
+cc -O1 -Wall -Wextra -fPIC -shared -o "$OUT/fake_qtgui.so" shim/test/fake_qtgui.c
 FAKE="$OUT/fake_android_gl.so"
-XDG_RUNTIME_DIR="$OUT/runtime-wl" WAYLAND_DISPLAY=wayland-cwl CHAMELEON_WAYLAND_SOCKET="$OUT/runtime-wl/wayland-cwl" \
-    __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$FAKE" \
-    CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
-    CHAMELEON_DRM_PATH="$OUT/card3" CHAMELEON_SOCKET="$OUT/presenter-none" \
-    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/wayland_client_test"
+# wayland_test RUNTIME EXTRA_PRELOAD [VAR=value...]: a session of its own each.
+wayland_test() {
+    start_kernel "$1" "$OUT/presenter-none" 0
+    rt=$1 extra=$2
+    shift 2
+    env XDG_RUNTIME_DIR="$rt" WAYLAND_DISPLAY=wayland-cwl "$@" \
+        __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$FAKE" \
+        CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
+        CHAMELEON_DRM_PATH="$OUT/card3" CHAMELEON_SOCKET="$OUT/presenter-none" \
+        LD_PRELOAD="$OUT/libchameleon.so$extra" "$OUT/wayland_client_test"
+}
+wayland_test "$OUT/runtime-wl" ""
 # ...a Qt built for desktop OpenGL is steered to OpenGL ES (or left to Mesa
 # with CHAMELEON_EGL_QT=mesa).
-cc -O1 -Wall -Wextra -fPIC -shared -o "$OUT/fake_qtgui.so" shim/test/fake_qtgui.c
-rm -rf "$OUT/runtime-wl"/* && XDG_RUNTIME_DIR="$OUT/runtime-wl" WAYLAND_DISPLAY=wayland-cwl \
-    CHAMELEON_WAYLAND_SOCKET="$OUT/runtime-wl/wayland-cwl" EXPECT_DESKTOP_GL_QT=1 \
-    __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$FAKE" \
-    CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
-    CHAMELEON_DRM_PATH="$OUT/card4" CHAMELEON_SOCKET="$OUT/presenter-none" \
-    LD_PRELOAD="$OUT/libchameleon.so:$OUT/fake_qtgui.so" "$OUT/wayland_client_test"
-rm -rf "$OUT/runtime-wl"/* && XDG_RUNTIME_DIR="$OUT/runtime-wl" WAYLAND_DISPLAY=wayland-cwl \
-    CHAMELEON_WAYLAND_SOCKET="$OUT/runtime-wl/wayland-cwl" EXPECT_DESKTOP_GL_QT=1 CHAMELEON_EGL_QT=mesa \
-    __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$FAKE" \
-    CHAMELEON_ANDROID_GLES="$FAKE" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" CHAMELEON_ANDROID_MEDIANDK="$FAKE" \
-    CHAMELEON_DRM_PATH="$OUT/card5" CHAMELEON_SOCKET="$OUT/presenter-none" \
-    LD_PRELOAD="$OUT/libchameleon.so:$OUT/fake_qtgui.so" "$OUT/wayland_client_test"
+wayland_test "$OUT/runtime-wl2" ":$OUT/fake_qtgui.so" EXPECT_DESKTOP_GL_QT=1
+wayland_test "$OUT/runtime-wl3" ":$OUT/fake_qtgui.so" EXPECT_DESKTOP_GL_QT=1 CHAMELEON_EGL_QT=mesa

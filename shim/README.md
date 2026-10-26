@@ -6,8 +6,8 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 | file | replaces | does |
 |---|---|---|
 | `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event; the input devices, the link to the app and the input thread |
-| `libchameleon.so` (LD_PRELOAD, KWin) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers (`core/clients.c`), crash reporter |
-| `libgbm.so` (LD_LIBRARY_PATH) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
+| `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (registered with `chameleon-kernel`, `core/clients.c`); crash reporter where Android's driver renders |
+| `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, primary node only) inside KWin, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts |
 
 ## Run
@@ -27,30 +27,34 @@ chameleon kwin_wayland konsole       # KWin plus a first app
 chameleon startplasma-wayland        # a Plasma session
 ```
 
-`chameleon` puts its `bin/` directory first in `PATH`, clears `DISPLAY` /
-`WAYLAND_DISPLAY`, starts the app's broker (which hands `chameleon-kernel`'s
-connection to the app; log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and
-`chameleon-kernel` (the card, input devices and app link for the whole
-session; it exits with the session) and runs the command
-(in a new D-Bus session if there is none). Every `kwin_wayland` started inside - directly, by
-`kwin_wayland_wrapper` or by `startplasma-wayland` - is then
-`bin/kwin_wayland`, which attaches the shim to that one process and runs the
-real KWin. No `--drm` is needed anywhere: with neither
-`WAYLAND_DISPLAY` nor `DISPLAY` set KWin picks the DRM backend by itself (the
-script adds `--drm` anyway unless another backend is asked for), so
-plasma-workspace needs no change either.
+`chameleon` preloads `libchameleon.so` and `libchameleon_udev.so` into the
+whole session and puts its own directory first in `LD_LIBRARY_PATH` (our
+`libgbm.so`), so every program sees the same device layer, as a device node
+is there for every program. It clears `DISPLAY` / `WAYLAND_DISPLAY`, starts
+the app's broker (which hands `chameleon-kernel`'s connection to the app;
+log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and `chameleon-kernel` (the
+card, input devices, app link and apps' GPU buffers for the whole session;
+it exits with the session) and runs the command (in a new D-Bus session if
+there is none). No `--drm` is needed anywhere: with neither
+`WAYLAND_DISPLAY` nor `DISPLAY` set, KWin, Weston and sway pick their DRM
+backend by themselves, so plasma-workspace needs no change either. The
+compositor's Wayland socket is learnt from whichever program binds it
+(`kwin_wayland_wrapper` for KWin); `CHAMELEON_WAYLAND_SOCKET` names it for a
+compositor given its socket from outside the session. Xwayland keeps
+rendering on the CPU (`XWAYLAND_NO_GLAMOR=1`) until the compositor can
+import its GPU buffers.
 
-KWin loads the EGL vendor through Termux's own glvnd (`libEGL.so.1`,
-`libGLESv2.so.2`): `chameleon` sets `__EGL_VENDOR_LIBRARY_FILENAMES` for the
-whole session, with this vendor first and the installed ones (Mesa) after
-it.
+The compositor loads the EGL vendor through Termux's own glvnd
+(`libEGL.so.1`, `libGLESv2.so.2`): `chameleon` sets
+`__EGL_VENDOR_LIBRARY_FILENAMES` for the whole session, with this vendor
+first and the installed ones (Mesa) after it.
 
 ### The EGL vendor for other programs
 
 `chameleon-vendor-install` registers `libEGL_chameleon.so` with
 glvnd for every Termux program (`--remove` undoes it); `chameleon` already
-does the same for its session. It takes Wayland windows whose compositor is
-a Chameleon KWin (rendered on the GPU, handed over as `AHardwareBuffer`s),
+does the same for its session. It takes Wayland windows whose compositor
+runs on Chameleon (rendered on the GPU, handed over as `AHardwareBuffer`s),
 off-screen displays (`EGL_PLATFORM_SURFACELESS_MESA`, `EGL_PLATFORM_ANDROID_KHR`)
 and the default display with `CHAMELEON_EGL_DEFAULT=1`; X11 windows and other
 compositors still go to Mesa. Check it
@@ -108,8 +112,8 @@ screen keeps its first size instead of following the app's window).
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL
   (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
-  their buffers are registered with KWin's shim (`core/clients.c`) so KWin
-  can import them. The app waits for the GPU before handing a frame over (no
+  their buffers are registered with `chameleon-kernel` (`core/clients.c`),
+  where the compositor's dmabuf import finds them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
 - EGL is reported as 1.5 even where the driver says 1.4 (Mali): Android's
   libEGL has every 1.5 function for any driver since Android 10, mapped to

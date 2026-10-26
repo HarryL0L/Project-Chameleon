@@ -10,8 +10,8 @@
  * (buffer age, damage, fences). After every eglSwapBuffers the frame is taken
  * out of the reader as an AHardwareBuffer and shown on the app's wl_surface:
  *
- *   1. registered with libchameleon.so inside KWin (clients.c), once per
- *      buffer, because KWin can't turn a bare dmabuf back into an AHB;
+ *   1. registered with chameleon-kernel (clients.c), once per buffer,
+ *      because the compositor can't turn a bare dmabuf back into an AHB;
  *   2. wrapped in a zwp_linux_dmabuf_v1 wl_buffer (its gralloc dmabuf);
  *   3. attached, damaged and committed on the app's wl_surface.
  *
@@ -22,7 +22,7 @@
  * The surfaces the app sees are ours (struct surface); egl.c swaps in the
  * Android surface wherever one is passed to the driver.
  *
- * Only offered when KWin runs with the Chameleon shim (its
+ * Only offered when the compositor runs on Chameleon (its
  * "<wayland socket>.chameleon" exists); elsewhere glvnd moves on to Mesa.
  */
 #define _GNU_SOURCE
@@ -263,7 +263,7 @@ struct display {
     struct wl_display *wl;
     struct wl_event_queue *queue;
     struct wl_proxy *dmabuf;
-    int registry_sock; /* to clients.c in KWin */
+    int registry_sock; /* to clients.c in chameleon-kernel */
     uint32_t next_buffer_id;
     pthread_mutex_t lock;
     struct display *next;

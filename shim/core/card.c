@@ -183,6 +183,8 @@ static int file_open(struct caller *c, int *read_end)
     struct stat st;
     if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
         return -errno;
+    if (fcntl(p[0], F_SETPIPE_SZ, CHAM_CARD_PIPE_SIZE) != CHAM_CARD_PIPE_SIZE)
+        cham_log("card: cannot make the event pipe one page: passed copies won't be recognised");
     struct fake_fd *f = calloc(1, sizeof *f);
     if (!f || fstat(p[0], &st) != 0) {
         free(f);
@@ -240,6 +242,15 @@ static int answer(struct caller *c, int64_t ret, int fd)
     return cham_send(c->sock, &m, fd);
 }
 
+/* CARD_CLIENT_BUFFER's answer: the done, then the app's buffer. */
+static int send_client_buffer(const AHardwareBuffer *b, void *arg)
+{
+    struct caller *c = arg;
+    if (answer(c, 1, -1) != 0 || ahb_send(b, c->sock) != 0)
+        c->broken = 1;
+    return 0;
+}
+
 static void handle(struct caller *c, const struct cham_msg *m, int fd)
 {
     switch (m->type) {
@@ -281,16 +292,16 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         answer(c, handle ? (int64_t)handle : !f ? -EBADF : -EINVAL, -1);
         break;
     }
+    case CARD_CLIENT_BUFFER:
+        if (clients_with_buffer(fd, send_client_buffer, c) != 0)
+            answer(c, -ENOENT, -1);
+        break;
     case CARD_WAYLAND: {
         char path[sizeof(((struct sockaddr_un *)0)->sun_path) + 1];
         ssize_t n = recv(c->sock, path, sizeof path - 1, 0);
         path[n > 0 ? n : 0] = 0;
-        char known[sizeof path];
-        input_socket_path(known, sizeof known);
-        if (path[0] == '/' && strcmp(path, known) != 0) {
-            input_note_socket(path);
-            cham_log("KWin's Wayland socket: %s", path);
-        }
+        if (path[0] == '/')
+            input_note_socket(c->pid, path);
         break;
     }
     default:

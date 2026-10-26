@@ -23,6 +23,7 @@
 #include <dlfcn.h>
 #include <drm_fourcc.h>
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -551,10 +552,12 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
     for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
         if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
             fd = a[1];
-    /* KWin's own gbm buffers, or apps' buffers registered in clients.c;
-     * any other dmabuf has no AHardwareBuffer we could hand the driver. */
+    /* The compositor's own gbm buffers, or apps' buffers registered with
+     * chameleon-kernel; any other dmabuf has no AHardwareBuffer we could
+     * hand the driver. */
     struct cham_bo *bo = cham_bo_from_fd(fd);
-    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : cham_client_ahb_from_fd(fd);
+    AHardwareBuffer *client = bo ? NULL : cham_client_ahb_acquire(fd);
+    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : client;
     if (!ahb) {
         t_error = EGL_BAD_MATCH;
         return EGL_NO_IMAGE_KHR;
@@ -565,13 +568,15 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
         *(void **)&get_client_buffer = real("eglGetNativeClientBufferANDROID");
     if (!create_image)
         *(void **)&create_image = real("eglCreateImageKHR");
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
     if (!get_client_buffer || !create_image) {
         t_error = EGL_BAD_ALLOC;
-        return EGL_NO_IMAGE_KHR;
+    } else {
+        const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+        image = create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb), image_attribs);
     }
-    const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb),
-                        image_attribs);
+    cham_client_ahb_release(client); /* the image holds its own */
+    return image;
 }
 
 static EGLImageKHR EGLAPIENTRY shim_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
@@ -756,5 +761,6 @@ int cham_egl_available(void)
 /* Android's EGLDisplay (there is one per process), for the vendor glue. */
 EGLDisplay cham_egl_android_display(void)
 {
+    cham_crash_arm();
     return android_display();
 }

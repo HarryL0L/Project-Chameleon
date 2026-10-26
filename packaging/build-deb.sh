@@ -6,9 +6,9 @@
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
 #   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, the launch
-#                           scripts, chameleon-kernel, chameleon-ime and bin/kwin_wayland - and the fake
-#                           libgbm.so, which must stay out of $PREFIX/lib where
-#                           it would replace Mesa's for every program
+#                           scripts, chameleon-kernel, chameleon-ime - and the fake libgbm.so,
+#                           which must stay out of $PREFIX/lib where it would replace Mesa's
+#                           outside Chameleon sessions too
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
 #   bin/chameleon-probe
 #   share/applications/chameleon-ime.desktop: the input method, as System
@@ -28,12 +28,11 @@ ROOT=$(mktemp -d)
 chmod 755 "$ROOT"
 trap 'rm -rf "$ROOT"' EXIT
 LIB="$ROOT$PREFIX/lib/chameleon"
-mkdir -p "$LIB/bin" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT$PREFIX/share/applications" \
+mkdir -p "$LIB" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT$PREFIX/share/applications" \
     "$ROOT$PREFIX/etc/xdg" "$ROOT/DEBIAN"
 
 install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$SHIM/chameleon-kernel" "$SHIM/chameleon-ime" "$LIB/"
-install -m 755 "$SHIM/bin/kwin_wayland" "$LIB/bin/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"

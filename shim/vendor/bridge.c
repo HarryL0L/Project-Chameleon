@@ -3,14 +3,15 @@
  * The vendor library's link to libchameleon.so, resolved at run time.
  *
  * libEGL_chameleon.so is loaded into every EGL program that glvnd routes to
- * it, while libchameleon.so (fake KMS device, gbm buffers, crash reporter)
- * is only LD_PRELOADed into kwin_wayland (bin/kwin_wayland). So the vendor
+ * it, while libchameleon.so (the card node, gbm buffers, crash reporter) is
+ * LD_PRELOADed only into the programs of a Chameleon session. So the vendor
  * does not link against it: the few core functions the EGL code uses are
  * looked up with dlsym(RTLD_DEFAULT) and simply absent elsewhere (no dmabuf
  * import, which only makes sense for Chameleon's own gbm buffers anyway).
  *
  * The crash breadcrumbs (last GL/EGL calls) live here and are handed to
- * libchameleon's crash reporter when it is there.
+ * libchameleon's crash reporter once the process renders with Android's
+ * driver.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -49,7 +50,8 @@ static struct {
     struct cham_bo *(*bo_from_fd)(int);
     AHardwareBuffer *(*bo_ahb)(struct cham_bo *);
     const uint32_t *(*formats)(int *);
-    AHardwareBuffer *(*client_ahb_from_fd)(int);
+    AHardwareBuffer *(*client_ahb_acquire)(int);
+    void (*client_ahb_release)(AHardwareBuffer *);
     void *(*gbm_window_get)(void *, uint32_t *);
 } core;
 
@@ -58,11 +60,15 @@ static void resolve(void)
     *(void **)&core.bo_from_fd = dlsym(RTLD_DEFAULT, "cham_bo_from_fd");
     *(void **)&core.bo_ahb = dlsym(RTLD_DEFAULT, "cham_bo_ahb");
     *(void **)&core.formats = dlsym(RTLD_DEFAULT, "cham_formats");
-    *(void **)&core.client_ahb_from_fd = dlsym(RTLD_DEFAULT, "cham_client_ahb_from_fd");
+    *(void **)&core.client_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_client_ahb_acquire");
+    *(void **)&core.client_ahb_release = dlsym(RTLD_DEFAULT, "cham_client_ahb_release");
     *(void **)&core.gbm_window_get = dlsym(RTLD_DEFAULT, "cham_gbm_window_get");
-    if (!core.bo_from_fd || !core.bo_ahb || !core.formats)
+    if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.client_ahb_acquire || !core.client_ahb_release)
         memset(&core, 0, sizeof core);
+}
 
+static void arm(void)
+{
     void (*attach)(const struct cham_crash_breadcrumbs *);
     *(void **)&attach = dlsym(RTLD_DEFAULT, "cham_crash_attach");
     if (attach) {
@@ -74,6 +80,12 @@ static void resolve(void)
         };
         attach(&crumbs);
     }
+}
+
+void cham_crash_arm(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, arm);
 }
 
 static void ensure_resolved(void)
@@ -98,9 +110,15 @@ AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo)
     return cham_core_present() ? core.bo_ahb(bo) : NULL;
 }
 
-AHardwareBuffer *cham_client_ahb_from_fd(int fd)
+AHardwareBuffer *cham_client_ahb_acquire(int fd)
 {
-    return cham_core_present() && core.client_ahb_from_fd ? core.client_ahb_from_fd(fd) : NULL;
+    return cham_core_present() ? core.client_ahb_acquire(fd) : NULL;
+}
+
+void cham_client_ahb_release(AHardwareBuffer *b)
+{
+    if (b && cham_core_present())
+        core.client_ahb_release(b);
 }
 
 void *cham_gbm_window(void *native, uint32_t *format)

@@ -14,10 +14,10 @@ OUT=$(mktemp -d)
 trap 'rm -rf "$OUT"' EXIT
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" shim/core/interpose.c \
-    shim/core/clients.c shim/core/crash.c shim/core/ahb.c shim/core/wlpath.c -ldl -lpthread -Wl,-soname,libchameleon.so
+    shim/core/crash.c shim/core/ahb.c -ldl -lpthread -Wl,-soname,libchameleon.so
 cc $CFLAGS -Ishim/include/libdrm -o "$OUT/chameleon-kernel" shim/core/main.c shim/core/card.c shim/core/kms.c \
     shim/core/link.c shim/core/evdev.c shim/core/input.c shim/core/keymap.c shim/core/clipboard.c shim/core/text.c \
-    shim/core/ahb.c shim/core/wlpath.c -ldl -lpthread
+    shim/core/clients.c shim/core/ahb.c shim/core/wlpath.c -ldl -lpthread
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon \
     -Wl,-soname,libgbm.so

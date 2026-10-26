@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * libc entry points libchameleon.so overrides when LD_PRELOADed
- * into kwin_wayland.
+ * libc entry points libchameleon.so overrides, LD_PRELOADed into every
+ * program of a Chameleon session (shim/chameleon), as a device node is
+ * there for every program.
  *
  * The card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
  * libchameleon_udev.so lists it as a drm device) is served by
@@ -13,9 +14,11 @@
  * shared by its dups and by other processes it is passed to, and released
  * once no copy of the pipe's read end is left. stat() and fstat() make it
  * look like a DRM character device; libdrm learns the rest from the card's
- * sysfs entries (shim/udev/sysfs.c). bind() is watched to learn KWin's
- * Wayland socket (wlpath.c), and the constructor hands KWin's children
- * their original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides
+ * sysfs entries (shim/udev/sysfs.c). A pipe is only taken for a card file
+ * when it holds one page, as card files' pipes do, so ordinary pipes cost
+ * nothing. bind() is watched to tell chameleon-kernel the compositor's
+ * Wayland socket, and a dmabuf import in the compositor gets Wayland apps'
+ * buffers from there (cham_client_ahb_acquire). (crash.c overrides
  * sigaction.)
  */
 #define _GNU_SOURCE
@@ -201,11 +204,12 @@ static void remember_locked(const struct stat *st, uint32_t id)
     g_known[g_known_next++ % KNOWN] = (struct known){st->st_dev, st->st_ino, id};
 }
 
-/* The card file `fd` is (its id), or 0. Only a pipe can be one. */
+/* The card file `fd` is (its id), or 0. Only a one-page pipe can be one. */
 static uint32_t card_file(int fd)
 {
     struct stat st;
-    if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode))
+    if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) ||
+        fcntl(fd, F_GETPIPE_SZ) != CHAM_CARD_PIPE_SIZE)
         return 0;
     lock_conn();
     for (int i = 0; i < KNOWN; i++) {
@@ -267,6 +271,24 @@ uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
     int64_t ret = call_locked(req, -1, bo, NULL);
     unlock_conn();
     return ret > 0 ? (uint32_t)ret : 0;
+}
+
+/* ---- Wayland apps' buffers (cham_shim.h) ---- */
+
+AHardwareBuffer *cham_client_ahb_acquire(int dmabuf)
+{
+    struct cham_msg req = {CARD_CLIENT_BUFFER, 0, 0, 0};
+    AHardwareBuffer *b = NULL;
+    lock_conn();
+    if (call_locked(req, dmabuf, NULL, NULL) == 1 && !(b = ahb_recv(g_conn)))
+        disconnect_locked(); /* out of step */
+    unlock_conn();
+    return b;
+}
+
+void cham_client_ahb_release(AHardwareBuffer *b)
+{
+    ahb_release(b);
 }
 
 int ioctl(int fd, int request, ...); /* ours, below */
@@ -514,13 +536,13 @@ int ioctl(int fd, int request, ...)
     return REAL(ioctl)(fd, request, arg);
 }
 
-/* ---- KWin's Wayland socket ---- */
+/* ---- the compositor's Wayland socket ---- */
 
-/* For clients.c here and chameleon-kernel's input thread (input.c), which
- * connects to it for the clipboard and the keyboard layout. */
+/* For chameleon-kernel: its input thread connects to it for the clipboard
+ * and the keyboard layout (input.c), and apps' buffers come next to it
+ * (clients.c). */
 static void note_socket(const char *path)
 {
-    input_note_socket(path);
     struct cham_msg req = {CARD_WAYLAND, 0, 0, 0};
     lock_conn();
     int s = connect_locked();
@@ -529,7 +551,8 @@ static void note_socket(const char *path)
     unlock_conn();
 }
 
-/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N". */
+/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N" (kwin_wayland_wrapper
+ * does for KWin). */
 int bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
     resolve_bind();
@@ -548,33 +571,6 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
             note_socket(path);
     }
     return ret;
-}
-
-/* ---- environment ----
- * The launcher saves the user's LD_PRELOAD / LD_LIBRARY_PATH. The dynamic
- * linker has already read ours, so restore theirs: Xwayland and every app
- * KWin starts must get Termux's normal Mesa, not this shim. */
-__attribute__((constructor)) static void restore_environment(void)
-{
-    const char *socket = getenv("CHAMELEON_WAYLAND_SOCKET"); /* bin/kwin_wayland: KWin won't bind() it */
-    if (socket && *socket == '/')
-        note_socket(socket);
-    const char *saved = getenv("CHAMELEON_ORIG_LD_PRELOAD");
-    if (saved) {
-        if (*saved)
-            setenv("LD_PRELOAD", saved, 1);
-        else
-            unsetenv("LD_PRELOAD");
-        unsetenv("CHAMELEON_ORIG_LD_PRELOAD");
-    }
-    saved = getenv("CHAMELEON_ORIG_LD_LIBRARY_PATH");
-    if (saved) {
-        if (*saved)
-            setenv("LD_LIBRARY_PATH", saved, 1);
-        else
-            unsetenv("LD_LIBRARY_PATH");
-        unsetenv("CHAMELEON_ORIG_LD_LIBRARY_PATH");
-    }
 }
 
 #pragma GCC visibility pop

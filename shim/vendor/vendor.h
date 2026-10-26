@@ -31,8 +31,12 @@ EGLBoolean cham_wl_destroy_surface(EGLDisplay dpy, EGLSurface surface);
 /* gles/gles.c */
 void *cham_gl_get_proc(const char *name);
 
-/* bridge.c: is libchameleon.so (KWin's fake KMS device) in this process? */
+/* bridge.c: is libchameleon.so (the card node, gbm's buffers) in this
+ * process? It is in every program of a Chameleon session. */
 int cham_core_present(void);
+/* bridge.c: this process renders with Android's driver: hand libchameleon's
+ * crash reporter the breadcrumbs (it installs itself then). */
+void cham_crash_arm(void);
 /* bridge.c: the Android window behind one of Chameleon's gbm surfaces (and
  * its DRM format), NULL for any other native window. */
 void *cham_gbm_window(void *native, uint32_t *format);

@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "cham_shim.h"
 
@@ -57,12 +58,18 @@ struct cham_msg;
  * for clipboard.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
 
-/* ---- wlpath.c: KWin's Wayland socket ---- */
-/* Seen when KWin bind()s it (interpose.c), or told by KWin's process
- * (card.c); the latest one counts. */
-void input_note_socket(const char *path);
-/* The socket's path, once known (env or bind()); "" if not yet. */
+/* ---- wlpath.c: the compositor's Wayland socket ---- */
+/* A process bound a Wayland socket (card.c). */
+void input_note_socket(pid_t pid, const char *path);
+/* The compositor's socket ($CHAMELEON_WAYLAND_SOCKET, or the one bound by
+ * the DRM master's process or an ancestor); "" if none yet. */
 void input_socket_path(char *out, size_t size);
+
+/* ---- clients.c: Wayland apps' GPU buffers (in chameleon-kernel) ---- */
+void clients_start(void);
+/* Calls fn with the registered app buffer whose dmabuf `fd` is, while it
+ * stays registered; returns fn's result, or -ENOENT. */
+int clients_with_buffer(int fd, int (*fn)(const AHardwareBuffer *b, void *arg), void *arg);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);
@@ -128,6 +135,8 @@ void kms_file_close(struct fake_fd *f);
 /* The app's screen when KWin started, in pixels and as the connector reports
  * its physical size. */
 void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
+/* The process that opened the file that is DRM master, 0 if none. */
+pid_t kms_master_pid(void);
 /* Size of the mode KWin has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The app's surface as the connector's mode; 1 if that changed it. */
@@ -151,7 +160,9 @@ enum {
     CARD_IOCTL,    /* id = file, a = request (+ the number of an fd sent with it << 32,
                     * plus one), b = the argument's address */
     CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
-    CARD_WAYLAND,  /* then a packet with KWin's Wayland socket path; no answer */
+    CARD_WAYLAND,  /* then a packet with a Wayland socket path a process bound; no answer */
+    CARD_CLIENT_BUFFER, /* + a dmabuf fd: -> a = 1 and then an app's registered
+                         * AHardwareBuffer behind it (clients.c), or -ENOENT */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */
@@ -172,6 +183,10 @@ int card_fd_get(int n);
 int card_fd_install(int fd, int cloexec);
 
 /* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
+/* A card file's event pipe holds one page, as the kernel gives a DRM file
+ * 4 KiB of event space; ordinary pipes hold more, so only a one-page pipe
+ * can be a card file. */
+#define CHAM_CARD_PIPE_SIZE ((int)sysconf(_SC_PAGESIZE))
 int real_fstat(int fd, struct stat *st);
 
 #endif

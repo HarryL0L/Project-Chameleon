@@ -228,8 +228,63 @@ static int wait_flip(int fd, int timeout_ms)
     return g_flips > before;
 }
 
-int main(void)
+/* Run again by exec, with libchameleon.so preloaded as in every program of
+ * a session: a card fd it inherited is still the card. */
+static int exec_card(int fd)
 {
+    struct stat st;
+    drmModeRes *r = drmModeGetResources(fd);
+    return fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226 && r && r->count_crtcs == 1 ? 0 : 1;
+}
+
+static int count_sockets(void)
+{
+    int sockets = 0;
+    char link[64], path[64];
+    for (int fd = 0; fd < 256; fd++) {
+        snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+        ssize_t n = readlink(path, link, sizeof link - 1);
+        sockets += n > 0 && strncmp(link, "socket:", 7) == 0;
+    }
+    return sockets;
+}
+
+/* ...and a program using only ordinary pipes never talks to chameleon-kernel
+ * (no socket appears). */
+static int pipes_only(void)
+{
+    int before = count_sockets(); /* inherited ones */
+    for (int i = 0; i < 50; i++) {
+        int p[2];
+        struct stat st;
+        if (pipe(p) != 0 || fstat(p[0], &st) != 0 || fstat(p[1], &st) != 0 || !S_ISFIFO(st.st_mode))
+            return 1;
+        drmVersion *v = drmGetVersion(p[0]); /* a DRM ioctl on a pipe: ENOTTY, from the pipe */
+        if (v)
+            return 1;
+    }
+    return count_sockets() == before ? 0 : 1;
+}
+
+/* Runs this program again with `mode` (and `arg`) and returns its exit code. */
+static int run_self(const char *mode, const char *arg)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/proc/self/exe", "kms_test", mode, arg, (char *)NULL);
+        _exit(127);
+    }
+    int status = -1;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "exec-card") == 0)
+        return exec_card(atoi(argv[2]));
+    if (argc >= 2 && strcmp(argv[1], "pipes") == 0)
+        return pipes_only();
     const char *dev_path = getenv("CHAMELEON_DRM_PATH");
     g_sock_path = getenv("CHAMELEON_SOCKET");
     if (!dev_path || !g_sock_path) {
@@ -787,6 +842,15 @@ int main(void)
     g_stop_calls = 1;
     pthread_join(calls, NULL);
     CHECK(forks_ok == 100, "fork while another thread is in card calls: the child's calls work (%d of 100)", forks_ok);
+
+    CHECK(fcntl(fda, F_GETPIPE_SZ) == (int)sysconf(_SC_PAGESIZE),
+          "a card file's event pipe holds one page, the kernel's 4 KiB of event space");
+    int inherited = fcntl(fda, F_DUPFD, 10); /* not close-on-exec */
+    char num[16];
+    snprintf(num, sizeof num, "%d", inherited);
+    CHECK(inherited >= 0 && run_self("exec-card", num) == 0, "a card fd passed across exec is still the card");
+    close(inherited);
+    CHECK(run_self("pipes", NULL) == 0, "a program using only ordinary pipes never contacts chameleon-kernel");
 
     /* Last: chameleon-kernel goes away (its pid from the card socket). */
     struct sockaddr_un kaddr = {.sun_family = AF_UNIX};
