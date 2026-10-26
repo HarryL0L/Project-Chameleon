@@ -557,8 +557,7 @@ int ioctl(int fd, int request, ...)
 /* ---- the compositor's Wayland socket ---- */
 
 /* For chameleon-kernel: its input thread connects to it for the clipboard
- * and the keyboard layout (input.c), and apps' buffers come next to it
- * (clients.c). */
+ * and the keyboard layout (input.c). */
 static void note_socket(const char *path)
 {
     struct cham_msg req = {CARD_WAYLAND, 0, 0, 0};
@@ -585,7 +584,7 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
         path[n] = 0;
         const char *base = strrchr(path, '/');
         base = base ? base + 1 : path;
-        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock / .chameleon */
+        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock */
             note_socket(path);
     }
     return ret;

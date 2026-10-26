@@ -140,15 +140,15 @@ struct cham_msg {
  * An app rendering through the Chameleon EGL vendor hands KWin its buffers
  * as zwp_linux_dmabuf_v1 wl_buffers. A dmabuf fd alone can't be turned back
  * into an AHardwareBuffer on Android, so the app first registers each buffer
- * with libchameleon.so inside KWin over a second socket,
- * "<KWin's Wayland socket path>.chameleon" (SOCK_SEQPACKET), and KWin's EGL
- * import then finds the AHardwareBuffer by the dmabuf's inode. */
+ * with chameleon-kernel over "$XDG_RUNTIME_DIR/chameleon-buffers"
+ * (SOCK_SEQPACKET), one per session like the card, and KWin's EGL import
+ * then finds the AHardwareBuffer by the dmabuf's inode. */
 enum cham_client_msg_type {
     CHAM_CLIENT_BUFFER_ADD = 200,    /* id = app's buffer id; next packet is the AHardwareBuffer */
     CHAM_CLIENT_BUFFER_ACK = 201,    /* id, a = 1 registered / 0 failed */
     CHAM_CLIENT_BUFFER_REMOVE = 202, /* id */
 };
-#define CHAM_CLIENT_SOCKET_SUFFIX ".chameleon"
+#define CHAM_CLIENT_SOCKET_NAME "chameleon-buffers"
 
 /* Filesystem socket the broker listens on for the presenter app; override
  * with $CHAMELEON_SOCKET. */

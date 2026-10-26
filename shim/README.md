@@ -112,8 +112,11 @@ screen keeps its first size instead of following the app's window).
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL
   (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
-  their buffers are registered with `chameleon-kernel` (`core/clients.c`),
-  where the compositor's dmabuf import finds them. The app waits for the GPU before handing a frame over (no
+  their buffers are registered with `chameleon-kernel` over
+  `$XDG_RUNTIME_DIR/chameleon-buffers` (`core/clients.c`), where the
+  compositor's dmabuf import finds them, also for apps behind a Wayland
+  proxy (Firefox's `wayland-proxy-N`). A second compositor nested inside the
+  session can't import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
 - EGL is reported as 1.5 even where the driver says 1.4 (Mali): Android's
   libEGL has every 1.5 function for any driver since Android 10, mapped to

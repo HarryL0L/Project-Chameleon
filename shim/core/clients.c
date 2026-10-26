@@ -7,17 +7,19 @@
  * eglCreateImageKHR(EGL_LINUX_DMA_BUF_EXT), but Android can't turn a bare
  * dmabuf fd back into an AHardwareBuffer. So before creating the wl_buffer
  * the app sends the AHardwareBuffer itself to chameleon-kernel, over
- * "<the compositor's Wayland socket>.chameleon" (common/chameleon_proto.h),
- * and the EGL vendor's dmabuf import in the compositor gets it from there
- * by the dmabuf's inode (card.c's CARD_CLIENT_BUFFER).
+ * "$XDG_RUNTIME_DIR/chameleon-buffers" (common/chameleon_proto.h), and the
+ * EGL vendor's dmabuf import in the compositor gets it from there by the
+ * dmabuf's inode (card.c's CARD_CLIENT_BUFFER). One socket per session, like
+ * the card: an app reaching the compositor through a proxy (Firefox's
+ * wayland-proxy-N) registers the same way.
  *
- * A thread waits until the compositor's Wayland socket is known, then
- * listens there. A buffer stays registered until the app removes it or
+ * A buffer stays registered until the app removes it or
  * disconnects; the compositor's EGLImages hold their own references, so
  * what is on screen stays valid.
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <stdint.h>
 #include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -131,7 +133,7 @@ static int listen_at(const char *path)
         return -1;
     }
     strcpy(addr.sun_path, path);
-    unlink(path); /* left over by a compositor that didn't exit cleanly */
+    unlink(path); /* left by a service that is gone */
     if (bind(s, (struct sockaddr *)&addr, sizeof addr) != 0 || listen(s, 16) != 0) {
         cham_log("clients: cannot listen on %s: %s", path, strerror(errno));
         close(s);
@@ -142,27 +144,12 @@ static int listen_at(const char *path)
 
 static void *clients_main(void *arg)
 {
-    (void)arg;
-    char wayland[sizeof(((struct sockaddr_un *)0)->sun_path)] = "", now[sizeof wayland];
-    int l = -1;
+    int l = (int)(intptr_t)arg;
     struct pollfd p[1 + MAX_CLIENTS];
     int n = 0; /* clients */
     for (;;) {
-        /* Next to the compositor's socket, once known, and the next one's
-         * after a compositor started again (apps already connected stay). */
-        input_socket_path(now, sizeof now);
-        if (now[0] && strcmp(now, wayland) != 0) {
-            char path[sizeof wayland + 16];
-            snprintf(wayland, sizeof wayland, "%s", now);
-            snprintf(path, sizeof path, "%s%s", wayland, CHAM_CLIENT_SOCKET_SUFFIX);
-            if (l >= 0)
-                close(l);
-            l = listen_at(path);
-            if (l >= 0)
-                cham_log("clients: GPU buffers from apps accepted at %s", path);
-        }
         p[0] = (struct pollfd){.fd = l, .events = POLLIN};
-        if (poll(p, 1 + (nfds_t)n, 200) < 0) {
+        if (poll(p, 1 + (nfds_t)n, -1) < 0) {
             if (errno == EINTR)
                 continue;
             break;
@@ -177,7 +164,7 @@ static void *clients_main(void *arg)
             p[i] = p[n--];
             i--;
         }
-        if (l >= 0 && (p[0].revents & POLLIN)) {
+        if (p[0].revents & POLLIN) {
             int c = accept4(l, NULL, NULL, SOCK_CLOEXEC);
             if (c >= 0 && n < MAX_CLIENTS)
                 p[++n] = (struct pollfd){.fd = c, .events = POLLIN};
@@ -185,14 +172,20 @@ static void *clients_main(void *arg)
                 close(c);
         }
     }
-    if (l >= 0)
-        close(l);
+    close(l);
     return NULL;
 }
 
 void clients_start(void)
 {
+    const char *dir = getenv("XDG_RUNTIME_DIR");
+    char path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    if (!dir || snprintf(path, sizeof path, "%s/%s", dir, CHAM_CLIENT_SOCKET_NAME) >= (int)sizeof path)
+        return;
+    int l = listen_at(path);
     pthread_t t;
-    if (pthread_create(&t, NULL, clients_main, NULL) == 0)
+    if (l >= 0 && pthread_create(&t, NULL, clients_main, (void *)(intptr_t)l) == 0)
         pthread_detach(t);
+    else if (l >= 0)
+        close(l);
 }

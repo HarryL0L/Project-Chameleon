@@ -7,7 +7,7 @@
  * Weston and sway bind their own, and a proxy (Firefox's wayland-proxy-N)
  * or a nested compositor binding sockets of its own doesn't count.
  * $CHAMELEON_WAYLAND_SOCKET names it instead. The input thread connects to
- * it (input.c) and apps' buffers come next to it (clients.c).
+ * it (input.c).
  */
 #include <errno.h>
 #include <signal.h>

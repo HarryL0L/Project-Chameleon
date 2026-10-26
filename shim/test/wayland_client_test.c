@@ -315,11 +315,13 @@ int main(void)
     *(void **)&client_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_client_ahb_acquire");
     *(void **)&client_ahb_release = dlsym(RTLD_DEFAULT, "cham_client_ahb_release");
 
-    /* As a compositor: DRM master first, then its socket. */
+    /* As a compositor: DRM master first, then its socket, and a second one
+     * the app uses below like a proxy's. */
     const char *card_path = getenv("CHAMELEON_DRM_PATH");
     int card = open(card_path ? card_path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
     struct wl_display *server = wl_display_create();
-    if (card < 0 || wl_display_add_socket(server, socket_name) != 0) {
+    if (card < 0 || wl_display_add_socket(server, socket_name) != 0 ||
+        wl_display_add_socket(server, "wayland-proxy-cwl") != 0) {
         fprintf(stderr, "cannot create the Wayland socket\n");
         return 1;
     }
@@ -329,33 +331,16 @@ int main(void)
     pthread_create(&thread, NULL, server_main, server);
 
     printf("GPU rendering for Wayland apps\n");
-    /* chameleon-kernel opens its buffer socket next to ours once told. */
     char registry[256];
-    snprintf(registry, sizeof registry, "%s/%s.chameleon", runtime, socket_name);
+    snprintf(registry, sizeof registry, "%s/chameleon-buffers", runtime);
     struct stat st;
-    for (int i = 0; i < 100 && stat(registry, &st) != 0; i++)
-        usleep(20 * 1000);
-    CHECK(client_ahb_acquire && stat(registry, &st) == 0, "chameleon-kernel accepts app buffers at %s.chameleon",
-          socket_name);
+    CHECK(client_ahb_acquire && stat(registry, &st) == 0 && S_ISSOCK(st.st_mode),
+          "chameleon-kernel accepts app buffers at chameleon-buffers");
 
-    /* Another program's Wayland socket (Firefox's proxy, a nested
-     * compositor): not the master's or an ancestor's, so it doesn't count. */
-    pid_t proxy = fork();
-    if (proxy == 0) {
-        struct sockaddr_un addr = {.sun_family = AF_UNIX};
-        snprintf(addr.sun_path, sizeof addr.sun_path, "%s/wayland-proxy-1", runtime);
-        int s = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (s < 0 || bind(s, (struct sockaddr *)&addr, sizeof addr) != 0)
-            _exit(1);
-        sleep(2);
-        _exit(0);
-    }
-    usleep(800 * 1000);
-    char proxy_registry[256];
-    snprintf(proxy_registry, sizeof proxy_registry, "%s/wayland-proxy-1.chameleon", runtime);
-    CHECK(stat(proxy_registry, &st) != 0 && stat(registry, &st) == 0,
-          "a program binding wayland-proxy-1 doesn't take the compositor's place");
-    waitpid(proxy, NULL, 0);
+    /* The app reaches the compositor through another socket, as behind
+     * Firefox's wayland-proxy-N: its buffers are registered all the same. */
+    setenv("WAYLAND_DISPLAY", "wayland-proxy-cwl", 1);
+    socket_name = "wayland-proxy-cwl";
 
     struct wl_display *display = wl_display_connect(socket_name);
     struct wl_registry *reg = wl_display_get_registry(display);

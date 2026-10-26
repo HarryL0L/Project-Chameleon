@@ -349,6 +349,28 @@ int main(void)
 
     int fd = open(dev_path, O_RDWR | O_CLOEXEC); /* starts the shim's presenter link */
     CHECK(fd >= 0, "open fake DRM device");
+    /* Another program binding a Wayland socket (Firefox's proxy, a nested
+     * compositor) is neither the DRM master nor its ancestor: the input
+     * thread must still connect to ours. */
+    int proxy_go[2], proxy_bound[2];
+    pipe(proxy_go);
+    pipe(proxy_bound);
+    pid_t proxy = fork();
+    if (proxy == 0) {
+        struct sockaddr_un pa = {.sun_family = AF_UNIX};
+        snprintf(pa.sun_path, sizeof pa.sun_path, "%s/wayland-proxy-1", getenv("XDG_RUNTIME_DIR"));
+        int s = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        unlink(pa.sun_path);
+        if (s < 0 || bind(s, (struct sockaddr *)&pa, sizeof pa) != 0 || listen(s, 4) != 0)
+            _exit(2);
+        char ch = 0;
+        write(proxy_bound[1], &ch, 1);
+        read(proxy_go[0], &ch, 1);   /* the parent has typed through the input thread */
+        _exit(accept(s, NULL, NULL) >= 0); /* 1: the input thread came here */
+    }
+    char ch;
+    read(proxy_bound[0], &ch, 1);
+    usleep(200 * 1000); /* chameleon-kernel has heard of it */
     struct pollfd p = {l, POLLIN, 0};
     CHECK(poll(&p, 1, 5000) == 1, "shim connects to the presenter");
     int c = accept(l, NULL, NULL);
@@ -381,6 +403,11 @@ int main(void)
     }
     CHECK(strcmp(got, "42=1 30=1 30=0 42=0 42=1 5=1 5=0 42=0 ") == 0,
           "'A' typed as Shift+A, '$' as Shift+4 (not KEY_DOLLAR), no key for the lambda (%s)", got);
+    int status = -1;
+    write(proxy_go[1], "", 1);
+    waitpid(proxy, &status, 0);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "a program binding wayland-proxy-1 doesn't take the compositor's place (%d)", status);
 
     /* A layout change: characters on the AltGr level are typed with it. */
     send_keymap("de");

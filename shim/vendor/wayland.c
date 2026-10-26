@@ -22,8 +22,10 @@
  * The surfaces the app sees are ours (struct surface); egl.c swaps in the
  * Android surface wherever one is passed to the driver.
  *
- * Only offered when the compositor runs on Chameleon (its
- * "<wayland socket>.chameleon" exists); elsewhere glvnd moves on to Mesa.
+ * Only offered in a Chameleon session (chameleon-kernel's
+ * "$XDG_RUNTIME_DIR/chameleon-buffers" answers), whatever socket the app
+ * reaches the compositor through (a proxy passes the dmabufs on unchanged);
+ * elsewhere glvnd moves on to Mesa.
  */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
@@ -273,18 +275,13 @@ static pthread_mutex_t g_displays_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct display *g_displays;
 static int g_wayland_used;
 
-/* "<KWin's Wayland socket>.chameleon" for the display this process uses. */
+/* chameleon-kernel's buffer socket for this session. */
 static int registry_path(char *out, size_t size)
 {
-    const char *name = getenv("WAYLAND_DISPLAY");
-    if (!name || !*name)
-        name = "wayland-0";
-    if (name[0] == '/')
-        return snprintf(out, size, "%s%s", name, CHAM_CLIENT_SOCKET_SUFFIX) < (int)size;
     const char *dir = getenv("XDG_RUNTIME_DIR");
     if (!dir || !*dir)
         return 0;
-    return snprintf(out, size, "%s/%s%s", dir, name, CHAM_CLIENT_SOCKET_SUFFIX) < (int)size;
+    return snprintf(out, size, "%s/%s", dir, CHAM_CLIENT_SOCKET_NAME) < (int)size;
 }
 
 int cham_wl_platform_available(void)
