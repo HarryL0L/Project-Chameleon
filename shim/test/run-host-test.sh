@@ -49,6 +49,11 @@ cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(
 start_kernel "$OUT/runtime-ev" "$OUT/presenter-evdev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
+# A forked child doesn't need the dynamic linker for overridden calls.
+cc -O1 -g -Wall -Wextra -o "$OUT/fork_test" shim/test/fork_test.c
+mkdir -p "$OUT/ld-debug"
+LD_BIND_NOW=1 LD_DEBUG=symbols LD_DEBUG_OUTPUT="$OUT/ld-debug/log" \
+    LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/fork_test" "$OUT/ld-debug/log"
 # The glvnd EGL vendor, driven through the system's (glvnd) libEGL/libGLESv2
 # with a stand-in for Android's EGL/GLES driver.
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c

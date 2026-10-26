@@ -37,7 +37,7 @@
 #define NEXT(name)                                     \
     static __typeof__(name) *next_##name;              \
     if (!next_##name)                                  \
-        *(void **)&next_##name = dlsym(RTLD_NEXT, #name)
+        *(void **)&next_##name = cham_next(#name)
 
 #define STR(x) #x
 #define XSTR(x) STR(x)
@@ -236,7 +236,7 @@ EXPORT ssize_t __readlink_chk(const char *path, char *out, size_t size, size_t o
     char buf[PATH_MAX];
     static ssize_t (*next)(const char *, char *, size_t, size_t);
     if (!next)
-        *(void **)&next = dlsym(RTLD_NEXT, "__readlink_chk");
+        *(void **)&next = cham_next("__readlink_chk");
     path = cham_sys_path(path, buf, sizeof buf);
     return next ? next(path, out, size, out_size) : readlink(path, out, size);
 }
@@ -246,7 +246,7 @@ EXPORT ssize_t __readlinkat_chk(int dirfd, const char *path, char *out, size_t s
     char buf[PATH_MAX];
     static ssize_t (*next)(int, const char *, char *, size_t, size_t);
     if (!next)
-        *(void **)&next = dlsym(RTLD_NEXT, "__readlinkat_chk");
+        *(void **)&next = cham_next("__readlinkat_chk");
     path = cham_sys_path(path, buf, sizeof buf);
     return next ? next(dirfd, path, out, size, out_size) : readlinkat(dirfd, path, out, size);
 }

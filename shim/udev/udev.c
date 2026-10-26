@@ -45,7 +45,7 @@ struct udev_list_entry;
 #define NEXT(name)                                     \
     static __typeof__(name) *next_##name;              \
     if (!next_##name)                                  \
-        *(void **)&next_##name = dlsym(RTLD_NEXT, #name)
+        *(void **)&next_##name = cham_next(#name)
 
 #define MAGIC_ENTRY 0x43484d4c454e5452ull  /* "CHMLENTR" */
 #define MAGIC_DEVICE 0x43484d4c44455643ull /* "CHMLDEVC" */

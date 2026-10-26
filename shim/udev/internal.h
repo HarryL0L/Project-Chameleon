@@ -32,6 +32,12 @@ int cham_evdev_index(const char *path, const char *prefix);
 /* Whether the card exists: the compositor's libchameleon.so is serving. */
 int cham_card_present(void);
 
+/* evdev.c: the next definition of a function this library overrides
+ * (dlsym(RTLD_NEXT)), looked up when the library loads: dlsym takes the
+ * dynamic linker's lock, which a forked child may have inherited held by a
+ * thread that no longer exists there. */
+void *cham_next(const char *name);
+
 /* sysfs.c: `path` inside the card's sysfs entries or /dev/dri, as its place
  * in the tree standing for them (in buf); else `path` itself. */
 const char *cham_sys_path(const char *path, char *buf, size_t size);

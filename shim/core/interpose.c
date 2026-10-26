@@ -70,6 +70,24 @@ DECLARE_REAL(int, fstat, int, struct stat *)
 DECLARE_REAL(int, ioctl, int, int, ...)
 DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
 
+/* All looked up when the library loads, not on first use: dlsym takes the
+ * dynamic linker's lock, and a forked child (Firefox launching a content
+ * process) may have inherited it held by a thread that no longer exists
+ * there. */
+__attribute__((constructor)) static void resolve_all(void)
+{
+    resolve_open();
+    resolve_openat();
+    resolve___open_2();
+    resolve___openat_2();
+    resolve_stat();
+    resolve_lstat();
+    resolve_fstatat();
+    resolve_fstat();
+    resolve_ioctl();
+    resolve_bind();
+}
+
 static const char *fake_path(void)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");

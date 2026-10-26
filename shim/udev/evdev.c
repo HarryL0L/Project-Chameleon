@@ -48,7 +48,30 @@ typedef unsigned long ioctl_request;
 #define NEXT(name)                                     \
     static __typeof__(name) *next_##name;              \
     if (!next_##name)                                  \
-        *(void **)&next_##name = dlsym(RTLD_NEXT, #name)
+        *(void **)&next_##name = cham_next(#name)
+
+/* Every libc function the library overrides (evdev.c, sysfs.c), looked up
+ * once at load (internal.h). */
+static const char *const k_next_names[] = {
+    "open", "openat", "__open_2", "__openat_2", "read", "__read_chk", "close", "dup", "dup2", "dup3",
+    "fcntl", "ioctl", "stat", "lstat", "fstat", "fstatat", "fopen", "opendir", "access", "faccessat",
+    "readlink", "readlinkat", "__readlink_chk", "__readlinkat_chk", "realpath",
+};
+static void *g_next[sizeof k_next_names / sizeof k_next_names[0]];
+
+__attribute__((constructor)) static void resolve_next(void)
+{
+    for (size_t i = 0; i < sizeof k_next_names / sizeof k_next_names[0]; i++)
+        g_next[i] = dlsym(RTLD_NEXT, k_next_names[i]);
+}
+
+void *cham_next(const char *name)
+{
+    for (size_t i = 0; i < sizeof k_next_names / sizeof k_next_names[0]; i++)
+        if (g_next[i] && strcmp(k_next_names[i], name) == 0)
+            return g_next[i];
+    return dlsym(RTLD_NEXT, name); /* not looked up yet, or not in the list */
+}
 
 #define MAX_OPEN 64
 #define MAX_FD 65536 /* fds beyond this aren't recognised */
@@ -706,7 +729,7 @@ EXPORT int fcntl(int fd, int cmd, ...)
     va_end(ap);
     static int (*next_fcntl)(int, int, ...);
     if (!next_fcntl)
-        *(void **)&next_fcntl = dlsym(RTLD_NEXT, "fcntl");
+        *(void **)&next_fcntl = cham_next("fcntl");
     int ret = next_fcntl(fd, cmd, arg);
     if (ret >= 0 && (cmd == F_DUPFD || cmd == F_DUPFD_CLOEXEC) && fd >= 0 && fd < MAX_FD && g_fd[fd]) {
         struct client *c = client_of(fd);
@@ -911,6 +934,6 @@ EXPORT int ioctl(int fd, ioctl_request request, ...)
     }
     static int (*next_ioctl)(int, ioctl_request, ...); /* bionic's ioctl is overloaded: no __typeof__ */
     if (!next_ioctl)
-        *(void **)&next_ioctl = dlsym(RTLD_NEXT, "ioctl");
+        *(void **)&next_ioctl = cham_next("ioctl");
     return next_ioctl(fd, request, arg);
 }

@@ -39,6 +39,12 @@ CHAM_EXPORT void cham_crash_attach(const struct cham_crash_breadcrumbs *crumbs)
 
 static int (*real_sigaction)(int, const struct sigaction *, struct sigaction *);
 
+__attribute__((constructor)) static void resolve_sigaction(void)
+{
+    /* at load, not in a forked child (interpose.c's resolve_all) */
+    *(void **)&real_sigaction = dlsym(RTLD_NEXT, "sigaction");
+}
+
 static struct sigaction g_prev[2];  /* what was installed before us */
 static struct sigaction g_chain[2]; /* installed after us (e.g. KCrash) */
 static int g_have_chain[2];
