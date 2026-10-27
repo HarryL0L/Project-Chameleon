@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Chameleon's input devices, as evdev devices: libchameleon.so inside KWin
- * (which gets the app's input over the presenter link) serves them on a
+ * Chameleon's input devices, as evdev devices: chameleon-kernel (which
+ * gets the app's input over the presenter link) serves them on a
  * local socket, and libchameleon_udev.so makes them appear in any process as
  * udev devices with /dev/input/eventN nodes.
  *

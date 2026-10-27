@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The fake KMS device KWin drives with atomic mode setting, in
+ * The fake KMS device the compositor drives with atomic mode setting, in
  * chameleon-kernel (card.c serves it to every process).
  *
  * One connector (DSI-1, the Chameleon app's surface) -> one encoder -> one
@@ -143,7 +143,7 @@ struct blob {
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
 static int g_plane_shown;           /* ...and it fills the active CRTC */
-static int g_screen_off;            /* KWin turned its screen off (idle, DPMS) */
+static int g_screen_off;            /* The compositor turned its screen off (idle, DPMS) */
 static int g_screen_was_on;         /* ...after it had been on */
 static struct fb *g_fbs;
 static struct blob *g_blobs;
@@ -910,7 +910,7 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     do {                                                                                 \
         if (!(a->flags & DRM_MODE_ATOMIC_TEST_ONLY) && refusals < 20) {                 \
             refusals++;                                                                  \
-            cham_log("refusing KWin's commit: " __VA_ARGS__);                            \
+            cham_log("refusing the compositor's commit: " __VA_ARGS__);                  \
         }                                                                                \
         return (err);                                                                    \
     } while (0)
@@ -956,10 +956,10 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
         REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
     /* A plane bigger than the CRTC is clipped, as with real drivers: KWin's
      * first commit after a mode change can still carry the previous frame's
-     * size. A smaller one is only KWin putting its cursor alone on an empty
-     * screen (nothing else ever reaches this plane: client buffers can't be
-     * scanned out); it is accepted but not shown, since the app shows whole
-     * buffers - the previous frame stays until a full one comes. */
+     * size. A smaller one is only the compositor putting its cursor alone on
+     * an empty screen (nothing else ever reaches this plane: client buffers
+     * can't be scanned out); it is accepted but not shown, since the app
+     * shows whole buffers - the previous frame stays until a full one comes. */
     int partial = 0;
     if (s.fb && !s.plane_crtc)
         REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
@@ -995,15 +995,15 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
     if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
                             mode->vdisplay != old_mode->vdisplay))
-        cham_log("KWin set mode %ux%u", mode->hdisplay, mode->vdisplay);
-    /* Off after having been on: KWin's DPMS off (CRTC inactive, mode
+        cham_log("the compositor set mode %ux%u", mode->hdisplay, mode->vdisplay);
+    /* Off after having been on: the compositor's DPMS off (CRTC inactive, mode
      * cleared) or the DPMS property; e.g. Plasma's power management after a
      * while without input. */
     if (on && s.dpms == 0)
         g_screen_was_on = 1;
     int screen_off = g_screen_was_on && !(on && s.dpms == 0);
     if (screen_off != g_screen_off) {
-        cham_log("KWin turned its screen %s", screen_off ? "off" : "on");
+        cham_log("the compositor turned its screen %s", screen_off ? "off" : "on");
         link_screen_off_locked(screen_off);
     }
     g_screen_off = screen_off;

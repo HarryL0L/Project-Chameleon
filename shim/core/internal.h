@@ -41,7 +41,7 @@ int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, i
  * will answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
 void link_forget_bo_locked(struct cham_bo *bo);
-/* Tells the presenter KWin turned its screen off (1) or on (0). */
+/* Tells the presenter the compositor turned its screen off (1) or on (0). */
 void link_screen_off_locked(int off);
 /* Page-flip event bookkeeping (one pending flip, like KMS). */
 int link_flip_pending_locked(void);
@@ -132,18 +132,18 @@ void kms_init_once(void);
  * its master, handles, framebuffers, blobs and pending event go. */
 void kms_file_open(struct fake_fd *f);
 void kms_file_close(struct fake_fd *f);
-/* The app's screen when KWin started, in pixels and as the connector reports
- * its physical size. */
+/* The app's screen when the compositor started, in pixels and as the
+ * connector reports its physical size. */
 void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
 /* The process that opened the file that is DRM master, 0 if none. */
 pid_t kms_master_pid(void);
-/* Size of the mode KWin has set, 0x0 before the first modeset. */
+/* Size of the mode the compositor has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The app's surface as the connector's mode; 1 if that changed it. */
 int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz);
-/* The buffer on KWin's screen, or NULL if the screen shows none. */
+/* The buffer on the compositor's screen, or NULL if the screen shows none. */
 struct cham_bo *kms_screen_bo_locked(void);
-/* KWin turned its screen off (it wakes on input). */
+/* The compositor turned its screen off (it wakes on input). */
 int kms_screen_off_locked(void);
 /* `arg` is an address in the calling process. 0 / >=0 or -errno. */
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);

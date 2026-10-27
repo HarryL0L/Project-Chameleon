@@ -21,7 +21,7 @@ static inline dev_t cham_evdev_devnum(int index)
     return makedev(13, CHAM_EVDEV_MINOR_BASE + index);
 }
 
-/* The devices KWin's libchameleon.so serves; 0 if it isn't running. */
+/* The devices chameleon-kernel serves; 0 if it isn't running. */
 int cham_evdev_list(struct cham_evdev_info *out, int max);
 /* A connection to the server for device `index` (its records follow:
  * common/chameleon_evdev.h), or -1; fills *info with the device's

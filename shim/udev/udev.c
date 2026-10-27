@@ -7,13 +7,14 @@
  * kernel's devices and can't open its uevent socket, so:
  *  - every udev monitor is Chameleon's own: a connection to the server that
  *    receives its uevents (so far the card's hotplug when the app's window
- *    changes), or, while no server runs, an eventfd that stays quiet. KWin's
- *    GpuManager and libinput both need a working monitor to start at all.
- *  - subsystems "input" and "drm" are Chameleon's: the input devices KWin's
- *    libchameleon.so serves (common/chameleon_evdev.h), as devices eventN
+ *    changes), or, while no server runs, an eventfd that stays quiet.
+ *    Compositors (KWin's GpuManager) and libinput need a working monitor to
+ *    start at all.
+ *  - subsystems "input" and "drm" are Chameleon's: the input devices
+ *    chameleon-kernel serves (common/chameleon_evdev.h), as devices eventN
  *    with node /dev/input/eventN (evdev.c answers for those nodes), and
- *    the fake KMS card it answers for in KWin's process, card0, with its
- *    node /dev/dri/card0 - all while that server runs. Enumerations list
+ *    the fake KMS card it serves, card0, with its node /dev/dri/card0 - all
+ *    while chameleon-kernel runs. Enumerations list
  *    them, followed by the real libudev's devices of every other subsystem
  *    (power_supply, backlight, ...), so a program can run with this
  *    library preloaded whatever it looks for.
@@ -98,7 +99,7 @@ static void link_entries(struct entry *e, int n)
         e[i].next = i + 1 < n ? &e[i + 1] : NULL;
 }
 
-/* ---- Chameleon's input devices, from KWin's libchameleon.so ---- */
+/* ---- Chameleon's input devices, from chameleon-kernel ---- */
 
 static int connect_server(void)
 {
@@ -266,7 +267,7 @@ static struct udev_device *new_card(struct udev *udev)
     return (struct udev_device *)d;
 }
 
-/* Device `index` if KWin serves it now, else NULL. */
+/* Device `index` if chameleon-kernel serves it now, else NULL. */
 static struct udev_device *new_dev(struct udev *udev, int index)
 {
     struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];

@@ -69,7 +69,7 @@ __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EG
 start_kernel "$OUT/runtime-vendor" "$OUT/presenter-none" 0
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" XDG_RUNTIME_DIR="$OUT/runtime-vendor" \
-    CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_KWIN=1 \
+    CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_SESSION=1 \
     CHAMELEON_ANDROID_NATIVEWINDOW="$OUT/fake_android_gl.so" CHAMELEON_ANDROID_MEDIANDK="$OUT/fake_android_gl.so" \
     VENDOR_TEST_GBM="$OUT/libgbm.so" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
 # GPU rendering for Wayland apps: the vendor's Wayland platform against a

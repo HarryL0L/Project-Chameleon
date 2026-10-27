@@ -9,7 +9,7 @@
  *    which, as evdev does, also remove the queued events of their type;
  *  - per-file timestamps' clock, EVIOCGRAB (through the server, since it
  *    involves every reader), EVIOCREVOKE.
- * The events come from KWin's libchameleon.so over a socket (one per open
+ * The events come from chameleon-kernel over a socket (one per open
  * file; common/chameleon_evdev.h), read by one helper thread per process.
  * The program's fd is a pipe's read end that holds a byte while the queue
  * holds a whole frame, so poll()/epoll work on it natively; read(), close(),
@@ -238,7 +238,7 @@ static void flush_type(struct client *c, uint16_t type)
     c->head = head;
 }
 
-/* The server's socket closed: the device is gone (or KWin is). */
+/* The server's socket closed: the device is gone (or chameleon-kernel is). */
 static void gone(struct client *c)
 {
     c->gone = 1;

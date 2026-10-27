@@ -2,7 +2,7 @@
 /*
  * The app's input as evdev devices (common/chameleon_evdev.h), served on
  * $XDG_RUNTIME_DIR/chameleon-evdev to libchameleon_udev.so, which shows
- * them to libinput (KWin's own, here) and to any other program:
+ * them to libinput (the compositor's own, here) and to any other program:
  *  0 touchscreen: the app's direct touch, multitouch protocol B;
  *  1 keyboard: hardware keyboards, by their Linux key codes;
  *  2 mouse: a relative mouse, fed from the mouse the app captures
@@ -639,7 +639,7 @@ static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
     if (t == &g_pad) {
         uint32_t w, h, mm_w, mm_h;
         kms_mode_size(&w, &h);
-        if (!w || !h) /* before KWin's first modeset */
+        if (!w || !h) /* before the compositor's first modeset */
             kms_screen_size(&w, &h, &mm_w, &mm_h);
         pthread_mutex_lock(&g_evdev_lock);
         int32_t size = g_pad_size;

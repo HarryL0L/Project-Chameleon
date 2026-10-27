@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * EGL_PLATFORM_WAYLAND_KHR for apps: Wayland windows rendered by Android's
- * GPU driver and handed to KWin without copies.
+ * GPU driver and handed to the compositor without copies.
  *
  * Android's EGL only renders into ANativeWindows, and an AImageReader is one
  * a process can create for itself. So each wl_egl_window gets an
@@ -259,7 +259,7 @@ struct wl_egl_window {
     struct wl_proxy *surface;
 };
 
-/* ---- the connection to KWin ---- */
+/* ---- the connection to the compositor ---- */
 
 struct display {
     struct wl_display *wl;
@@ -392,7 +392,7 @@ EGLDisplay cham_wl_get_display(void *native)
         wl.proxy_destroy(registry);
         d->registry_sock = connect_registry();
         if (!d->dmabuf || d->registry_sock < 0) {
-            cham_log("wayland: KWin offers no %s; Wayland windows left to other vendors",
+            cham_log("wayland: the compositor offers no %s; Wayland windows left to other vendors",
                      d->dmabuf ? "Chameleon buffer socket" : "zwp_linux_dmabuf_v1");
             if (d->dmabuf)
                 wl.proxy_destroy(d->dmabuf);
@@ -411,7 +411,8 @@ EGLDisplay cham_wl_get_display(void *native)
     return cham_egl_android_display();
 }
 
-/* Registers an AHardwareBuffer with KWin; returns its id, 0 on failure. */
+/* Registers an AHardwareBuffer with chameleon-kernel; returns its id, 0 on
+ * failure. */
 static uint32_t register_buffer(struct display *d, const AHardwareBuffer *ahb)
 {
     pthread_mutex_lock(&d->lock);
@@ -452,8 +453,8 @@ static void unregister_buffer(struct display *d, uint32_t id)
 struct buffer {
     AHardwareBuffer *ahb; /* identity only; the reader owns it */
     struct wl_proxy *wl_buffer;
-    uint32_t id;          /* registration with KWin */
-    AImage *image;        /* held while KWin uses the buffer */
+    uint32_t id;          /* registration with chameleon-kernel */
+    AImage *image;        /* held while the compositor uses the buffer */
 };
 
 /* One AImageReader + Android window surface at a given size. */
@@ -463,7 +464,7 @@ struct generation {
     int width, height;
     struct buffer buffers[MAX_BUFFERS];
     int nbuffers;
-    struct generation *next; /* retired ones, still in use by KWin */
+    struct generation *next; /* retired ones, still in use by the compositor */
 };
 
 struct surface {
@@ -570,7 +571,7 @@ static struct generation *generation_new(struct surface *s, int width, int heigh
     return g;
 }
 
-/* Destroys a generation. KWin keeps what it shows through its own
+/* Destroys a generation. The compositor keeps what it shows through its own
  * references, so only our side is released here. */
 static void generation_free(struct surface *s, struct generation *g)
 {
@@ -716,8 +717,8 @@ EGLSurface cham_wl_android_surface(EGLSurface surface)
 }
 
 /* Follows wl_egl_window_resize(): a new reader at the new size; the old one
- * is kept until KWin has the first new frame. Called where the app is about
- * to draw (make current) and after a swap. */
+ * is kept until the compositor has the first new frame. Called where the app
+ * is about to draw (make current) and after a swap. */
 static void follow_resize(struct surface *s)
 {
     if (!s->window || (s->window->width == s->gen->width && s->window->height == s->gen->height))
@@ -808,7 +809,7 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
         dmabuf = nh->data[0];
     uint32_t id = dmabuf >= 0 ? register_buffer(s->d, ahb) : 0;
     if (!id) {
-        cham_log("wayland: KWin did not take a buffer");
+        cham_log("wayland: the compositor did not take a buffer");
         return NULL;
     }
 
@@ -830,7 +831,7 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
     return b;
 }
 
-/* Frees retired generations none of whose buffers KWin still holds. */
+/* Frees retired generations none of whose buffers the compositor still holds. */
 static void reap_retired(struct surface *s)
 {
     for (struct generation **p = &s->retired; *p;) {
@@ -883,7 +884,7 @@ EGLBoolean cham_wl_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
         if (r == AMEDIA_OK && image)
             break;
         if (r == AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED && dispatch(s) == 0)
-            continue; /* KWin still holds them all: wait for a release */
+            continue; /* The compositor still holds them all: wait for a release */
         if (r == AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE && tries < 100) {
             usleep(1000);
             continue;
@@ -903,7 +904,8 @@ EGLBoolean cham_wl_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
     if (b->image) /* can't happen: the reader hands out a buffer once */
         android.image_delete(b->image);
     b->image = image;
-    /* KWin samples the buffer with no fence of ours: wait for the GPU here. */
+    /* The compositor samples the buffer with no fence of ours: wait for the
+     * GPU here. */
     if (fence >= 0) {
         struct pollfd p = {.fd = fence, .events = POLLIN};
         while (poll(&p, 1, -1) < 0 && errno == EINTR)

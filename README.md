@@ -188,7 +188,7 @@ Code: [`shim/gbm/`](shim/gbm/)
   *vendor* libraries. Chameleon is one: glvnd asks it for displays and for
   every EGL and GL entry point, and it hands out Android's
   `libEGL.so` / `libGLESv2.so`, i.e. the vendor driver.
-- **Inside KWin**, it adds what a Mesa GBM stack provides: the GBM platform,
+- **In a Chameleon session**, it adds what a Mesa GBM stack provides: the GBM platform,
   and `EGL_EXT_image_dma_buf_import`, which imports a Chameleon buffer as its
   `AHardwareBuffer` through `EGL_NATIVE_BUFFER_ANDROID`.
 - **Driver workarounds:** it rewrites GLSL `#if GL_ext` to
@@ -199,7 +199,7 @@ Code: [`shim/gbm/`](shim/gbm/)
   `EGL_PLATFORM_WAYLAND_KHR`. Each `wl_egl_window` renders into an
   `AImageReader`, a real Android window surface, so the driver's buffer
   handling works as usual. Every frame then reaches KWin as an
-  `AHardwareBuffer`: it is registered with KWin's shim, wrapped in a
+  `AHardwareBuffer`: it is registered with `chameleon-kernel`, wrapped in a
   `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
   is copied, and frame callbacks pace the app.
 - **Qt without a rebuild:** Android's driver speaks OpenGL ES only, while

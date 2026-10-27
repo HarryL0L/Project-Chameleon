@@ -103,13 +103,15 @@ int main(void)
         return 2;
     }
 
-    /* VENDOR_TEST_KWIN=1: libchameleon.so is preloaded, as in kwin_wayland */
-    int kwin = getenv("VENDOR_TEST_KWIN") != NULL;
-    printf("glvnd vendor (%s)\n", kwin ? "inside KWin, with libchameleon.so" : "any other program");
+    /* VENDOR_TEST_SESSION=1: libchameleon.so is preloaded, as in every
+     * program of a Chameleon session */
+    int session = getenv("VENDOR_TEST_SESSION") != NULL;
+    printf("glvnd vendor (%s)\n",
+           session ? "in a Chameleon session, with libchameleon.so" : "without libchameleon.so");
     const char *client = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
     CHECK(client && strstr(client, "EGL_MESA_platform_surfaceless"), "client extensions: surfaceless platform");
-    if (kwin) {
-        CHECK(client && strstr(client, "EGL_KHR_platform_gbm"), "GBM platform for KWin");
+    if (session) {
+        CHECK(client && strstr(client, "EGL_KHR_platform_gbm"), "GBM platform in a session");
         /* libchameleon.so is in every program of a session: the default
          * display stays Mesa's (X11 apps) unless asked for. */
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == EGL_NO_DISPLAY, "default display left to other vendors");
@@ -117,7 +119,7 @@ int main(void)
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) != EGL_NO_DISPLAY, "...taken with CHAMELEON_EGL_DEFAULT=1");
         unsetenv("CHAMELEON_EGL_DEFAULT");
         EGLDisplay gbm_dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL);
-        CHECK(gbm_dpy != EGL_NO_DISPLAY, "GBM display for KWin");
+        CHECK(gbm_dpy != EGL_NO_DISPLAY, "GBM display for the compositor");
         /* The card as an EGLDevice, as Mesa describes a KMS-only card. */
         PFNEGLQUERYDISPLAYATTRIBEXTPROC display_attrib =
             (PFNEGLQUERYDISPLAYATTRIBEXTPROC)eglGetProcAddress("eglQueryDisplayAttribEXT");
@@ -126,7 +128,7 @@ int main(void)
         PFNEGLQUERYDEVICESEXTPROC query_devices = (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
         EGLAttrib device = 0;
         EGLint gmajor, gminor;
-        CHECK(client && strstr(client, "EGL_EXT_device_query"), "EGL_EXT_device_query for KWin");
+        CHECK(client && strstr(client, "EGL_EXT_device_query"), "EGL_EXT_device_query for the compositor");
         CHECK(display_attrib && eglInitialize(gbm_dpy, &gmajor, &gminor) &&
                   display_attrib(gbm_dpy, EGL_DEVICE_EXT, &device) && device,
               "the GBM display's EGLDevice");
@@ -142,9 +144,9 @@ int main(void)
                 ours += devices[i] == (EGLDeviceEXT)device;
         CHECK(ours == 0, "not enumerated, as Mesa leaves out a card without a render node");
     } else {
-        CHECK(client && !strstr(client, "platform_gbm"), "no GBM platform outside KWin");
+        CHECK(client && !strstr(client, "platform_gbm"), "no GBM platform without libchameleon.so");
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == EGL_NO_DISPLAY,
-              "default display left to other vendors outside KWin");
+              "default display left to other vendors without libchameleon.so");
     }
 
     EGLDisplay dpy = eglGetPlatformDisplay(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL);
@@ -158,8 +160,8 @@ int main(void)
     const char *vendor = eglQueryString(dpy, EGL_VENDOR);
     CHECK(vendor && strcmp(vendor, "fake Android") == 0, "display belongs to the Android driver");
     const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);
-    if (kwin) {
-        CHECK(exts && strstr(exts, "EGL_EXT_image_dma_buf_import"), "dmabuf import for KWin");
+    if (session) {
+        CHECK(exts && strstr(exts, "EGL_EXT_image_dma_buf_import"), "dmabuf import for the compositor");
         /* Everything gbm allocates is importable, or KWin takes those formats
          * for external-only and can't render into them. */
         PFNEGLQUERYDMABUFFORMATSEXTPROC query_formats =
@@ -172,17 +174,17 @@ int main(void)
                           formats[i] == 0x34325241; /* XB24 AB24 XR24 AR24 */
         CHECK(listed == 4, "dmabuf import of XBGR/ABGR/XRGB/ARGB8888, gbm's formats (%d of 4)", listed);
     } else
-        CHECK(exts && !strstr(exts, "dma_buf_import"), "no dmabuf import outside KWin");
+        CHECK(exts && !strstr(exts, "dma_buf_import"), "no dmabuf import without libchameleon.so");
     /* EGL_KHR_platform_gbm: a config's native visual is its GBM format (the
      * stand-in's config is Android's RGBA_8888 with alpha). */
     EGLConfig config;
     EGLint nconfigs = 0, visual = 0;
     eglChooseConfig(dpy, (const EGLint[]){EGL_NONE}, &config, 1, &nconfigs);
     eglGetConfigAttrib(dpy, config, EGL_NATIVE_VISUAL_ID, &visual);
-    if (kwin)
+    if (session)
         CHECK(visual == 0x34324241, "native visual of an RGBA_8888 config: ABGR8888 for GBM (0x%x)", visual);
     else
-        CHECK(visual == 1, "native visual left Android's outside KWin (0x%x)", visual);
+        CHECK(visual == 1, "native visual left Android's without libchameleon.so (0x%x)", visual);
     /* Window configs are those of the window buffers' formats: the driver's
      * 10-bit config, which sorts first, is for off-screen use only. */
     EGLConfig two[2] = {0};
@@ -238,7 +240,7 @@ int main(void)
     GLenum (*reset_arb)(void) = (GLenum(*)(void))eglGetProcAddress("glGetGraphicsResetStatusARB");
     CHECK(reset_arb && reset_arb() == GL_NO_ERROR, "glGetGraphicsResetStatusARB (Qt) answers GL_NO_ERROR");
 
-    if (kwin)
+    if (session)
         gbm_surface_checks(dpy, config);
 
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);

@@ -6,14 +6,15 @@
  * Android keyboard's text goes to chameleon-ime or is typed as keys
  * (text.c, keymap.c). The app's window size (CHAM_CONFIG) becomes the
  * connector's mode and a card hotplug (kms.c, evdev.c). The thread also
- * connects to KWin's Wayland socket as an ordinary client, for clipboard.c's
- * clipboard sharing and keymap.c's view of the desktop's keyboard layout.
+ * connects to the compositor's Wayland socket as an ordinary client, for
+ * clipboard.c's clipboard sharing and keymap.c's view of the desktop's
+ * keyboard layout.
  *
  * The socket path comes from the process that bound it (its bind(),
  * reported by libchameleon.so) or $CHAMELEON_WAYLAND_SOCKET (wlpath.c), and
  * libwayland-client is loaded with dlopen(), so nothing here depends on how
- * KWin was started. The link reader thread only writes messages into a pipe;
- * all Wayland calls happen on the input thread.
+ * the compositor was started. The link reader thread only writes messages
+ * into a pipe; all Wayland calls happen on the input thread.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -131,7 +132,7 @@ static int connect_wayland(void)
     wl.add_listener(g_registry, k_registry_listener, NULL);
     wl.roundtrip(g_display);
     wl.roundtrip(g_display); /* the globals' first events (keymap) */
-    cham_log("input: connected to KWin");
+    cham_log("input: connected to the compositor");
     clipboard_connected();
     return 1;
 }
@@ -147,7 +148,7 @@ static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
         const char *env = getenv("CHAMELEON_RESIZE");
         disabled = env && strcmp(env, "0") == 0;
         if (disabled)
-            cham_log("CHAMELEON_RESIZE=0: KWin's screen keeps its size");
+            cham_log("CHAMELEON_RESIZE=0: the compositor's screen keeps its size");
     }
     if (!disabled && width && height && kms_panel(width, height, refresh_mhz))
         evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
@@ -188,7 +189,7 @@ static void *input_main(void *arg)
                 wl.cancel_read(g_display);
             wl.dispatch_pending(g_display);
             if (wl.get_error(g_display)) {
-                cham_log("input: lost the connection to KWin (error %d)", wl.get_error(g_display));
+                cham_log("input: lost the connection to the compositor (error %d)", wl.get_error(g_display));
                 disconnect_wayland();
             }
         }

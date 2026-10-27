@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Wire protocol between a Termux-side producer (the KWin shim)
+ * Wire protocol between a Termux-side producer (chameleon-kernel)
  * and the presenter app.
  *
  * Transport: AF_UNIX SOCK_SEQPACKET. Producers connect to CHAM_SOCKET_PATH,
@@ -55,7 +55,7 @@ enum cham_msg_type {
                                fence); the frame waits in Android until FRAME_DONE. */
 };
 
-/* Input events, presenter -> producer (the KWin shim serves them as evdev
+/* Input events, presenter -> producer (chameleon-kernel serves them as evdev
  * devices, and the Android keyboard's text through its input method or as
  * keys). Positions are fractions of the surface so they
  * map onto the producer's screen whatever its size or scale:
@@ -135,14 +135,14 @@ struct cham_msg {
 #define CHAM_CONFIG_WIDTH(m) ((uint32_t)((m)->a & 0xffffffffu))
 #define CHAM_CONFIG_HEIGHT(m) ((uint32_t)((m)->a >> 32))
 
-/* ---- client buffers: Wayland apps -> KWin's shim ----
+/* ---- client buffers: Wayland apps -> chameleon-kernel ----
  *
- * An app rendering through the Chameleon EGL vendor hands KWin its buffers
- * as zwp_linux_dmabuf_v1 wl_buffers. A dmabuf fd alone can't be turned back
- * into an AHardwareBuffer on Android, so the app first registers each buffer
- * with chameleon-kernel over "$XDG_RUNTIME_DIR/chameleon-buffers"
- * (SOCK_SEQPACKET), one per session like the card, and KWin's EGL import
- * then finds the AHardwareBuffer by the dmabuf's inode. */
+ * An app rendering through the Chameleon EGL vendor hands the compositor its
+ * buffers as zwp_linux_dmabuf_v1 wl_buffers. A dmabuf fd alone can't be
+ * turned back into an AHardwareBuffer on Android, so the app first registers
+ * each buffer with chameleon-kernel over "$XDG_RUNTIME_DIR/chameleon-buffers"
+ * (SOCK_SEQPACKET), one per session like the card, and the compositor's EGL
+ * import then finds the AHardwareBuffer by the dmabuf's inode. */
 enum cham_client_msg_type {
     CHAM_CLIENT_BUFFER_ADD = 200,    /* id = app's buffer id; next packet is the AHardwareBuffer */
     CHAM_CLIENT_BUFFER_ACK = 201,    /* id, a = 1 registered / 0 failed */

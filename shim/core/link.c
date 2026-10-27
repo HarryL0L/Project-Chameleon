@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Connection from KWin's process to the Chameleon presenter app.
+ * Connection from chameleon-kernel to the Chameleon presenter app.
  *
  * - One reader thread (re)connects to $PREFIX/tmp/chameleon-0 and handles
  *   CONFIG, RELEASE, FRAME_QUEUED and FRAME_DONE.
@@ -9,7 +9,7 @@
  *   tick once the presenter copied the previous frame (FRAME_QUEUED) and
  *   Android latched enough frames (FRAME_DONE), see g_flip; or on a
  *   simulated vblank when nothing is on screen (app closed or paused), so
- *   KWin keeps running either way.
+ *   the compositor keeps running either way.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -45,7 +45,7 @@ static struct {
     uint32_t crtc_id;
     int event_fd;
     uint64_t deadline_ns;           /* simulated: when; real: watchdog, or the vblank tick it completes on */
-    uint64_t queued_ns;             /* when KWin committed */
+    uint64_t queued_ns;             /* when the compositor committed */
     uint64_t period_ns;
     int on_tick;                    /* completes at deadline_ns, a vblank tick */
     int held;                       /* waited for a copy or a latch */
@@ -117,7 +117,8 @@ static void timespec_at(struct timespec *ts, uint64_t ns)
 static void emit_flip_locked(uint64_t ts_ns)
 {
     /* Copy mode: the presenter released our buffer with the fence of its
-     * blit. Wait for it so KWin can't render into a buffer being copied. */
+     * blit. Wait for it so the compositor can't render into a buffer being
+     * copied. */
     bo_wait_release_fences_locked();
 
     struct drm_event_vblank ev = {
@@ -327,10 +328,11 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         pthread_cond_broadcast(&g_cond);
         if (g_cfg_w && g_cfg_h)
             input_post(m); /* the connector's mode follows the window (input.c) */
-        /* The app's window is back: show it KWin's current frame. KWin may
-         * have drawn its last frames while there was no window (e.g. the
-         * screen size changed as the app went to the background) and draws
-         * nothing new if nothing changes. Frame 0 completes no page flip. */
+        /* The app's window is back: show it the compositor's current frame.
+         * The compositor may have drawn its last frames while there was no
+         * window (e.g. the screen size changed as the app went to the
+         * background) and draws nothing new if nothing changes. Frame 0
+         * completes no page flip. */
         struct cham_bo *shown = !had_surface && g_cfg_w && g_cfg_h ? kms_screen_bo_locked() : NULL;
         if (shown)
             link_present_locked(shown, -1, 0);
@@ -433,8 +435,8 @@ static void *reader_main(void *arg)
             return NULL;
         }
         if (replaced) {
-            cham_log("another producer (e.g. a second KWin) took over the Chameleon app; this KWin "
-                     "keeps running without a screen. Stop the other one and restart this one.");
+            cham_log("another producer (e.g. a second Chameleon session) took over the Chameleon app; "
+                     "this session keeps running without a screen. Stop the other one and restart this one.");
             return NULL;
         }
         cham_log("presenter disconnected");

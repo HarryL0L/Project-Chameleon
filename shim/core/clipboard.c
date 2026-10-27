@@ -2,10 +2,10 @@
 /*
  * Clipboard sharing with Android (the app's "Clipboard sharing" setting).
  *
- * On the input thread's connection to KWin (input.c), the shim takes part in
- * the desktop's clipboard like a clipboard manager, through
- * ext_data_control_v1, which KWin offers to any client. Only pipes pass
- * through here, never the text:
+ * On the input thread's connection to the compositor (input.c), the shim
+ * takes part in the desktop's clipboard like a clipboard manager, through
+ * ext_data_control_v1, which the compositor offers to any client. Only
+ * pipes pass through here, never the text:
  *  - the desktop copies text: the copying app is asked to write it into a
  *    pipe whose read end goes to the Chameleon app (CHAM_CLIPBOARD_DATA),
  *    which puts it on Android's clipboard;
@@ -227,7 +227,7 @@ void clipboard_global(struct wl_proxy *registry, uint32_t name, const char *ifac
 void clipboard_connected(void)
 {
     if (!g_manager || !g_seat) {
-        cham_log("clipboard: KWin offers no %s; no clipboard sharing",
+        cham_log("clipboard: the compositor offers no %s; no clipboard sharing",
                  g_manager ? "seat" : "ext_data_control_manager_v1");
         return;
     }
