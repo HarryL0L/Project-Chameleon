@@ -82,10 +82,11 @@ int evdev_keyboard_has(unsigned code);
 
 /* ---- clipboard.c: the desktop's clipboard <-> Android's (input thread) ---- */
 struct wl_proxy;
+struct wl_display;
 void clipboard_global(struct wl_proxy *registry, uint32_t name, const char *iface, uint32_t version);
-void clipboard_connected(void);
+void clipboard_connected(struct wl_display *display);
 void clipboard_disconnected(void);
-void clipboard_offer(int secret); /* Android's clipboard has new text */
+void clipboard_offer(int secret); /* Android's clipboard has new text; kept until connected */
 
 /* ---- keymap.c: typed text as keys of the desktop's layout (input thread) ---- */
 void keymap_global(struct wl_proxy *registry, uint32_t name, const char *iface);

@@ -184,7 +184,10 @@ static struct {
     struct wl_resource *device, *selection; /* the shim's device, and the source it made the selection */
     char offered[256];                      /* the types that source offers */
     int received;                           /* times the shim asked an offer of ours for its text */
+    const char *initial;                    /* the clipboard's text when a device is made, or NULL */
 } dc;
+
+static void dc_copy(const char *text, const char *mimes);
 
 static void dc_destroy(struct wl_client *c, struct wl_resource *r)
 {
@@ -232,6 +235,10 @@ static void dc_get_device(struct wl_client *c, struct wl_resource *r, uint32_t i
     (void)seat;
     dc.device = wl_resource_create(c, &k_dc_device, wl_resource_get_version(r), id);
     wl_resource_set_implementation(dc.device, &k_dc_device_impl, NULL, NULL);
+    if (dc.initial) /* the first selection, sent upon binding */
+        dc_copy(dc.initial, "text/plain");
+    else
+        wl_resource_post_event(dc.device, 1 /* selection */, NULL);
 }
 
 static const struct {
@@ -471,6 +478,90 @@ int main(void)
             close(pfd);
     }
     CHECK(pfd < 0 && dc.received == before, "the shim's own clipboard isn't sent back to Android");
+
+    /* The shim's connection to the compositor goes (as when it restarts) and
+     * can't be made again at once: Android's text copied meanwhile becomes
+     * the clipboard once connected, in place of the desktop's clipboard from
+     * before; again after the next restart; but not after the desktop
+     * copied. */
+    char wl_path[256], off_path[300];
+    snprintf(wl_path, sizeof wl_path, "%s/wayland-chameleon-test", getenv("XDG_RUNTIME_DIR"));
+    snprintf(off_path, sizeof off_path, "%s.off", wl_path);
+    dc.initial = "the desktop's clipboard from before";
+    if (dc.device) {
+        wl_client_destroy(wl_resource_get_client(dc.device));
+        dc.device = dc.selection = NULL;
+    }
+    CHECK(rename(wl_path, off_path) == 0, "the compositor's socket is gone for a moment");
+    pump(10);
+    cham_send(c, &offer, -1); /* copied on Android: the shim tries to connect, and can't */
+    pump(10);
+    CHECK(rename(off_path, wl_path) == 0 && !dc.device, "...back again, the shim not connected yet");
+    usleep(1100 * 1000); /* the shim tries once a second */
+    dc.offered[0] = 0;
+    cham_send(c, &cfg, -1); /* any message: the shim connects */
+    for (int i = 0; i < 50 && !dc.selection; i++)
+        pump(1);
+    CHECK(dc.selection && strstr(dc.offered, "application/x-chameleon-android "),
+          "Android's text copied while not connected is the clipboard once connected");
+    pfd = wait_msg(c, CHAM_CLIPBOARD_DATA, &cm);
+    if (pfd >= 0)
+        close(pfd);
+    CHECK(pfd < 0, "the desktop's clipboard from before isn't sent to Android over it");
+    if (dc.device) {
+        wl_client_destroy(wl_resource_get_client(dc.device));
+        dc.device = dc.selection = NULL;
+    }
+    pump(10);
+    cham_send(c, &cfg, -1);
+    for (int i = 0; i < 50 && !dc.selection; i++)
+        pump(1);
+    CHECK(dc.selection != NULL, "after the next restart too");
+    if (dc.device) {
+        dc_copy("copied on the desktop since", "text/plain");
+        pfd = wait_msg(c, CHAM_CLIPBOARD_DATA, &cm);
+        if (pfd >= 0)
+            close(pfd);
+        wl_client_destroy(wl_resource_get_client(dc.device));
+        dc.device = dc.selection = NULL;
+    }
+    dc.initial = "copied on the desktop since";
+    pump(10);
+    cham_send(c, &cfg, -1);
+    pfd = wait_msg(c, CHAM_CLIPBOARD_DATA, &cm);
+    text[0] = 0;
+    if (pfd >= 0) {
+        read_all(pfd, text, sizeof text);
+        close(pfd);
+    }
+    CHECK(!dc.selection && strcmp(text, "copied on the desktop since") == 0,
+          "but not once the desktop copied: its clipboard stays and goes to Android (\"%s\")", text);
+    dc.initial = NULL;
+
+    /* Many programs binding Wayland sockets of their own (each browser
+     * launch binds a proxy's) don't push the compositor's out of the
+     * service's list: the shim still finds it to connect again. */
+    for (int i = 0; i < 20; i++) {
+        pid_t k = fork();
+        if (k == 0) {
+            struct sockaddr_un ka = {.sun_family = AF_UNIX};
+            snprintf(ka.sun_path, sizeof ka.sun_path, "%s/wayland-many-%d", getenv("XDG_RUNTIME_DIR"), i);
+            int ks = socket(AF_UNIX, SOCK_STREAM, 0);
+            unlink(ka.sun_path);
+            _exit(ks < 0 || bind(ks, (struct sockaddr *)&ka, sizeof ka) != 0);
+        }
+        waitpid(k, NULL, 0);
+    }
+    usleep(300 * 1000); /* chameleon-kernel has heard of them */
+    if (dc.device) {
+        wl_client_destroy(wl_resource_get_client(dc.device));
+        dc.device = dc.selection = NULL;
+    }
+    pump(10);
+    cham_send(c, &cfg, -1);
+    for (int i = 0; i < 50 && !dc.device; i++)
+        pump(1);
+    CHECK(dc.device != NULL, "20 programs binding Wayland sockets don't hide the compositor's (reconnected)");
 
     /* Chameleon's input method, started the way KWin starts one: with a
      * private connection that offers zwp_input_method_v1. While a text field

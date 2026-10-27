@@ -28,13 +28,21 @@ static struct {
 static unsigned g_next;
 static char g_chosen[sizeof g_bound[0].path];
 
+static int alive(pid_t pid)
+{
+    return pid > 0 && (kill(pid, 0) == 0 || errno == EPERM);
+}
+
 void input_note_socket(pid_t pid, const char *path)
 {
     pthread_mutex_lock(&g_path_lock);
     unsigned i = 0;
     while (i < BOUND && g_bound[i].pid != pid)
         i++;
-    if (i == BOUND) /* a new binder takes the oldest slot */
+    for (unsigned j = 0; i == BOUND && j < BOUND; j++) /* a new binder: a free slot... */
+        if (!alive(g_bound[j].pid))
+            i = j;
+    if (i == BOUND) /* ...or the oldest */
         i = g_next++ % BOUND;
     g_bound[i].pid = pid;
     snprintf(g_bound[i].path, sizeof g_bound[i].path, "%s", path);
@@ -69,7 +77,7 @@ void input_socket_path(char *out, size_t size)
     const char *found = "";
     for (pid_t p = master; p > 1 && !*found; p = parent_of(p)) /* the master itself first */
         for (int i = 0; i < BOUND; i++)
-            if (g_bound[i].pid == p && (kill(p, 0) == 0 || errno == EPERM))
+            if (g_bound[i].pid == p && alive(p))
                 found = g_bound[i].path;
     if (strcmp(found, g_chosen) != 0) {
         snprintf(g_chosen, sizeof g_chosen, "%s", found);

@@ -133,7 +133,7 @@ static int connect_wayland(void)
     wl.roundtrip(g_display);
     wl.roundtrip(g_display); /* the globals' first events (keymap) */
     cham_log("input: connected to the compositor");
-    clipboard_connected();
+    clipboard_connected(g_display);
     return 1;
 }
 
@@ -215,8 +215,8 @@ static void *input_main(void *arg)
                 input_keysym((uint32_t)m->a, m->b != 0);
             } else if (m->type == CHAM_INPUT && !text_input(m)) {
                 evdev_input(m);
-            } else if (m->type == CHAM_CLIPBOARD_OFFER && g_display) {
-                clipboard_offer(m->a != 0);
+            } else if (m->type == CHAM_CLIPBOARD_OFFER) {
+                clipboard_offer(m->a != 0); /* without a connection, kept for it */
             }
         }
         if (g_display)

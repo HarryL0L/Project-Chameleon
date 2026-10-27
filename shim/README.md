@@ -108,6 +108,9 @@ screen keeps its first size instead of following the app's window).
   are connections to the same server (`core/kms.c`, `udev/udev.c`).
 - Clipboard: text is shared with Android both ways through KWin's
   `ext_data_control_v1` (KWin 6.4+; `core/clipboard.c`), only in pipes.
+  Android's text copied before the desktop is reachable (session starting,
+  compositor restarting) becomes its clipboard once it is, unless the desktop
+  copied something since.
 - Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL

@@ -13,7 +13,11 @@
  *    becomes the desktop's clipboard owner, and each paste's pipe goes to the
  *    app (CHAM_CLIPBOARD_REQUEST), which writes the text into it.
  * The shim's own offers carry a private type, so they don't go back to
- * Android. Passwords carry KDE's password manager hint on the desktop and
+ * Android. Android's text stays the desktop's clipboard across the
+ * connection: offered before the shim is connected, or when the connection
+ * is made again (the compositor restarted), it is offered once connected,
+ * in place of the desktop's clipboard from before, unless the desktop
+ * copied something since. Passwords carry KDE's password manager hint on the desktop and
  * Android's "sensitive" flag on Android, either way, so neither side shows
  * them or keeps them in its clipboard history. Primary selections (middle-click paste) are left alone.
  */
@@ -89,6 +93,11 @@ struct offer {
 
 static struct wl_proxy *g_manager, *g_seat, *g_device, *g_source;
 static struct offer *g_selection;
+/* Android's text is the clipboard: -1 if not, else whether it is secret. */
+static int g_android = -1;
+/* The device's first selection, the desktop's clipboard from before the
+ * shim connected, is still to come. */
+static int g_first;
 
 static void offer_free(struct offer *o)
 {
@@ -136,7 +145,12 @@ static void device_selection(void *data, struct wl_proxy *device, struct wl_prox
     if (g_selection != o)
         offer_free(g_selection);
     g_selection = o;
-    if (!o || !o->text || o->ours)
+    if (o && o->ours)
+        return;
+    if (g_first && g_android >= 0)
+        return; /* Android's newer text replaces it (clipboard_connected) */
+    g_android = -1; /* the desktop copied something else */
+    if (!o || !o->text)
         return;
     int p[2];
     if (pipe2(p, O_CLOEXEC) != 0)
@@ -198,8 +212,9 @@ static void (*k_source_listener[])(void) = {
 
 void clipboard_offer(int secret)
 {
+    g_android = secret;
     if (!g_device)
-        return;
+        return; /* offered once connected */
     /* The previous source is cancelled by the new selection. */
     g_source = wl.marshal_flags(g_manager, 0 /* create_data_source */, &k_dc_source_iface, 1, 0, NULL);
     if (!g_source)
@@ -224,7 +239,7 @@ void clipboard_global(struct wl_proxy *registry, uint32_t name, const char *ifac
         g_seat = wl_bind(registry, name, wl.seat_iface, 1); /* no listener: its events are dropped */
 }
 
-void clipboard_connected(void)
+void clipboard_connected(struct wl_display *display)
 {
     if (!g_manager || !g_seat) {
         cham_log("clipboard: the compositor offers no %s; no clipboard sharing",
@@ -233,11 +248,17 @@ void clipboard_connected(void)
     }
     k_get_device_types[1] = wl.seat_iface;
     g_device = wl.marshal_flags(g_manager, 1 /* get_data_device */, &k_dc_device_iface, 1, 0, NULL, g_seat);
-    if (g_device)
-        wl.add_listener(g_device, k_device_listener, NULL);
+    if (!g_device)
+        return;
+    wl.add_listener(g_device, k_device_listener, NULL);
+    g_first = 1;
+    wl.roundtrip(display); /* the first selection, sent upon binding */
+    g_first = 0;
+    if (g_android >= 0)
+        clipboard_offer(g_android);
 }
 
-/* The connection is gone, and its proxies with it. */
+/* The connection is gone, and its proxies with it (Android's text stays). */
 void clipboard_disconnected(void)
 {
     free(g_selection);

@@ -86,6 +86,9 @@ float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
 bool g_vote_dirty = false;
 bool g_copy_mode = false;    // negotiated per connection via HELLO
 bool g_screen_off = false;   // the producer turned its screen off (CHAM_SCREEN)
+// Android's text is the desktop's clipboard: its CHAM_CLIPBOARD_OFFER (a), or
+// -1 since the desktop copied. Offered again to each producer that connects.
+int g_clip_offer = -1;
 PoolBuf g_pool[kPoolSize];
 int64_t g_pool_displayed = -1;
 // The pool buffer on screen when the surface went away (app in the
@@ -730,6 +733,8 @@ void serve(int client, int arrivals)
             set_mismatch("");
             g_copy_mode = (msg.b & CHAM_HELLO_COPY) != 0;
             LOGI("producer protocol v%llu%s", (unsigned long long)msg.a, g_copy_mode ? ", copy mode" : "");
+            if (g_clip_offer >= 0)
+                send_locked(CHAM_CLIPBOARD_OFFER, 0, (uint64_t)g_clip_offer, 0);
             break;
         }
         case CHAM_BUFFER_ADD: {
@@ -753,6 +758,10 @@ void serve(int client, int arrivals)
             break;
         case CHAM_CLIPBOARD_DATA:
         case CHAM_CLIPBOARD_REQUEST:
+            if (msg.type == CHAM_CLIPBOARD_DATA) {  // the desktop copied: its text now
+                std::lock_guard<std::mutex> lock(g_lock);
+                g_clip_offer = -1;
+            }
             if (fd >= 0)
                 queue_clipboard(msg.type, msg.a != 0, fd);
             fd = -1;
@@ -980,12 +989,13 @@ Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardWait(JNIEnv *, j
 }
 
 // Android's clipboard has new text (CHAM_CLIPBOARD_OFFER), sensitive when
-// secret; dropped when no producer is connected.
+// secret; sent to the producer now, or when one connects.
 JNIEXPORT void JNICALL
 Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardOffer(JNIEnv *, jclass, jboolean secret)
 {
     std::lock_guard<std::mutex> lock(g_lock);
-    send_locked(CHAM_CLIPBOARD_OFFER, 0, secret ? 1 : 0, 0);
+    g_clip_offer = secret ? 1 : 0;
+    send_locked(CHAM_CLIPBOARD_OFFER, 0, (uint64_t)g_clip_offer, 0);
 }
 
 // Touch, pointer and key events for the producer (CHAM_INPUT); dropped when
