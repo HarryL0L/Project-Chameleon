@@ -251,13 +251,10 @@ static int answer(struct caller *c, int64_t ret, int fd)
     return cham_send(c->sock, &m, fd);
 }
 
-/* CARD_CLIENT_BUFFER's answer: the done, then the app's buffer. */
-static int send_client_buffer(const AHardwareBuffer *b, void *arg)
+struct cham_bo *card_session_buffer(int fd)
 {
-    struct caller *c = arg;
-    if (answer(c, 1, -1) != 0 || ahb_send(b, c->sock) != 0)
-        c->broken = 1;
-    return 0;
+    struct cham_bo *bo = ahb_bo_for_fd(fd);
+    return bo ? bo : clients_bo_for_fd(fd);
 }
 
 static void handle(struct caller *c, const struct cham_msg *m, int fd)
@@ -301,10 +298,16 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         answer(c, handle ? (int64_t)handle : !f ? -EBADF : -EINVAL, -1);
         break;
     }
-    case CARD_CLIENT_BUFFER:
-        if (clients_with_buffer(fd, send_client_buffer, c) != 0)
+    case CARD_BUFFER_AHB: {
+        struct cham_bo *bo = card_session_buffer(fd);
+        if (!bo)
             answer(c, -ENOENT, -1);
+        else if (answer(c, 1, -1) != 0 || bo_send(bo, c->sock) != 0)
+            c->broken = 1;
+        if (bo)
+            cham_bo_unref(bo);
         break;
+    }
     case CARD_WAYLAND: {
         char path[sizeof(((struct sockaddr_un *)0)->sun_path) + 1];
         ssize_t n = recv(c->sock, path, sizeof path - 1, 0);

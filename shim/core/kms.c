@@ -735,20 +735,25 @@ static int remove_fb(struct fake_fd *f, uint32_t id, int off_plane)
     return 0;
 }
 
+/* Any buffer of the session's, whichever process made it; a dmabuf of
+ * another device can't be imported (ENODEV, as virtio-gpu says), and an fd
+ * that is no dmabuf is invalid (EINVAL). */
 static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
 {
-    /* Asking the caller and cham_bo_from_fd go without the lock. */
+    /* Asking the caller and the lookup go without the lock. */
     pthread_mutex_unlock(&g_lock);
     int fd = card_fd_get(p->fd);
-    struct cham_bo *bo = fd >= 0 ? cham_bo_from_fd(fd) : NULL;
+    struct cham_bo *bo = fd >= 0 ? card_session_buffer(fd) : NULL;
+    int dmabuf = fd >= 0 && !bo && ahb_is_dmabuf(fd);
     if (fd >= 0)
         close(fd);
     pthread_mutex_lock(&g_lock);
     if (fd < 0)
         return -EBADF;
     if (!bo)
-        return -EINVAL; /* not one of ours, e.g. a client buffer: no direct scanout */
+        return dmabuf ? -ENODEV : -EINVAL;
     p->handle = handle_for(f, bo);
+    bo_unref_locked(bo); /* the handle holds its own */
     return p->handle ? 0 : -ENOMEM;
 }
 

@@ -24,9 +24,15 @@ void bo_wait_release_fences_locked(void);
 AHardwareBuffer *ahb_recv(int sock);
 /* The bo for a buffer another process sent (card.c), one per buffer however
  * often it arrives (matched by dmabuf). Takes over `b`'s reference; returns
- * the bo with a reference for the caller, or NULL. */
+ * the bo with a reference for the caller, or NULL. It stays while its
+ * dmabuf is held anywhere, as a GEM object. */
 struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format);
+/* The known bo whose dmabuf `fd` is, with a reference for the caller, or NULL. */
+struct cham_bo *ahb_bo_for_fd(int fd);
+int ahb_is_dmabuf(int fd); /* a dmabuf at all (as /proc names it) */
+void ahb_acquire(AHardwareBuffer *b);
 void ahb_release(AHardwareBuffer *b);
+uint32_t ahb_drm_format(const AHardwareBuffer *b); /* 0 if gbm couldn't have made it */
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
 /* AHardwareBuffer_sendHandleToUnixSocket (the presenter link). */
 int ahb_send(const AHardwareBuffer *b, int sock);
@@ -67,9 +73,9 @@ void input_socket_path(char *out, size_t size);
 
 /* ---- clients.c: Wayland apps' GPU buffers (in chameleon-kernel) ---- */
 void clients_start(void);
-/* Calls fn with the registered app buffer whose dmabuf `fd` is, while it
- * stays registered; returns fn's result, or -ENOENT. */
-int clients_with_buffer(int fd, int (*fn)(const AHardwareBuffer *b, void *arg), void *arg);
+/* The registered app buffer whose dmabuf `fd` is, as a bo (ahb_import),
+ * with a reference for the caller, or NULL. */
+struct cham_bo *clients_bo_for_fd(int fd);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);
@@ -165,8 +171,9 @@ enum {
                     * plus one), b = the argument's address */
     CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
     CARD_WAYLAND,  /* then a packet with a Wayland socket path a process bound; no answer */
-    CARD_CLIENT_BUFFER, /* + a dmabuf fd: -> a = 1 and then an app's registered
-                         * AHardwareBuffer behind it (clients.c), or -ENOENT */
+    CARD_BUFFER_AHB, /* + a dmabuf fd: -> a = 1 and then the AHardwareBuffer of the
+                      * session's buffer behind it (any process's gbm buffer, an
+                      * app's registered one), or -ENOENT */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */
@@ -189,6 +196,9 @@ int card_copy_to(uint64_t to, const void *from, size_t n);
 int card_fd_get(int n);
 /* fd_install: `fd` (still ours) as a new fd of the caller; its number, or -errno. */
 int card_fd_install(int fd, int cloexec);
+/* The session's buffer whose dmabuf `fd` is (any process's gbm buffer, an
+ * app's registered one), with a reference for the caller, or NULL. */
+struct cham_bo *card_session_buffer(int fd);
 
 /* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
 /* A card file's event pipe holds one page, as the kernel gives a DRM file

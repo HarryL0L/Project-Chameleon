@@ -45,6 +45,7 @@ typedef struct {
 
 static struct {
     int (*allocate)(const ahb_desc *, AHardwareBuffer **);
+    void (*acquire)(AHardwareBuffer *);
     void (*release)(AHardwareBuffer *);
     void (*describe)(const AHardwareBuffer *, ahb_desc *);
     int (*lock)(AHardwareBuffer *, uint64_t, int32_t, const void *, void **);
@@ -82,12 +83,14 @@ struct AHardwareBuffer {
     ahb_desc desc;
     native_handle *nh;
     void *map;
+    int refs;
 };
 static int host_allocate(const ahb_desc *d, AHardwareBuffer **out)
 {
     AHardwareBuffer *b = calloc(1, sizeof *b);
     b->desc = *d;
     b->desc.stride = d->width;
+    b->refs = 1;
     b->nh = calloc(1, sizeof(native_handle) + sizeof(int));
     b->nh->numFds = 1;
     b->nh->data[0] = memfd_create("fake-ahb", MFD_CLOEXEC);
@@ -96,8 +99,11 @@ static int host_allocate(const ahb_desc *d, AHardwareBuffer **out)
     *out = b;
     return 0;
 }
+static void host_acquire(AHardwareBuffer *b) { b->refs++; }
 static void host_release(AHardwareBuffer *b)
 {
+    if (--b->refs > 0)
+        return;
     close(b->nh->data[0]);
     free(b->nh);
     free(b);
@@ -125,6 +131,7 @@ static int host_recv(int sock, AHardwareBuffer **out)
         return -1;
     AHardwareBuffer *b = calloc(1, sizeof *b);
     b->desc = d;
+    b->refs = 1;
     b->nh = calloc(1, sizeof(native_handle) + sizeof(int));
     b->nh->numFds = 1;
     memcpy(&b->nh->data[0], CMSG_DATA(c), sizeof(int));
@@ -157,6 +164,7 @@ static int ahb_load(void)
 {
     ahb.send_handle = host_send;
     ahb.allocate = host_allocate;
+    ahb.acquire = host_acquire;
     ahb.release = host_release;
     ahb.describe = host_describe;
     ahb.get_native_handle = host_handle;
@@ -173,6 +181,7 @@ static int ahb_load(void)
                        RTLD_NOW | RTLD_LOCAL);
     if (lib) {
         *(void **)&ahb.allocate = dlsym(lib, "AHardwareBuffer_allocate");
+        *(void **)&ahb.acquire = dlsym(lib, "AHardwareBuffer_acquire");
         *(void **)&ahb.release = dlsym(lib, "AHardwareBuffer_release");
         *(void **)&ahb.describe = dlsym(lib, "AHardwareBuffer_describe");
         *(void **)&ahb.lock = dlsym(lib, "AHardwareBuffer_lock");
@@ -181,7 +190,7 @@ static int ahb_load(void)
         *(void **)&ahb.recv_handle = dlsym(lib, "AHardwareBuffer_recvHandleFromUnixSocket");
         *(void **)&ahb.send_handle = dlsym(lib, "AHardwareBuffer_sendHandleToUnixSocket");
     }
-    loaded = lib && ahb.allocate && ahb.release && ahb.describe && ahb.get_native_handle;
+    loaded = lib && ahb.allocate && ahb.acquire && ahb.release && ahb.describe && ahb.get_native_handle;
     if (!loaded)
         cham_log("cannot use AHardwareBuffer from libnativewindow: %s", lib ? "missing symbols" : dlerror());
     return loaded;
@@ -217,6 +226,22 @@ static uint32_t ahb_format(uint32_t drm_format)
 int cham_format_supported(uint32_t format)
 {
     return ahb_format(format) != 0;
+}
+
+/* The DRM format of a buffer gbm could have allocated, from its AHB
+ * format; 0 for any other. */
+static uint32_t drm_format(uint32_t ahb_fmt)
+{
+    switch (ahb_fmt) {
+    case AHB_FORMAT_R8G8B8A8:
+        return DRM_FORMAT_ABGR8888;
+    case AHB_FORMAT_R8G8B8X8:
+        return DRM_FORMAT_XBGR8888;
+    case HAL_FORMAT_BGRA_8888:
+        return DRM_FORMAT_ARGB8888;
+    default:
+        return 0;
+    }
 }
 
 /* The handle fd that /proc calls a dmabuf, else the first one. */
@@ -268,6 +293,18 @@ void ahb_release(AHardwareBuffer *b)
         ahb.release(b);
 }
 
+void ahb_acquire(AHardwareBuffer *b)
+{
+    ahb.acquire(b);
+}
+
+uint32_t ahb_drm_format(const AHardwareBuffer *b)
+{
+    ahb_desc d;
+    ahb.describe(b, &d);
+    return drm_format(d.format);
+}
+
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
 {
     const native_handle *nh = ahb.get_native_handle(b);
@@ -286,11 +323,13 @@ static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, 
 /* ---- buffers whose dmabuf outlives them ----
  * As in the kernel, a dmabuf someone still holds keeps its buffer: KWin 6.8
  * destroys each gbm_bo right after taking its fd, then imports the fd. The
- * AHardwareBuffer can't be rebuilt from a dmabuf, so a buffer this process
- * allocated and handed out stays (refs 0) while its dmabuf has more
- * references than the buffer holds itself: the kernel's own count
- * (fdinfo "count:", every process, mapping and driver import), or where the
- * kernel shows none, the fds of this process. */
+ * AHardwareBuffer can't be rebuilt from a dmabuf, so a buffer stays (refs 0)
+ * while its dmabuf has more references than the buffer holds itself: the
+ * kernel's own count (fdinfo "count:", every process, mapping and driver
+ * import), or where the kernel shows none, the fds of this process. That is
+ * chameleon-kernel's job for every buffer it knows, as the kernel's for its
+ * GEM objects; a process keeps its own buffer so only while chameleon-kernel
+ * doesn't have it (two keepers would keep each other alive). */
 
 /* The kernel's reference count of the dmabuf `fd` is, or -1. */
 static int fdinfo_count(int fd)
@@ -331,8 +370,40 @@ static int fds_of(dev_t dev, ino_t ino)
     return n;
 }
 
+#ifdef CHAM_HOST_TEST
+/* The test build's buffers are memfds, which have no count in fdinfo: the
+ * fds of every process stand in for the kernel's count of a dmabuf. */
+static int fds_everywhere(dev_t dev, ino_t ino)
+{
+    DIR *procs = opendir("/proc");
+    int n = 0;
+    for (struct dirent *p; procs && (p = readdir(procs));) {
+        char dir[300];
+        if (p->d_name[0] < '1' || p->d_name[0] > '9')
+            continue;
+        snprintf(dir, sizeof dir, "/proc/%s/fd", p->d_name);
+        DIR *fds = opendir(dir);
+        for (struct dirent *e; fds && (e = readdir(fds));) {
+            char path[600];
+            struct stat st;
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            if (e->d_name[0] != '.' && stat(path, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+                n++;
+        }
+        if (fds)
+            closedir(fds);
+    }
+    if (procs)
+        closedir(procs);
+    return n;
+}
+#endif
+
 static int dmabuf_refs(const struct cham_bo *bo)
 {
+#ifdef CHAM_HOST_TEST
+    return fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino);
+#endif
     int n = fdinfo_count(bo->dmabuf_fd);
     static int logged;
     if (!logged++)
@@ -391,6 +462,7 @@ struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
         return NULL;
     }
     pthread_mutex_lock(&g_lock);
+    reap_locked();
     for (struct cham_bo *bo = g_bos; bo; bo = bo->next) {
         if (bo->dmabuf_dev == dev && bo->dmabuf_ino == ino) {
             bo_ref_locked(bo);
@@ -403,9 +475,46 @@ struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
     ahb_desc d;
     ahb.describe(b, &d);
     struct cham_bo *bo = bo_new(b, ahb.get_native_handle(b), d.width, d.height, d.stride * 4, format);
-    if (!bo)
+    if (!bo) {
         ahb.release(b);
+        return NULL;
+    }
+    /* Kept while its dmabuf is held anywhere (another process, a driver),
+     * not only while handles hold it: the kernel's GEM object lifetime. */
+    bo->base_refs = own_refs(bo);
+    __atomic_store_n(&bo->exported, 1, __ATOMIC_RELAXED);
     return bo;
+}
+
+struct cham_bo *ahb_bo_for_fd(int fd)
+{
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0)
+        return NULL;
+    struct cham_bo *found = NULL;
+    pthread_mutex_lock(&g_lock);
+    reap_locked();
+    for (struct cham_bo *bo = g_bos; bo && !found; bo = bo->next) {
+        if (bo->dmabuf_dev == st.st_dev && bo->dmabuf_ino == st.st_ino) {
+            bo_ref_locked(bo);
+            found = bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return found;
+}
+
+int ahb_is_dmabuf(int fd)
+{
+    char path[64], link[128];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(path, link, sizeof link - 1);
+    if (n <= 0)
+        return 0;
+    link[n] = 0;
+    /* The kernel's names for a dmabuf: its own filesystem's (5.3+, and
+     * backported), or the anonymous inode's before. */
+    return strncmp(link, "/dmabuf:", 8) == 0 || strcmp(link, "anon_inode:dmabuf") == 0;
 }
 
 /* A bo for `buffer` (whose reference it takes over on success). */
@@ -531,7 +640,8 @@ void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
-    if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && bo->base_refs > 0 && dmabuf_refs(bo) > bo->base_refs)
+    if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && !bo->in_service && bo->base_refs > 0 &&
+        dmabuf_refs(bo) > bo->base_refs)
         return; /* its dmabuf is still held: kept, freed by reap_locked() */
     for (struct cham_bo **p = &g_bos; *p; p = &(*p)->next) {
         if (*p == bo) {

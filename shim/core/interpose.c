@@ -18,8 +18,9 @@
  * sysfs entries (shim/udev/sysfs.c). A pipe is only taken for a card file
  * when it holds one page, as card files' pipes do, so ordinary pipes cost
  * nothing. bind() is watched to tell chameleon-kernel the compositor's
- * Wayland socket, and a dmabuf import in the compositor gets Wayland apps'
- * buffers from there (cham_client_ahb_acquire). (crash.c overrides
+ * Wayland socket, and a dmabuf import (EGL) gets any buffer of the session
+ * from there, another process's gbm buffer or a Wayland app's
+ * (cham_buffer_ahb_acquire). (crash.c overrides
  * sigaction.)
  */
 #define _GNU_SOURCE
@@ -303,14 +304,16 @@ uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
     lock_conn();
     int64_t ret = call_locked(req, -1, bo, NULL);
     unlock_conn();
+    if (ret > 0)
+        __atomic_store_n(&bo->in_service, 1, __ATOMIC_RELAXED);
     return ret > 0 ? (uint32_t)ret : 0;
 }
 
-/* ---- Wayland apps' buffers (cham_shim.h) ---- */
+/* ---- the session's buffers (cham_shim.h) ---- */
 
-AHardwareBuffer *cham_client_ahb_acquire(int dmabuf)
+AHardwareBuffer *cham_buffer_ahb_acquire(int dmabuf)
 {
-    struct cham_msg req = {CARD_CLIENT_BUFFER, 0, 0, 0};
+    struct cham_msg req = {CARD_BUFFER_AHB, 0, 0, 0};
     AHardwareBuffer *b = NULL;
     lock_conn();
     if (call_locked(req, dmabuf, NULL, NULL) == 1 && !(b = ahb_recv(g_conn)))
@@ -319,7 +322,7 @@ AHardwareBuffer *cham_client_ahb_acquire(int dmabuf)
     return b;
 }
 
-void cham_client_ahb_release(AHardwareBuffer *b)
+void cham_buffer_ahb_release(AHardwareBuffer *b)
 {
     ahb_release(b);
 }

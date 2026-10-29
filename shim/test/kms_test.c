@@ -10,6 +10,8 @@
  * FRAME_DONE 8.3 ms later.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -193,13 +195,30 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
 }
 
 /* This process's fds of the file with inode `ino`. */
-static int fds_of(ino_t ino)
+/* Fds of the file in every process: the test's and chameleon-kernel's,
+ * which keeps a buffer while its dmabuf is held, as the kernel. */
+static int fds_anywhere(dev_t dev, ino_t ino)
 {
+    DIR *procs = opendir("/proc");
     int n = 0;
-    struct stat st;
-    for (int fd = 0; fd < 1024; fd++)
-        if (fstat(fd, &st) == 0 && st.st_ino == ino && !S_ISFIFO(st.st_mode) && !S_ISCHR(st.st_mode))
-            n++;
+    for (struct dirent *p; procs && (p = readdir(procs));) {
+        char dir[300];
+        if (p->d_name[0] < '1' || p->d_name[0] > '9')
+            continue;
+        snprintf(dir, sizeof dir, "/proc/%s/fd", p->d_name);
+        DIR *fds = opendir(dir);
+        for (struct dirent *e; fds && (e = readdir(fds));) {
+            char path[600];
+            struct stat st;
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            if (e->d_name[0] != '.' && stat(path, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+                n++;
+        }
+        if (fds)
+            closedir(fds);
+    }
+    if (procs)
+        closedir(procs);
     return n;
 }
 
@@ -469,13 +488,14 @@ int main(int argc, char **argv)
         if (exported >= 0)
             close(exported);
         drmCloseBufferHandle(fd, handles[0]);
-        kept = (uint32_t)fds_of(st.st_ino);
+        kept = (uint32_t)fds_anywhere(st.st_dev, st.st_ino);
         close(dmabuf);
         struct gbm_bo *next = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING); /* frees the rest */
         if (next)
             gbm_bo_destroy(next);
-        CHECK(kept > 1 && fds_of(st.st_ino) == 0, "freed once its last fd is closed (%u fds while held, %d after)", kept,
-              fds_of(st.st_ino));
+        CHECK(kept > 1 && fds_anywhere(st.st_dev, st.st_ino) == 0,
+              "freed everywhere once its last fd is closed (%u fds while held, %d after)", kept,
+              fds_anywhere(st.st_dev, st.st_ino));
     }
 
     printf("modeset\n");
@@ -878,6 +898,45 @@ int main(int argc, char **argv)
     CHECK(busid && strcmp(busid, "chameleon") == 0 && sv.drm_di_major == 1 && sv.drm_di_minor == 4,
           "SET_VERSION 1.4 names the master 'chameleon' (%s)", busid ? busid : "none");
     drmFreeBusid(busid);
+
+    /* Another process's buffer, after that process destroyed it and exited:
+     * its dmabuf keeps it, as a GEM object, for PRIME and for EGL. */
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0)
+        return 1;
+    pid_t creator = fork();
+    if (creator == 0) {
+        int c = open(dev_path, O_RDWR | O_CLOEXEC);
+        struct gbm_device *g = gbm_create_device(c);
+        struct gbm_bo *b = g ? gbm_bo_create(g, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING) : NULL;
+        int d = b ? gbm_bo_get_fd(b) : -1;
+        struct cham_msg m = {0};
+        int sent = d >= 0 && cham_send(pair[1], &m, d) == 0;
+        gbm_bo_destroy(b);
+        gbm_device_destroy(g);
+        _exit(sent ? 0 : 1);
+    }
+    struct cham_msg cm;
+    int theirs = -1;
+    int got_fd = cham_recv(pair[0], &cm, &theirs) == 1 && theirs >= 0;
+    waitpid(creator, NULL, 0);
+    close(pair[0]);
+    close(pair[1]);
+    uint32_t th = 0;
+    CHECK(got_fd && drmPrimeFDToHandle(rfd, theirs, &th) == 0 && th,
+          "a buffer of a process that destroyed it and exited imports on the render node");
+    void *(*ahb_acquire)(int) = (void *(*)(int))dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    void (*ahb_release)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
+    void *their_ahb = ahb_acquire && got_fd ? ahb_acquire(theirs) : NULL;
+    CHECK(their_ahb != NULL, "...and its AHardwareBuffer comes from chameleon-kernel (EGL import)");
+    if (their_ahb)
+        ahb_release(their_ahb);
+    if (theirs >= 0)
+        close(theirs);
+    int not_dmabuf = memfd_create("not-a-dmabuf", MFD_CLOEXEC);
+    errno = 0;
+    CHECK(drmPrimeFDToHandle(rfd, not_dmabuf, &th) != 0 && errno == EINVAL, "an fd that is no dmabuf: EINVAL");
+    close(not_dmabuf);
 
     int rinherited = fcntl(rfd, F_DUPFD, 10); /* not close-on-exec */
     snprintf(num_r, sizeof num_r, "%d", rinherited);

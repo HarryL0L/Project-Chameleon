@@ -50,8 +50,8 @@ static struct {
     struct cham_bo *(*bo_from_fd)(int);
     AHardwareBuffer *(*bo_ahb)(struct cham_bo *);
     const uint32_t *(*formats)(int *);
-    AHardwareBuffer *(*client_ahb_acquire)(int);
-    void (*client_ahb_release)(AHardwareBuffer *);
+    AHardwareBuffer *(*buffer_ahb_acquire)(int);
+    void (*buffer_ahb_release)(AHardwareBuffer *);
     void *(*gbm_window_get)(void *, uint32_t *);
 } core;
 
@@ -60,10 +60,10 @@ static void resolve(void)
     *(void **)&core.bo_from_fd = dlsym(RTLD_DEFAULT, "cham_bo_from_fd");
     *(void **)&core.bo_ahb = dlsym(RTLD_DEFAULT, "cham_bo_ahb");
     *(void **)&core.formats = dlsym(RTLD_DEFAULT, "cham_formats");
-    *(void **)&core.client_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_client_ahb_acquire");
-    *(void **)&core.client_ahb_release = dlsym(RTLD_DEFAULT, "cham_client_ahb_release");
+    *(void **)&core.buffer_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    *(void **)&core.buffer_ahb_release = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
     *(void **)&core.gbm_window_get = dlsym(RTLD_DEFAULT, "cham_gbm_window_get");
-    if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.client_ahb_acquire || !core.client_ahb_release)
+    if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.buffer_ahb_acquire || !core.buffer_ahb_release)
         memset(&core, 0, sizeof core);
 }
 
@@ -110,15 +110,15 @@ AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo)
     return cham_core_present() ? core.bo_ahb(bo) : NULL;
 }
 
-AHardwareBuffer *cham_client_ahb_acquire(int fd)
+AHardwareBuffer *cham_buffer_ahb_acquire(int fd)
 {
-    return cham_core_present() ? core.client_ahb_acquire(fd) : NULL;
+    return cham_core_present() ? core.buffer_ahb_acquire(fd) : NULL;
 }
 
-void cham_client_ahb_release(AHardwareBuffer *b)
+void cham_buffer_ahb_release(AHardwareBuffer *b)
 {
     if (b && cham_core_present())
-        core.client_ahb_release(b);
+        core.buffer_ahb_release(b);
 }
 
 void *cham_gbm_window(void *native, uint32_t *format)

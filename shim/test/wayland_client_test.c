@@ -6,7 +6,8 @@
  *  - a compositor thread (real libwayland-server) with wl_compositor and a
  *    zwp_linux_dmabuf_v1 that, like KWin's EGL import, only accepts a dmabuf
  *    that chameleon-kernel knows as a registered app buffer (asked through
- *    libchameleon.so, which also tells it the socket from our bind());
+ *    libchameleon.so, which also tells it the socket from our bind()), and
+ *    that imports each one on the render node too, as wlroots does;
  *  - the app: real libwayland-client + libwayland-egl, EGL through the
  *    system's glvnd -> libEGL_chameleon.so -> fake Android driver whose
  *    window surfaces render into (fake) AImageReaders.
@@ -31,7 +32,9 @@
 #include <wayland-egl.h>
 #include <wayland-server.h>
 
+#include <drm.h>
 #include <drm_fourcc.h>
+#include <sys/ioctl.h>
 
 #include "check.h"
 
@@ -65,8 +68,9 @@ static const struct wl_message k_params_events[] = {
 static const struct wl_interface k_params_iface = {"zwp_linux_buffer_params_v1", 3, 4, k_params_requests, 2,
                                                    k_params_events};
 
+static int g_render = -1; /* the compositor's render node */
 static struct {
-    int buffers_created, buffers_known_to_kwin, buffers_unknown;
+    int buffers_created, buffers_known_to_kwin, buffers_unknown, buffers_prime;
     int commits, releases, frames_done;
     int last_width, last_height, last_stride;
     uint32_t last_format;
@@ -74,8 +78,8 @@ static struct {
     volatile int stop;
 } srv;
 
-static void *(*client_ahb_acquire)(int); /* libchameleon: AHardwareBuffer * or NULL */
-static void (*client_ahb_release)(void *);
+static void *(*buffer_ahb_acquire)(int); /* libchameleon: AHardwareBuffer * or NULL */
+static void (*buffer_ahb_release)(void *);
 
 struct buffer {
     struct wl_resource *resource;
@@ -125,13 +129,19 @@ static void params_create_immed(struct wl_client *client, struct wl_resource *r,
     (void)flags;
     struct params *p = wl_resource_get_user_data(r);
     /* What KWin's EGL import does through the vendor: find the AHB. */
-    void *ahb = p->fd >= 0 && client_ahb_acquire ? client_ahb_acquire(p->fd) : NULL;
+    void *ahb = p->fd >= 0 && buffer_ahb_acquire ? buffer_ahb_acquire(p->fd) : NULL;
     if (ahb)
         srv.buffers_known_to_kwin++;
     else
         srv.buffers_unknown++;
     if (ahb)
-        client_ahb_release(ahb);
+        buffer_ahb_release(ahb);
+    struct drm_prime_handle prime = {.fd = p->fd};
+    if (p->fd >= 0 && ioctl(g_render, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) == 0 && prime.handle) {
+        srv.buffers_prime++;
+        struct drm_gem_close close_handle = {.handle = prime.handle};
+        ioctl(g_render, DRM_IOCTL_GEM_CLOSE, &close_handle);
+    }
     srv.buffers_created++;
     srv.last_width = w;
     srv.last_height = h;
@@ -312,13 +322,14 @@ int main(void)
         fprintf(stderr, "run via run-host-test.sh\n");
         return 2;
     }
-    *(void **)&client_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_client_ahb_acquire");
-    *(void **)&client_ahb_release = dlsym(RTLD_DEFAULT, "cham_client_ahb_release");
+    *(void **)&buffer_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    *(void **)&buffer_ahb_release = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
 
     /* As a compositor: DRM master first, then its socket, and a second one
      * the app uses below like a proxy's. */
     const char *card_path = getenv("CHAMELEON_DRM_PATH");
     int card = open(card_path ? card_path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    g_render = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
     struct wl_display *server = wl_display_create();
     if (card < 0 || wl_display_add_socket(server, socket_name) != 0 ||
         wl_display_add_socket(server, "wayland-proxy-cwl") != 0) {
@@ -334,7 +345,7 @@ int main(void)
     char registry[256];
     snprintf(registry, sizeof registry, "%s/chameleon-buffers", runtime);
     struct stat st;
-    CHECK(client_ahb_acquire && stat(registry, &st) == 0 && S_ISSOCK(st.st_mode),
+    CHECK(buffer_ahb_acquire && stat(registry, &st) == 0 && S_ISSOCK(st.st_mode),
           "chameleon-kernel accepts app buffers at chameleon-buffers");
 
     /* The app reaches the compositor through another socket, as behind
@@ -398,6 +409,8 @@ int main(void)
     CHECK(srv.buffers_created >= 2 && srv.buffers_created <= 3 && srv.buffers_unknown == 0 &&
               srv.buffers_known_to_kwin == srv.buffers_created,
           "%d zero-copy buffers, all registered with KWin (%d unknown)", srv.buffers_created, srv.buffers_unknown);
+    CHECK(srv.buffers_prime == srv.buffers_created, "...and each imports on the render node by PRIME (%d of %d)",
+          srv.buffers_prime, srv.buffers_created);
     CHECK(srv.last_width == 64 && srv.last_height == 32 && srv.last_stride == 256 &&
               srv.last_format == DRM_FORMAT_ABGR8888 && srv.last_modifier == DRM_FORMAT_MOD_INVALID,
           "dmabuf %dx%d stride %d, ABGR8888, implicit modifier", srv.last_width, srv.last_height, srv.last_stride);

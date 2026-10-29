@@ -9,7 +9,8 @@
  * the app sends the AHardwareBuffer itself to chameleon-kernel, over
  * "$XDG_RUNTIME_DIR/chameleon-buffers" (common/chameleon_proto.h), and the
  * EGL vendor's dmabuf import in the compositor gets it from there by the
- * dmabuf's inode (card.c's CARD_CLIENT_BUFFER). One socket per session, like
+ * dmabuf's inode (card.c's CARD_BUFFER_AHB, as for any buffer of the
+ * session), and PRIME imports it on the card's nodes (kms.c). One socket per session, like
  * the card: an app reaching the compositor through a proxy (Firefox's
  * wayland-proxy-N) registers the same way.
  *
@@ -45,21 +46,21 @@ struct entry {
 static pthread_mutex_t g_entries_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct entry *g_entries;
 
-int clients_with_buffer(int fd, int (*fn)(const AHardwareBuffer *b, void *arg), void *arg)
+struct cham_bo *clients_bo_for_fd(int fd)
 {
     struct stat st;
     if (fd < 0 || real_fstat(fd, &st) != 0)
-        return -ENOENT;
-    int ret = -ENOENT;
+        return NULL;
+    AHardwareBuffer *b = NULL;
     pthread_mutex_lock(&g_entries_lock);
-    for (struct entry *e = g_entries; e; e = e->next) {
+    for (struct entry *e = g_entries; e && !b; e = e->next) {
         if (e->dev == st.st_dev && e->ino == st.st_ino) {
-            ret = fn(e->ahb, arg);
-            break;
+            b = e->ahb;
+            ahb_acquire(b); /* the bo's own reference: the app may remove its entry */
         }
     }
     pthread_mutex_unlock(&g_entries_lock);
-    return ret;
+    return b ? ahb_import(b, ahb_drm_format(b)) : NULL;
 }
 
 /* Drops `client`'s buffer `id`, or all of its buffers if all != 0. */

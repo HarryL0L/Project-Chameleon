@@ -35,6 +35,7 @@ struct cham_bo {
     void (*release)(AHardwareBuffer *); /* for cham_bo_wrap()'s buffers */
     int base_refs;     /* cham_bo_create(): references to the dmabuf the buffer holds itself */
     int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */
+    int in_service;    /* chameleon-kernel has it (a GEM handle): its dmabuf keeps it alive there */
     struct cham_bo *next;
 };
 
@@ -98,11 +99,12 @@ CHAM_EXPORT const uint32_t *cham_formats(int *count);
 
 /* AHB -> EGLClientBuffer is done by the EGL shim with the real driver. */
 CHAM_EXPORT AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo);
-/* The Wayland app's buffer registered with chameleon-kernel (clients.c)
- * whose dmabuf `fd` refers to (any dup of it), with a reference for the
- * caller to give back with cham_client_ahb_release; NULL if none. */
-CHAM_EXPORT AHardwareBuffer *cham_client_ahb_acquire(int fd);
-CHAM_EXPORT void cham_client_ahb_release(AHardwareBuffer *b);
+/* The session's buffer whose dmabuf `fd` refers to (any dup of it): another
+ * process's gbm buffer or a Wayland app's registered one, as chameleon-kernel
+ * knows them; with a reference for the caller to give back with
+ * cham_buffer_ahb_release; NULL if none. */
+CHAM_EXPORT AHardwareBuffer *cham_buffer_ahb_acquire(int fd);
+CHAM_EXPORT void cham_buffer_ahb_release(AHardwareBuffer *b);
 
 CHAM_EXPORT void cham_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

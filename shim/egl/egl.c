@@ -647,12 +647,12 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
     for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
         if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
             fd = a[1];
-    /* The compositor's own gbm buffers, or apps' buffers registered with
-     * chameleon-kernel; any other dmabuf has no AHardwareBuffer we could
-     * hand the driver. */
+    /* This process's own gbm buffers, or any other buffer of the session
+     * chameleon-kernel knows (another process's gbm buffer, an app's);
+     * any other dmabuf has no AHardwareBuffer we could hand the driver. */
     struct cham_bo *bo = cham_bo_from_fd(fd);
-    AHardwareBuffer *client = bo ? NULL : cham_client_ahb_acquire(fd);
-    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : client;
+    AHardwareBuffer *session = bo ? NULL : cham_buffer_ahb_acquire(fd);
+    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : session;
     if (!ahb) {
         t_error = EGL_BAD_MATCH;
         return EGL_NO_IMAGE_KHR;
@@ -670,7 +670,7 @@ static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
         const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
         image = create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb), image_attribs);
     }
-    cham_client_ahb_release(client); /* the image holds its own */
+    cham_buffer_ahb_release(session); /* the image holds its own */
     return image;
 }
 

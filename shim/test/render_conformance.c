@@ -21,8 +21,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <drm/drm.h>
@@ -62,6 +64,30 @@ static int shared_buffer(int card)
     return bo ? gbm_bo_get_fd(bo) : -1; /* bo and device stay: the process's */
 }
 #endif
+
+static int send_fd(int s, int fd)
+{
+    char c = 0, buf[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {&c, 1};
+    struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = buf, .msg_controllen = sizeof buf};
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    h->cmsg_level = SOL_SOCKET;
+    h->cmsg_type = SCM_RIGHTS;
+    h->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(h), &fd, sizeof fd);
+    return sendmsg(s, &m, 0) == 1 ? 0 : -1;
+}
+
+static int recv_fd(int s)
+{
+    char c, buf[CMSG_SPACE(sizeof(int))];
+    struct iovec io = {&c, 1};
+    struct msghdr m = {.msg_iov = &io, .msg_iovlen = 1, .msg_control = buf, .msg_controllen = sizeof buf};
+    int fd = -1;
+    if (recvmsg(s, &m, 0) == 1 && CMSG_FIRSTHDR(&m))
+        memcpy(&fd, CMSG_DATA(CMSG_FIRSTHDR(&m)), sizeof fd);
+    return fd;
+}
 
 static int import(int fd, int dmabuf, uint32_t *handle)
 {
@@ -167,5 +193,30 @@ int main(void)
     result("PRIME_FD_TO_HANDLE of a pipe", import(fd2, pipefd[0], &h));
     result("PRIME_FD_TO_HANDLE of a closed fd", import(fd2, 999, &h));
     close(fd2);
+
+    printf("== another process's buffer\n");
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, pair) != 0)
+        return 1;
+    pid_t pid = fork();
+    if (pid == 0) { /* makes a buffer on the primary node, sends its dmabuf, exits */
+        int c = open(path ? path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
+        int d = shared_buffer(c);
+        _exit(d >= 0 && send_fd(pair[1], d) == 0 ? 0 : 1);
+    }
+    int theirs = recv_fd(pair[0]);
+    int status = -1;
+    waitpid(pid, &status, 0);
+    printf("%-60s %s\n", "its dmabuf arrived, the process exited", yes(theirs >= 0 && WIFEXITED(status)));
+    int fd3 = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    result("PRIME_FD_TO_HANDLE on the render node", import(fd3, theirs, &h));
+    struct drm_prime_handle again = {.handle = h, .flags = DRM_CLOEXEC, .fd = -1};
+    result("PRIME_HANDLE_TO_FD", ioctl(fd3, DRM_IOCTL_PRIME_HANDLE_TO_FD, &again));
+    struct stat a, b;
+    printf("%-60s %s\n", "  the same dmabuf",
+           yes(fstat(theirs, &a) == 0 && fstat(again.fd, &b) == 0 && a.st_ino == b.st_ino));
+    close(again.fd);
+    close(theirs);
+    close(fd3);
     return 0;
 }

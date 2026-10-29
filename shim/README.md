@@ -122,7 +122,8 @@ screen keeps its first size instead of following the app's window).
   (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
   their buffers are registered with `chameleon-kernel` over
   `$XDG_RUNTIME_DIR/chameleon-buffers` (`core/clients.c`), where the
-  compositor's dmabuf import finds them, also for apps behind a Wayland
+  compositor's dmabuf import and PRIME on the card's nodes (wlroots'
+  test import) find them, also for apps behind a Wayland
   proxy (Firefox's `wayland-proxy-N`). A second compositor nested inside the
   session can't import them. The app waits for the GPU before handing a frame over (no
   explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
@@ -132,10 +133,15 @@ screen keeps its first size instead of following the app's window).
   display. 1.5 features a driver lacks are still missing (Mali:
   `EGL_KHR_gl_texture_3D_image`, `EGL_KHR_cl_event2`) and fail with an EGL
   error.
-- A gbm buffer whose dmabuf is still held (KWin 6.8 keeps only the fd) stays
-  usable after `gbm_bo_destroy`, as in the kernel, until the kernel's count
-  of the dmabuf's references (fdinfo) drops to the buffer's own; on kernels
-  without that count, only this process's fds are seen (`core/ahb.c`).
+- Every buffer of the session is one object in `chameleon-kernel`, as a GEM
+  object in the kernel: any process's gbm buffer and any app's registered
+  one imports by PRIME on either node and through EGL in any process, and
+  stays while its dmabuf is held anywhere (KWin 6.8 keeps only the fd;
+  another process may have it), until the kernel's count of the dmabuf's
+  references (fdinfo) drops to `chameleon-kernel`'s own; on kernels without
+  that count, only its own fds are seen (`core/ahb.c`). A process keeps a
+  buffer it made that way itself only while `chameleon-kernel` doesn't have
+  it. A dmabuf of another device can't be imported (ENODEV, as virtio-gpu).
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.
