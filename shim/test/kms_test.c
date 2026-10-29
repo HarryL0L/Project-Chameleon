@@ -237,6 +237,18 @@ static int exec_card(int fd)
     return fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226 && r && r->count_crtcs == 1 ? 0 : 1;
 }
 
+/* ...and an inherited render-node fd is still the render node (the service
+ * tells which node a file is when it meets an unknown copy). */
+static int exec_render(int fd)
+{
+    struct stat st;
+    drmVersionPtr v = drmGetVersion(fd);
+    int ok = fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128) && v;
+    drmFreeVersion(v);
+    errno = 0;
+    return ok && drmModeGetResources(fd) == NULL && errno == EACCES ? 0 : 1;
+}
+
 static int count_sockets(void)
 {
     int sockets = 0;
@@ -283,6 +295,8 @@ int main(int argc, char **argv)
 {
     if (argc == 3 && strcmp(argv[1], "exec-card") == 0)
         return exec_card(atoi(argv[2]));
+    if (argc == 3 && strcmp(argv[1], "exec-render") == 0)
+        return exec_render(atoi(argv[2]));
     if (argc >= 2 && strcmp(argv[1], "pipes") == 0)
         return pipes_only();
     const char *dev_path = getenv("CHAMELEON_DRM_PATH");
@@ -296,6 +310,7 @@ int main(int argc, char **argv)
 
     printf("device\n");
     struct stat st;
+    char num_r[16];
     CHECK(stat(dev_path, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226, "stat: DRM char device");
     int fd = open(dev_path, O_RDWR | O_CLOEXEC);
     CHECK(fd >= 0, "open fake path");
@@ -779,6 +794,98 @@ int main(int argc, char **argv)
     int fd4 = open(dev_path, O_RDWR | O_CLOEXEC);
     CHECK(fd4 >= 0 && drmIsMaster(fd4), "after the master closed, a new open becomes master");
     close(fd4);
+
+    /* As Linux 6.8 with virtio-gpu answers on its render node (shim/test/refvm.sh). */
+    printf("render node\n");
+    CHECK(stat("/dev/dri/renderD128", &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128),
+          "stat: /dev/dri/renderD128 is 226:128");
+    int master = open(dev_path, O_RDWR | O_CLOEXEC);
+    int rfd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    drmVersionPtr rv = rfd >= 0 ? drmGetVersion(rfd) : NULL;
+    CHECK(rv && strcmp(rv->name, "chameleon") == 0, "it opens; VERSION names the same driver");
+    drmFreeVersion(rv);
+    cap = 0;
+    CHECK(drmGetCap(rfd, DRM_CAP_PRIME, &cap) == 0 && (cap & DRM_PRIME_CAP_IMPORT) && (cap & DRM_PRIME_CAP_EXPORT),
+          "GET_CAP: PRIME import and export");
+    CHECK(fstat(rfd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128), "fstat: 226:128");
+    CHECK(master >= 0 && drmIsMaster(master) && !drmIsMaster(rfd), "a render file is never master");
+    errno = 0;
+    CHECK(drmSetMaster(rfd) != 0 && errno == EACCES, "SET_MASTER: EACCES");
+    errno = 0;
+    CHECK(drmSetClientCap(rfd, DRM_CLIENT_CAP_ATOMIC, 1) != 0 && errno == EACCES, "SET_CLIENT_CAP: EACCES");
+    drm_magic_t rmagic;
+    errno = 0;
+    CHECK(drmGetMagic(rfd, &rmagic) != 0 && errno == EACCES, "GET_MAGIC: EACCES");
+    errno = 0;
+    CHECK(drmModeGetResources(rfd) == NULL && errno == EACCES, "mode setting ioctls: EACCES");
+    struct drm_mode_create_dumb dumb = {.width = 64, .height = 64, .bpp = 32};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 && errno == EACCES, "CREATE_DUMB: EACCES");
+    errno = 0;
+    CHECK(drmIoctl(master, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 && errno == ENOSYS,
+          "...and ENOSYS on the primary node (no dumb buffers)");
+    struct drm_gem_flink flink = {.handle = 1};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == EACCES, "GEM_FLINK: EACCES");
+    struct drm_gem_close gclose = {.handle = 12345};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_GEM_CLOSE, &gclose) != 0 && errno == EINVAL, "GEM_CLOSE of no handle: EINVAL");
+    struct pollfd rp = {rfd, POLLIN, 0};
+    CHECK(poll(&rp, 1, 0) == 0, "no events to read");
+
+    struct gbm_device *rgbm = gbm_create_device(rfd);
+    struct gbm_bo *rbo = rgbm ? gbm_bo_create(rgbm, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING) : NULL;
+    uint32_t rh = rbo ? gbm_bo_get_handle(rbo).u32 : 0;
+    CHECK(rh, "gbm on the render node: a buffer with a handle");
+    int rdmabuf = -1;
+    uint32_t rh2 = 0, mh = 0, rfb = 0;
+    CHECK(drmPrimeHandleToFD(rfd, rh, DRM_CLOEXEC, &rdmabuf) == 0 && rdmabuf >= 0 &&
+              drmPrimeFDToHandle(rfd, rdmabuf, &rh2) == 0 && rh2 == rh,
+          "PRIME export, and the export imports as the same handle");
+    uint32_t rhandles[4] = {0}, rpitches[4] = {rbo ? gbm_bo_get_stride(rbo) : 0}, roffsets[4] = {0};
+    CHECK(drmPrimeFDToHandle(master, rdmabuf, &mh) == 0 && mh && (rhandles[0] = mh) &&
+              drmModeAddFB2(master, 64, 64, DRM_FORMAT_XRGB8888, rhandles, rpitches, roffsets, &rfb, 0) == 0,
+          "the primary node imports the render node's buffer and makes a framebuffer of it");
+    drmModeRmFB(master, rfb);
+    if (rdmabuf >= 0)
+        close(rdmabuf);
+    gbm_bo_destroy(rbo);
+    gbm_device_destroy(rgbm);
+
+    struct drm_client client = {.idx = 0};
+    CHECK(drmIoctl(master, DRM_IOCTL_GET_CLIENT, &client) == 0 && client.pid == (unsigned long)getpid() &&
+              client.auth == 1,
+          "GET_CLIENT 0: this process, authenticated");
+    client.idx = 1;
+    errno = 0;
+    CHECK(drmIoctl(master, DRM_IOCTL_GET_CLIENT, &client) != 0 && errno == EINVAL, "GET_CLIENT 1: EINVAL");
+    int plain = open(dev_path, O_RDWR | O_CLOEXEC);
+    flink.handle = 12345;
+    errno = 0;
+    CHECK(drmIoctl(plain, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == (root ? ENOENT : EACCES),
+          "GEM_FLINK from a file not authenticated: %s", root ? "ENOENT (root is)" : "EACCES");
+    drm_magic_t pmagic = 0;
+    errno = 0;
+    CHECK(drmGetMagic(plain, &pmagic) == 0 && drmAuthMagic(master, pmagic) == 0 &&
+              drmIoctl(plain, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == ENOENT,
+          "...once authenticated, ENOENT for no handle");
+    close(plain);
+    char *busid = drmGetBusid(master);
+    CHECK(busid && strcmp(busid, "") == 0, "GET_UNIQUE: empty before SET_VERSION 1.1");
+    drmFreeBusid(busid);
+    drmSetVersion sv = {1, 4, -1, -1};
+    busid = drmSetInterfaceVersion(master, &sv) == 0 ? drmGetBusid(master) : NULL;
+    CHECK(busid && strcmp(busid, "chameleon") == 0 && sv.drm_di_major == 1 && sv.drm_di_minor == 4,
+          "SET_VERSION 1.4 names the master 'chameleon' (%s)", busid ? busid : "none");
+    drmFreeBusid(busid);
+
+    int rinherited = fcntl(rfd, F_DUPFD, 10); /* not close-on-exec */
+    snprintf(num_r, sizeof num_r, "%d", rinherited);
+    CHECK(rinherited >= 0 && run_self("exec-render", num_r) == 0,
+          "a render fd passed across exec is still the render node, not master");
+    close(rinherited);
+    close(rfd);
+    close(master);
 
     printf("other processes (chameleon-kernel)\n");
     int fda = open(dev_path, O_RDWR | O_CLOEXEC);

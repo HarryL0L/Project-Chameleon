@@ -119,7 +119,9 @@ struct fake_fd {
     ino_t ino;        /* the read end the program holds */
     int event_wfd;    /* write end of the pipe the program reads DRM events from */
     pid_t pid;        /* the opener, for SET_MASTER's permission check */
+    int render;       /* opened as the render node: never master, render ioctls only */
     int master, was_master;
+    int authenticated; /* root at open, the first master, or AUTH_MAGIC (DRM_AUTH ioctls) */
     uint32_t magic;   /* 0 until GET_MAGIC */
     int magic_used;   /* AUTH_MAGIC took it */
     int universal_planes, atomic, writeback;
@@ -156,8 +158,9 @@ uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 /* Requests (struct cham_msg type), one at a time per connection, each
  * answered by CARD_DONE (a = the result, or -errno): */
 enum {
-    CARD_OPEN = 1, /* -> a = file id, and the read end of its event pipe */
-    CARD_ATTACH,   /* + an fd: -> a = the id of the file it is, or -EBADF */
+    CARD_OPEN = 1, /* a = 1 for the render node: -> a = a file (CARD_FILE_*), and
+                    * the read end of its event pipe */
+    CARD_ATTACH,   /* + an fd: -> a = the file it is (CARD_FILE_*), or -EBADF */
     CARD_IOCTL,    /* id = file, a = request (+ the number of an fd sent with it << 32,
                     * plus one), b = the argument's address */
     CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
@@ -171,6 +174,10 @@ enum {
     CARD_PUT_FD,   /* + an fd, a = 1 for close-on-exec: CARD_FD, a = its number in the caller */
     CARD_FD,
 };
+/* A file in OPEN's and ATTACH's answers: its id, and whether it is the render node's. */
+#define CARD_FILE_ID(a) ((uint32_t)(a))
+#define CARD_FILE_RENDER(a) ((int)(((uint64_t)(a) >> 32) & 1))
+#define CARD_FILE(id, render) ((int64_t)(id) | (int64_t)((render) != 0) << 32)
 int card_start(void); /* 0 once it listens */
 /* The process whose ioctl is running on this thread. */
 pid_t card_caller_pid(void);

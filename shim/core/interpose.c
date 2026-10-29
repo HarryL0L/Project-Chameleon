@@ -4,9 +4,10 @@
  * program of a Chameleon session (shim/chameleon), as a device node is
  * there for every program.
  *
- * The card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
- * libchameleon_udev.so lists it as a drm device) is served by
- * chameleon-kernel (card.c), as a device node by the kernel: opening it
+ * The card's nodes (/dev/dri/card0, or $CHAMELEON_DRM_PATH, and the render
+ * node /dev/dri/renderD128; libchameleon_udev.so lists them as drm devices)
+ * are served by chameleon-kernel (card.c), as device nodes by the kernel:
+ * opening one
  * returns the read end of a pipe the program polls and read()s DRM events
  * from, and a DRM ioctl on it is sent there as the system call's
  * arguments (the service reads and writes our memory itself). Each open is
@@ -30,6 +31,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/prctl.h>
@@ -43,8 +45,6 @@
 #include "../../common/cham_io.h"
 #include "../../common/chameleon_drm.h"
 #include "internal.h"
-
-static const dev_t fake_rdev = (dev_t)((226u << 8) | CHAM_DRM_MINOR);
 
 /* The overrides of libc symbols below must be exported. */
 #pragma GCC visibility push(default)
@@ -94,10 +94,15 @@ static const char *fake_path(void)
     return p && *p ? p : CHAM_DRM_PATH;
 }
 
-/* Its node as udev names it, or as libdrm does from sysfs. */
+/* 1 for the primary node, as udev names it or libdrm does from sysfs; 2
+ * for the render node; 0 for any other path. */
 static int is_fake_path(const char *path)
 {
-    return path && (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0);
+    if (!path)
+        return 0;
+    if (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0)
+        return 1;
+    return strcmp(path, CHAM_RENDER_PATH) == 0 ? 2 : 0;
 }
 
 __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
@@ -121,6 +126,7 @@ static struct known {
     dev_t dev;
     ino_t ino;
     uint32_t id; /* 0: not the card */
+    int render;
 } g_known[KNOWN];
 static unsigned g_known_next;
 
@@ -217,15 +223,18 @@ static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo
     }
 }
 
-static void remember_locked(const struct stat *st, uint32_t id)
+static void remember_locked(const struct stat *st, int64_t file)
 {
-    g_known[g_known_next++ % KNOWN] = (struct known){st->st_dev, st->st_ino, id};
+    g_known[g_known_next++ % KNOWN] =
+        (struct known){st->st_dev, st->st_ino, file > 0 ? CARD_FILE_ID(file) : 0, file > 0 && CARD_FILE_RENDER(file)};
 }
 
-/* The card file `fd` is (its id), or 0. Only a one-page pipe can be one. */
-static uint32_t card_file(int fd)
+/* The card file `fd` is (its id), or 0; *render tells whether it is the
+ * render node's. Only a one-page pipe can be one. */
+static uint32_t card_file(int fd, int *render)
 {
     struct stat st;
+    *render = 0;
     if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) ||
         fcntl(fd, F_GETPIPE_SZ) != CHAM_CARD_PIPE_SIZE)
         return 0;
@@ -233,6 +242,7 @@ static uint32_t card_file(int fd)
     for (int i = 0; i < KNOWN; i++) {
         if (g_known[i].ino == st.st_ino && g_known[i].dev == st.st_dev) { /* st_ino is never 0 */
             uint32_t id = g_known[i].id;
+            *render = g_known[i].render;
             unlock_conn();
             return id;
         }
@@ -240,37 +250,41 @@ static uint32_t card_file(int fd)
     /* A copy we haven't seen here (inherited, passed): the service knows. */
     struct cham_msg req = {CARD_ATTACH, 0, 0, 0};
     int64_t ret = call_locked(req, fd, NULL, NULL);
-    uint32_t id = ret > 0 ? (uint32_t)ret : 0;
+    uint32_t id = ret > 0 ? CARD_FILE_ID(ret) : 0;
+    *render = ret > 0 && CARD_FILE_RENDER(ret);
     if (ret != -ENODEV)
-        remember_locked(&st, id);
+        remember_locked(&st, ret);
     unlock_conn();
     return id;
 }
 
-static void fake_stat(struct stat *st)
+/* What stat() says of a node: a DRM character device, the render node
+ * open to every user as distributions make it. */
+static void fake_stat(struct stat *st, int render)
 {
     memset(st, 0, sizeof *st);
-    st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = fake_rdev;
+    st->st_mode = S_IFCHR | (render ? 0666 : 0660);
+    st->st_rdev = makedev(226, render ? CHAM_RENDER_MINOR : CHAM_DRM_MINOR);
     st->st_nlink = 1;
     st->st_uid = getuid();
     st->st_gid = getgid();
 }
 
-static int fake_open(void)
+static int fake_open(int node)
 {
-    struct cham_msg req = {CARD_OPEN, 0, 0, 0};
+    struct cham_msg req = {CARD_OPEN, 0, node == 2, 0};
     int fd;
     struct stat st;
     lock_conn();
     int64_t ret = call_locked(req, -1, NULL, &fd);
     if (ret > 0 && fd >= 0 && real_fstat(fd, &st) == 0)
-        remember_locked(&st, (uint32_t)ret);
+        remember_locked(&st, ret);
     unlock_conn();
     if (ret <= 0 || fd < 0) {
         if (fd >= 0)
             close(fd);
-        cham_log("cannot open the card: %s", ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
+        cham_log("cannot open the %s: %s", node == 2 ? "render node" : "card",
+                 ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
         errno = ret < 0 ? (int)-ret : ENODEV;
         return -1;
     }
@@ -281,7 +295,8 @@ static int fake_open(void)
 
 uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
 {
-    uint32_t id = card_file(fd);
+    int render;
+    uint32_t id = card_file(fd, &render);
     if (!id)
         return 0;
     struct cham_msg req = {CARD_IMPORT, id, bo->format, 0};
@@ -397,8 +412,9 @@ void link_forget_bo_locked(struct cham_bo *bo)
 
 int open(const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_open();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -414,8 +430,9 @@ int open64(const char *path, int flags, ...) __attribute__((alias("open")));
 
 int openat(int dirfd, const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_openat();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -431,16 +448,18 @@ int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("
 
 int __open_2(const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___open_2();
     return REAL(__open_2)(path, flags);
 }
 
 int __openat_2(int dirfd, const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___openat_2();
     return REAL(__openat_2)(dirfd, path, flags);
 }
@@ -449,8 +468,9 @@ int __openat_2(int dirfd, const char *path, int flags)
 
 int stat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_stat();
@@ -459,8 +479,9 @@ int stat(const char *path, struct stat *st)
 
 int lstat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_lstat();
@@ -469,8 +490,9 @@ int lstat(const char *path, struct stat *st)
 
 int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_fstatat();
@@ -479,9 +501,9 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 
 int fstat(int fd, struct stat *st)
 {
-    int ret = real_fstat(fd, st);
-    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd))
-        fake_stat(st);
+    int ret = real_fstat(fd, st), render;
+    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd, &render))
+        fake_stat(st, render);
     return ret;
 }
 
@@ -521,7 +543,8 @@ int ioctl(int fd, int request, ...)
      * (TCGETS: ENOTTY as a DRM device; FIONREAD: a byte count where a DRM
      * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
-        uint32_t id = card_file(fd);
+        int render;
+        uint32_t id = card_file(fd, &render);
         struct drm_prime_handle prime;
         if (id && (unsigned int)request == DRM_IOCTL_PRIME_FD_TO_HANDLE && read_own(&prime, (uint64_t)(uintptr_t)arg,
                                                                                      sizeof prime) == 0) {

@@ -14,6 +14,8 @@
  * Mesa):
  *  - EGL_PLATFORM_GBM_KHR: only in a Chameleon session, where
  *    libchameleon.so provides the gbm buffers (the compositor's display).
+ *  - EGL_PLATFORM_DEVICE_EXT on the card's device (the one it enumerates
+ *    in a Chameleon session): the same display.
  *  - eglGetDisplay(EGL_DEFAULT_DISPLAY): only with CHAMELEON_EGL_DEFAULT=1
  *    (no compositor asks for it; X11 apps under Xwayland need Mesa's).
  *  - EGL_PLATFORM_SURFACELESS_MESA and EGL_PLATFORM_ANDROID_KHR: always
@@ -181,6 +183,8 @@ static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGL
     case EGL_PLATFORM_GBM_KHR:
         /* Only Chameleon's own gbm devices have AHardwareBuffers behind them. */
         return cham_core_present() ? cham_egl_android_display() : EGL_NO_DISPLAY;
+    case EGL_PLATFORM_DEVICE_EXT:
+        return native == cham_egl_device() && cham_core_present() ? cham_egl_android_display() : EGL_NO_DISPLAY;
     case EGL_PLATFORM_SURFACELESS_MESA:
     case EGL_PLATFORM_ANDROID_KHR:
         return cham_egl_android_display();
@@ -202,7 +206,7 @@ static const char *get_vendor_string(int name)
         return NULL;
     static char list[256];
     snprintf(list, sizeof list, "%s%sEGL_MESA_platform_surfaceless EGL_KHR_platform_android",
-             cham_core_present() ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm " : "",
+             cham_core_present() ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_EXT_platform_device " : "",
              cham_wl_platform_available() ? "EGL_KHR_platform_wayland EGL_EXT_platform_wayland " : "");
     return list;
 }

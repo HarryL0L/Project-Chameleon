@@ -516,12 +516,12 @@ EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay dpy)
     return EGL_TRUE;
 }
 
-/* GBM and the GBM display's EGLDevice only where Chameleon's gbm
- * (libchameleon.so, i.e. the compositor) is loaded. */
+/* GBM and the card's EGLDevice only where Chameleon's gbm (libchameleon.so,
+ * in every program of a Chameleon session) is loaded. */
 static const char k_client_extensions_kms[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
     "EGL_MESA_platform_surfaceless EGL_KHR_platform_android EGL_KHR_client_get_all_proc_addresses "
-    "EGL_EXT_device_query";
+    "EGL_EXT_device_base EGL_EXT_device_enumeration EGL_EXT_device_query EGL_EXT_platform_device";
 static const char k_client_extensions[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_MESA_platform_surfaceless EGL_KHR_platform_android "
     "EGL_KHR_client_get_all_proc_addresses";
@@ -556,15 +556,33 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
     return cached;
 }
 
-/* ---- the display's EGLDevice (EGL_EXT_device_query) ----
- * Where the card exists (the compositor's), displays are on it: an
- * EGL_EXT_device_drm device with the primary node and no render node.
- * Like Mesa with a card that has no render node, it isn't enumerated
- * (no EGL_EXT_device_enumeration), so nothing opens a display on it
- * directly (EGL_EXT_platform_device); displays come through GBM. */
+/* ---- the card as an EGLDevice (EGL_EXT_device_base) ----
+ * Where the card exists (a Chameleon session), it is the GPU's device, as
+ * Mesa makes a DRM device with a render node one: enumerated, with its
+ * primary and render nodes (EGL_EXT_device_drm, _render_node), and the
+ * device of every display here. A display opened on it directly
+ * (EGL_EXT_platform_device, as wlroots does) is the same as a GBM one. */
 
 static const int g_device;
 #define CHAM_DEVICE ((EGLDeviceEXT)&g_device)
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT /* EGL_EXT_device_drm_render_node, newer than the NDK's headers */
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
+
+void *cham_egl_device(void)
+{
+    return CHAM_DEVICE;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglQueryDevicesEXT(EGLint max, EGLDeviceEXT *devices, EGLint *num)
+{
+    if (!num || (devices && max <= 0))
+        return fail(EGL_BAD_PARAMETER);
+    *num = cham_core_present() ? 1 : 0;
+    if (devices && *num)
+        devices[0] = CHAM_DEVICE;
+    return EGL_TRUE;
+}
 
 static const char *EGLAPIENTRY shim_eglQueryDeviceStringEXT(EGLDeviceEXT device, EGLint name)
 {
@@ -573,9 +591,11 @@ static const char *EGLAPIENTRY shim_eglQueryDeviceStringEXT(EGLDeviceEXT device,
         return NULL;
     }
     if (name == EGL_EXTENSIONS)
-        return "EGL_EXT_device_drm";
+        return "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
     if (name == EGL_DRM_DEVICE_FILE_EXT)
         return CHAM_DRM_PATH; /* the name libdrm finds for it in sysfs */
+    if (name == EGL_DRM_RENDER_NODE_FILE_EXT)
+        return CHAM_RENDER_PATH;
     fail(EGL_BAD_PARAMETER);
     return NULL;
 }
@@ -748,6 +768,7 @@ static const struct {
     {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
     {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
     {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
+    {"eglQueryDevicesEXT", (void *)shim_eglQueryDevicesEXT},
     {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
     {"eglQueryDisplayAttribKHR", (void *)shim_eglQueryDisplayAttribEXT},
     {"eglQueryDeviceStringEXT", (void *)shim_eglQueryDeviceStringEXT},

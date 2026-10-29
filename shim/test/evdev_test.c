@@ -158,31 +158,63 @@ int main(void)
     if (d)
         udev_device_unref(d);
     udev_enumerate_unref(e);
+    /* Its render node, as a program that only renders looks for one. */
+    e = udev_enumerate_new(udev);
+    udev_enumerate_add_match_subsystem(e, "drm");
+    udev_enumerate_add_match_sysname(e, "renderD*");
+    udev_enumerate_scan_devices(e);
+    first = udev_enumerate_get_list_entry(e);
+    syspath = first ? udev_list_entry_get_name(first) : NULL;
+    CHECK(syspath && !udev_list_entry_get_next(first), "one render node listed (%s)", syspath ? syspath : "none");
+    d = syspath ? udev_device_new_from_syspath(udev, syspath) : NULL;
+    node = d ? udev_device_get_devnode(d) : NULL;
+    CHECK(node && strcmp(node, "/dev/dri/renderD128") == 0 && stat(node, &st) == 0 && S_ISCHR(st.st_mode) &&
+              st.st_rdev == makedev(226, 128) && st.st_rdev == udev_device_get_devnum(d),
+          "/dev/dri/renderD128, 226:128 (%s)", node ? node : "none");
+    CHECK(d && !udev_device_get_tags_list_entry(d) && udev_device_get_property_value(d, "ID_PATH"),
+          "untagged, with its path (ID_PATH)");
+    if (d)
+        udev_device_unref(d);
+    udev_enumerate_unref(e);
 
     /* libdrm names and describes the card from its sysfs entries, as for a
-     * KMS-only platform card such as vkms: card0, no render node. */
+     * platform card with a render node (virtio-gpu's nodes). */
     printf("libdrm\n");
     char *name = drmGetPrimaryDeviceNameFromFd(fd);
     CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "primary node name (%s)", name ? name : "none");
     free(name);
     name = drmGetRenderDeviceNameFromFd(fd);
-    CHECK(!name, "no render node");
+    CHECK(name && strcmp(name, "/dev/dri/renderD128") == 0, "render node name (%s)", name ? name : "none");
     free(name);
     CHECK(drmGetNodeTypeFromFd(fd) == DRM_NODE_PRIMARY, "node type: primary");
+    int rfd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    CHECK(rfd >= 0 && drmGetNodeTypeFromFd(rfd) == DRM_NODE_RENDER, "the render node opens; node type: render");
+    name = rfd >= 0 ? drmGetPrimaryDeviceNameFromFd(rfd) : NULL;
+    CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "...its primary node (%s)", name ? name : "none");
+    free(name);
+    name = rfd >= 0 ? drmGetDeviceNameFromFd2(rfd) : NULL;
+    CHECK(name && strcmp(name, "/dev/dri/renderD128") == 0, "...its name from its uevent (%s)", name ? name : "none");
+    free(name);
+    if (rfd >= 0)
+        close(rfd);
     name = drmGetDeviceNameFromFd2(fd);
     CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "device name from its uevent (%s)", name ? name : "none");
     free(name);
     drmDevicePtr dev = NULL;
     CHECK(drmGetDevice2(fd, 0, &dev) == 0 && dev->bustype == DRM_BUS_PLATFORM &&
-              dev->available_nodes == 1 << DRM_NODE_PRIMARY &&
+              dev->available_nodes == (1 << DRM_NODE_PRIMARY | 1 << DRM_NODE_RENDER) &&
               strcmp(dev->nodes[DRM_NODE_PRIMARY], "/dev/dri/card0") == 0 &&
+              strcmp(dev->nodes[DRM_NODE_RENDER], "/dev/dri/renderD128") == 0 &&
               strcmp(dev->businfo.platform->fullname, "chameleon") == 0 &&
               strcmp(dev->deviceinfo.platform->compatible[0], "chameleon") == 0,
-          "drmGetDevice2: platform device \"chameleon\" with card0");
+          "drmGetDevice2: platform device \"chameleon\" with card0 and renderD128");
     drmFreeDevice(&dev);
     char resolved[PATH_MAX];
     CHECK(realpath("/sys/dev/char/226:0/device", resolved) && strcmp(resolved, "/sys/devices/platform/chameleon") == 0,
           "realpath of its device link (%s)", resolved);
+    CHECK(realpath("/sys/dev/char/226:128/device", resolved) &&
+              strcmp(resolved, "/sys/devices/platform/chameleon") == 0,
+          "...the render node's leads to the same device (%s)", resolved);
     int fd2 = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
     CHECK(fd2 >= 0 && drmIsKMS(fd2), "the named node opens as the card");
     if (fd2 >= 0)
@@ -195,7 +227,7 @@ int main(void)
         snprintf(listed + strlen(listed), sizeof listed - strlen(listed), "%s ", e->d_name);
     if (dir)
         closedir(dir);
-    int missing = !strstr(listed, "card0 "), real_dri = (int)syscall(SYS_openat, AT_FDCWD, "/dev/dri",
+    int missing = !strstr(listed, "card0 ") + !strstr(listed, "renderD128 "), real_dri = (int)syscall(SYS_openat, AT_FDCWD, "/dev/dri",
                                                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     char dents[4096];
     long n;
@@ -210,7 +242,7 @@ int main(void)
             } *d = (void *)(dents + off);
             char want[300];
             snprintf(want, sizeof want, "%s ", d->name);
-            if (d->name[0] != '.' && strcmp(d->name, "card0") != 0) {
+            if (d->name[0] != '.' && strcmp(d->name, "card0") != 0 && strcmp(d->name, "renderD128") != 0) {
                 struct stat real_st, seen_st;
                 missing += !strstr(listed, want) ||
                            (fstatat(real_dri, d->name, &real_st, 0) == 0 &&
@@ -221,7 +253,7 @@ int main(void)
         }
     if (real_dri >= 0)
         close(real_dri);
-    CHECK(!missing, "/dev/dri: the card and every real entry, the real ones as they are (%s)", listed);
+    CHECK(!missing, "/dev/dri: the card's nodes and every real entry, the real ones as they are (%s)", listed);
 
     /* Tag filters as systemd's libudev applies them: a device needs every
      * tag; the card has seat, the input event nodes none. */

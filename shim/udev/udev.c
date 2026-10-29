@@ -13,8 +13,9 @@
  *  - subsystems "input" and "drm" are Chameleon's: the input devices
  *    chameleon-kernel serves (common/chameleon_evdev.h), as devices eventN
  *    with node /dev/input/eventN (evdev.c answers for those nodes), and
- *    the fake KMS card it serves, card0, with its node /dev/dri/card0 - all
- *    while chameleon-kernel runs. Enumerations list
+ *    the fake KMS card it serves, card0 with its node /dev/dri/card0 and
+ *    its render node renderD128 (/dev/dri/renderD128) - all while
+ *    chameleon-kernel runs. Enumerations list
  *    them, followed by the real libudev's devices of every other subsystem
  *    (power_supply, backlight, ...), so a program can run with this
  *    library preloaded whatever it looks for.
@@ -53,12 +54,15 @@ struct udev_list_entry;
 #define MAX_PROPS 13
 #define MAX_TAGS 3
 #define MAX_FILTERS 4
-#define MAX_LISTED (CHAM_EVDEV_MAX_DEVICES + 1) /* the input devices and the card */
+#define MAX_LISTED (CHAM_EVDEV_MAX_DEVICES + 2) /* the input devices and the card's two nodes */
 
-#define CARD_SYSPATH "/sys/devices/platform/chameleon/drm/card0"
+#define DRM_SYSPATH "/sys/devices/platform/chameleon/drm/"
+#define CARD_SYSPATH DRM_SYSPATH CHAM_DRM_NAME
+#define RENDER_SYSPATH DRM_SYSPATH CHAM_RENDER_NAME
 
 /* The card's tags, as systemd's rules give a GPU's card node (71-seat,
- * 70-uaccess); its rules tag no keyboard, mouse or touch event node. */
+ * 70-uaccess); its rules tag no render node (distributions open those to
+ * every user by mode instead) and no keyboard, mouse or touch event node. */
 static const char *const k_card_tags[MAX_TAGS] = {"seat", "master-of-seat", "uaccess"};
 
 struct entry {
@@ -223,8 +227,9 @@ static void describe(struct dev *d, struct udev *udev, int index, const struct c
 }
 
 /* The card, as the kernel and udev describe a GPU's primary node: under its
- * platform device, tagged for seat0 (logind and libseat look for these). */
-static void describe_card(struct dev *d, struct udev *udev)
+ * platform device, tagged for seat0 (logind and libseat look for these);
+ * or its render node, which has only its path (60-drm's path_id). */
+static void describe_card(struct dev *d, struct udev *udev, int render)
 {
     memset(d, 0, sizeof *d);
     d->magic = MAGIC_DEVICE;
@@ -232,13 +237,13 @@ static void describe_card(struct dev *d, struct udev *udev)
     d->udev = udev;
     d->subsystem = "drm";
     d->devtype = "drm_minor";
-    d->devnum = makedev(226, CHAM_DRM_MINOR);
+    d->devnum = makedev(226, render ? CHAM_RENDER_MINOR : CHAM_DRM_MINOR);
     const char *node = getenv("CHAMELEON_DRM_PATH");
-    snprintf(d->devnode, sizeof d->devnode, "%s", node && *node ? node : CHAM_DRM_PATH);
-    snprintf(d->sysname, sizeof d->sysname, "card0");
-    d->sysnum = d->sysname + 4;
-    snprintf(d->syspath, sizeof d->syspath, "%s", CARD_SYSPATH);
-    snprintf(d->devpath, sizeof d->devpath, "%s", &CARD_SYSPATH[4]); /* without "/sys" */
+    snprintf(d->devnode, sizeof d->devnode, "%s", render ? CHAM_RENDER_PATH : node && *node ? node : CHAM_DRM_PATH);
+    snprintf(d->sysname, sizeof d->sysname, "%s", render ? CHAM_RENDER_NAME : CHAM_DRM_NAME);
+    d->sysnum = d->sysname + (render ? 7 : 4);
+    snprintf(d->syspath, sizeof d->syspath, "%s", render ? RENDER_SYSPATH : CARD_SYSPATH);
+    snprintf(d->devpath, sizeof d->devpath, "%s", d->syspath + 4); /* without "/sys" */
     snprintf(d->major, sizeof d->major, "%u", major(d->devnum));
     snprintf(d->minor, sizeof d->minor, "%u", minor(d->devnum));
     struct entry *p = d->props;
@@ -249,6 +254,10 @@ static void describe_card(struct dev *d, struct udev *udev)
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MAJOR", d->major, NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "MINOR", d->minor, NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_PATH", "platform-chameleon", NULL};
+    if (render) {
+        link_entries(p, d->nprops);
+        return;
+    }
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "ID_FOR_SEAT", "drm-platform-chameleon", NULL};
     p[d->nprops++] = (struct entry){MAGIC_ENTRY, "TAGS", ":seat:master-of-seat:uaccess:", NULL};
     link_entries(p, d->nprops);
@@ -257,13 +266,13 @@ static void describe_card(struct dev *d, struct udev *udev)
     link_entries(d->tags, d->ntags);
 }
 
-static struct udev_device *new_card(struct udev *udev)
+static struct udev_device *new_card(struct udev *udev, int render)
 {
     if (!server_running())
         return NULL;
     struct dev *d = malloc(sizeof *d);
     if (d)
-        describe_card(d, udev);
+        describe_card(d, udev, render);
     return (struct udev_device *)d;
 }
 
@@ -291,8 +300,8 @@ static const char *prop(const struct dev *d, const char *key)
 
 EXPORT struct udev_device *udev_device_new_from_syspath(struct udev *udev, const char *syspath)
 {
-    if (syspath && strcmp(syspath, CARD_SYSPATH) == 0)
-        return new_card(udev);
+    if (syspath && (strcmp(syspath, CARD_SYSPATH) == 0 || strcmp(syspath, RENDER_SYSPATH) == 0))
+        return new_card(udev, strcmp(syspath, RENDER_SYSPATH) == 0);
     int i = index_of_syspath(syspath);
     if (i >= 0)
         return new_dev(udev, i);
@@ -305,8 +314,8 @@ EXPORT struct udev_device *udev_device_new_from_devnum(struct udev *udev, char t
     if (type == 'c' && major(devnum) == 13 && minor(devnum) >= CHAM_EVDEV_MINOR_BASE &&
         minor(devnum) < CHAM_EVDEV_MINOR_BASE + CHAM_EVDEV_MAX_DEVICES)
         return new_dev(udev, (int)minor(devnum) - CHAM_EVDEV_MINOR_BASE);
-    if (type == 'c' && devnum == makedev(226, CHAM_DRM_MINOR))
-        return new_card(udev);
+    if (type == 'c' && (devnum == makedev(226, CHAM_DRM_MINOR) || devnum == makedev(226, CHAM_RENDER_MINOR)))
+        return new_card(udev, devnum == makedev(226, CHAM_RENDER_MINOR));
     NEXT(udev_device_new_from_devnum);
     return next_udev_device_new_from_devnum ? next_udev_device_new_from_devnum(udev, type, devnum) : NULL;
 }
@@ -317,8 +326,9 @@ EXPORT struct udev_device *udev_device_new_from_subsystem_sysname(struct udev *u
     int i = subsystem && strcmp(subsystem, "input") == 0 ? cham_evdev_index(sysname, "event") : -1;
     if (i >= 0)
         return new_dev(udev, i);
-    if (subsystem && sysname && strcmp(subsystem, "drm") == 0 && strcmp(sysname, "card0") == 0)
-        return new_card(udev);
+    if (subsystem && sysname && strcmp(subsystem, "drm") == 0 &&
+        (strcmp(sysname, CHAM_DRM_NAME) == 0 || strcmp(sysname, CHAM_RENDER_NAME) == 0))
+        return new_card(udev, strcmp(sysname, CHAM_RENDER_NAME) == 0);
     NEXT(udev_device_new_from_subsystem_sysname);
     return next_udev_device_new_from_subsystem_sysname
                ? next_udev_device_new_from_subsystem_sysname(udev, subsystem, sysname)
@@ -662,14 +672,14 @@ EXPORT int udev_enumerate_scan_devices(struct udev_enumerate *e)
         return -EINVAL;
     struct cham_evdev_info list[CHAM_EVDEV_MAX_DEVICES];
     int count = cham_evdev_list(list, CHAM_EVDEV_MAX_DEVICES);
-    int card = server_running();
+    int nodes = server_running() ? 2 : 0; /* the card's primary and render nodes */
     e->n = 0;
-    for (int i = 0; i < count + card; i++) {
+    for (int i = 0; i < count + nodes; i++) {
         struct dev d;
         if (i < count)
             describe(&d, e->udev, i, &list[i]);
         else
-            describe_card(&d, e->udev);
+            describe_card(&d, e->udev, i > count);
         if (!matches(e, &d))
             continue;
         snprintf(e->paths[e->n], sizeof e->paths[e->n], "%s", d.syspath);
@@ -854,7 +864,7 @@ EXPORT struct udev_device *udev_monitor_receive_device(struct udev_monitor *m)
         struct dev *d = malloc(sizeof *d);
         if (!d)
             break;
-        describe_card(d, m->udev);
+        describe_card(d, m->udev, 0); /* the primary node's, as the kernel sends it */
         d->action = "change";
         d->seqnum = u.seqnum;
         snprintf(d->seqnum_s, sizeof d->seqnum_s, "%llu", (unsigned long long)u.seqnum);

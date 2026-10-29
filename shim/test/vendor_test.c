@@ -120,7 +120,7 @@ int main(void)
         unsetenv("CHAMELEON_EGL_DEFAULT");
         EGLDisplay gbm_dpy = eglGetPlatformDisplay(EGL_PLATFORM_GBM_KHR, (void *)1, NULL);
         CHECK(gbm_dpy != EGL_NO_DISPLAY, "GBM display for the compositor");
-        /* The card as an EGLDevice, as Mesa describes a KMS-only card. */
+        /* The card as an EGLDevice, as Mesa describes a DRM device with a render node. */
         PFNEGLQUERYDISPLAYATTRIBEXTPROC display_attrib =
             (PFNEGLQUERYDISPLAYATTRIBEXTPROC)eglGetProcAddress("eglQueryDisplayAttribEXT");
         PFNEGLQUERYDEVICESTRINGEXTPROC device_string =
@@ -128,21 +128,28 @@ int main(void)
         PFNEGLQUERYDEVICESEXTPROC query_devices = (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
         EGLAttrib device = 0;
         EGLint gmajor, gminor;
-        CHECK(client && strstr(client, "EGL_EXT_device_query"), "EGL_EXT_device_query for the compositor");
+        CHECK(client && strstr(client, "EGL_EXT_device_query") && strstr(client, "EGL_EXT_device_enumeration") &&
+                  strstr(client, "EGL_EXT_platform_device"),
+              "EGL_EXT_device_base and EGL_EXT_platform_device in a session");
         CHECK(display_attrib && eglInitialize(gbm_dpy, &gmajor, &gminor) &&
                   display_attrib(gbm_dpy, EGL_DEVICE_EXT, &device) && device,
               "the GBM display's EGLDevice");
         const char *dev_exts = device ? device_string((EGLDeviceEXT)device, EGL_EXTENSIONS) : NULL;
         const char *file = device ? device_string((EGLDeviceEXT)device, EGL_DRM_DEVICE_FILE_EXT) : NULL;
-        CHECK(dev_exts && strstr(dev_exts, "EGL_EXT_device_drm") && !strstr(dev_exts, "render_node") && file &&
-                  strcmp(file, "/dev/dri/card0") == 0,
-              "it is the card, /dev/dri/card0, without a render node (%s)", file ? file : "none");
+        const char *render = device ? device_string((EGLDeviceEXT)device, EGL_DRM_RENDER_NODE_FILE_EXT) : NULL;
+        CHECK(dev_exts && strstr(dev_exts, "EGL_EXT_device_drm") && strstr(dev_exts, "EGL_EXT_device_drm_render_node") &&
+                  file && strcmp(file, "/dev/dri/card0") == 0 && render && strcmp(render, "/dev/dri/renderD128") == 0,
+              "it is the card, /dev/dri/card0 with /dev/dri/renderD128 (%s, %s)", file ? file : "none",
+              render ? render : "none");
         EGLDeviceEXT devices[8];
         EGLint count = 0, ours = 0;
         if (query_devices && query_devices(8, devices, &count))
             for (EGLint i = 0; i < count; i++)
                 ours += devices[i] == (EGLDeviceEXT)device;
-        CHECK(ours == 0, "not enumerated, as Mesa leaves out a card without a render node");
+        CHECK(ours == 1, "enumerated, as Mesa lists a DRM device with a render node");
+        EGLDisplay dev_dpy = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, (void *)device, NULL);
+        CHECK(dev_dpy != EGL_NO_DISPLAY && eglInitialize(dev_dpy, &gmajor, &gminor),
+              "a display on the device itself (EGL_PLATFORM_DEVICE_EXT, as wlroots opens one)");
     } else {
         CHECK(client && !strstr(client, "platform_gbm"), "no GBM platform without libchameleon.so");
         CHECK(eglGetDisplay(EGL_DEFAULT_DISPLAY) == EGL_NO_DISPLAY,

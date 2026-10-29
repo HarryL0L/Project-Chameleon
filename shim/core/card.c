@@ -6,7 +6,8 @@
  * libchameleon.so (interpose.c) answers open/fstat/ioctl on the card node
  * by asking here, over $XDG_RUNTIME_DIR/chameleon-card: one SOCK_SEQPACKET
  * connection per process, one request at a time (the protocol is in
- * internal.h). OPEN makes a file with kms.c's per-file state, and a pipe:
+ * internal.h). OPEN makes a file of the card's primary node or of its
+ * render node with kms.c's per-file state, and a pipe:
  * the program gets the read end and reads DRM events from it, the service
  * keeps the write end. Once every copy of the read end is closed (in any
  * process, even a dead one) the write end reports POLLERR and the file is
@@ -53,6 +54,10 @@ static void caller_key(void) { pthread_key_create(&g_caller_key, NULL); }
 static struct caller *current(void) { return pthread_getspecific(g_caller_key); }
 
 static pthread_mutex_t g_card_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Held while closed files are released, so a request that checks for them
+ * waits until a release another thread started is done (a closed master
+ * must not still hold the master when the next request runs). */
+static pthread_mutex_t g_reap_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct fake_fd *g_card_files; /* open files (next), each holding one ref */
 static uint32_t g_next_file_id;
 static int g_wake[2] = {-1, -1};     /* a file was opened: the server thread watches it too */
@@ -156,6 +161,7 @@ static void file_put(struct fake_fd *f)
 static void reap_closed(void)
 {
     struct fake_fd *dead = NULL;
+    pthread_mutex_lock(&g_reap_lock);
     pthread_mutex_lock(&g_card_lock);
     for (struct fake_fd **q = &g_card_files; *q;) {
         struct pollfd pfd = {(*q)->event_wfd, 0, 0};
@@ -172,11 +178,12 @@ static void reap_closed(void)
     while (dead) {
         struct fake_fd *f = dead;
         dead = f->next;
-        file_put(f); /* now, or when the call in progress ends */
+        file_put(f); /* now, or when the call in progress ends, as the kernel's last fput */
     }
+    pthread_mutex_unlock(&g_reap_lock);
 }
 
-static int file_open(struct caller *c, int *read_end)
+static int64_t file_open(struct caller *c, int render, int *read_end)
 {
     kms_init_once(); /* the first open waits for the app, as the card's driver probing a panel */
     int p[2];
@@ -196,6 +203,7 @@ static int file_open(struct caller *c, int *read_end)
     f->ino = st.st_ino;
     f->event_wfd = p[1];
     f->pid = c->pid;
+    f->render = render;
     f->refs = 1;
     kms_file_open(f);
     pthread_mutex_lock(&g_card_lock);
@@ -214,24 +222,25 @@ static int file_open(struct caller *c, int *read_end)
             comm[strcspn(comm, "\n")] = 0;
         fclose(fp);
     }
-    cham_log("%s (pid %d) opened the card%s", comm, (int)c->pid, f->master ? ", DRM master" : "");
+    cham_log("%s (pid %d) opened the %s%s", comm, (int)c->pid, render ? "render node" : "card",
+             f->master ? ", DRM master" : "");
     *read_end = p[0];
-    return (int)f->id;
+    return CARD_FILE(f->id, render);
 }
 
 /* Which open file `fd` (a copy of a read end) is. */
-static int file_attach(int fd)
+static int64_t file_attach(int fd)
 {
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode))
         return -EBADF;
-    int id = -EBADF;
+    int64_t ret = -EBADF;
     pthread_mutex_lock(&g_card_lock);
     for (struct fake_fd *f = g_card_files; f; f = f->next)
         if (f->dev == st.st_dev && f->ino == st.st_ino)
-            id = (int)f->id;
+            ret = CARD_FILE(f->id, f->render);
     pthread_mutex_unlock(&g_card_lock);
-    return id;
+    return ret;
 }
 
 /* ---- connections ---- */
@@ -256,7 +265,7 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
     switch (m->type) {
     case CARD_OPEN: {
         int read_end = -1;
-        int ret = file_open(c, &read_end);
+        int64_t ret = file_open(c, m->a == 1, &read_end);
         answer(c, ret, read_end);
         if (read_end >= 0)
             close(read_end); /* the program's from now on */

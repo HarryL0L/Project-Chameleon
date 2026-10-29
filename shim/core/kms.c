@@ -13,6 +13,9 @@
  * vkms with shim/test/refvm.sh): the first opener while there is no DRM
  * master becomes master and only it may commit; client caps, GEM handles,
  * framebuffers and property blobs belong to the file, and go when it closes.
+ * A file of the render node (renderD128) is never master and may use only
+ * the ioctls the kernel allows render nodes (DRM_RENDER_ALLOW: version, caps,
+ * GEM handles and PRIME), as with virtio-gpu.
  *
  * The connector's one mode is the app's surface: its size and the display's
  * refresh rate. When the window changes (the phone rotates, the keyboard
@@ -152,6 +155,7 @@ static uint64_t g_frame;
 static struct fake_fd *g_files;     /* every open file (kms_next) */
 static struct fake_fd *g_master;    /* the file that is DRM master, if any */
 static uint32_t g_next_magic = 1;
+static int g_unique_set;            /* SET_VERSION 1.1 named the master (GET_UNIQUE) */
 
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
@@ -1104,8 +1108,9 @@ void kms_file_open(struct fake_fd *f)
     pthread_mutex_lock(&g_lock);
     f->kms_next = g_files;
     g_files = f;
-    if (!g_master) /* the first opener while there is none becomes master */
-        g_master = f, f->master = f->was_master = 1;
+    f->authenticated = card_caller_uid() == 0; /* drm_file_alloc: capable(CAP_SYS_ADMIN) */
+    if (!g_master && !f->render) /* the first opener of the primary node while there is none */
+        g_master = f, f->master = f->was_master = f->authenticated = 1;
     pthread_mutex_unlock(&g_lock);
 }
 
@@ -1216,7 +1221,7 @@ static int auth_magic(const struct drm_auth *a)
         holder = holder->kms_next;
     if (!holder || holder->magic_used)
         return -EINVAL;
-    holder->magic_used = 1;
+    holder->magic_used = holder->authenticated = 1;
     return 0;
 }
 
@@ -1232,7 +1237,14 @@ static int op_drop_master(struct fake_fd *f, void *d) { (void)d; return drop_mas
 static int op_get_unique(struct fake_fd *f, void *d)
 {
     (void)f;
-    ((struct drm_unique *)d)->unique_len = 0; /* a platform device's unique is empty, as vkms' */
+    struct drm_unique *u = d;
+    /* Empty until SET_VERSION 1.1 gives the master the platform device's name,
+     * as vkms'; copied only when it fits whole (drm_getunique). */
+    const char *unique = g_unique_set ? "chameleon" : "";
+    size_t n = strlen(unique);
+    if (u->unique_len >= n && n && copy_to_user((uint64_t)(uintptr_t)u->unique, unique, n))
+        return -EFAULT;
+    u->unique_len = n;
     return 0;
 }
 static int op_get_resources(struct fake_fd *f, void *d) { return get_resources(f, d); }
@@ -1265,38 +1277,103 @@ static int op_list_lessees(struct fake_fd *f, void *d)
 static int op_noop(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; }
 /* The syncobj ioctls of a driver without DRIVER_SYNCOBJ. */
 static int op_no_syncobj(struct fake_fd *f, void *d) { (void)f; (void)d; return -EOPNOTSUPP; }
+static int op_invalid(struct fake_fd *f, void *d) { (void)f; (void)d; return -EINVAL; }
+/* The dumb-buffer ioctls of a driver without dumb_create. */
+static int op_no_dumb(struct fake_fd *f, void *d) { (void)f; (void)d; return -ENOSYS; }
+static int op_get_stats(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; /* all zero */ }
+static int op_get_client(struct fake_fd *f, void *d)
+{
+    struct drm_client *c = d;
+    if (c->idx) /* only the caller itself, index 0 */
+        return -EINVAL;
+    c->auth = f->authenticated;
+    c->pid = (unsigned long)card_caller_pid();
+    c->uid = 65534; /* overflowuid */
+    c->magic = 0;
+    c->iocs = 0;
+    return 0;
+}
+/* drm_setversion: the interface version 1.4 and the driver's 1.0; asking
+ * for interface 1.1 or later gives the master its unique name. */
+static int op_set_version(struct fake_fd *f, void *d)
+{
+    (void)f;
+    struct drm_set_version *v = d;
+    int ret = 0;
+    if (v->drm_di_major != -1) {
+        if (v->drm_di_major != 1 || v->drm_di_minor < 0 || v->drm_di_minor > 4)
+            ret = -EINVAL;
+        else if (v->drm_di_minor >= 1)
+            g_unique_set = 1;
+    }
+    if (!ret && v->drm_dd_major != -1 && (v->drm_dd_major != 1 || v->drm_dd_minor < 0 || v->drm_dd_minor > 0))
+        ret = -EINVAL;
+    v->drm_di_major = 1;
+    v->drm_di_minor = 4;
+    v->drm_dd_major = 1;
+    v->drm_dd_minor = 0;
+    return ret;
+}
+/* GEM names (DRI2's sharing): no buffer gets one here, so none is found. */
+static int op_gem_flink(struct fake_fd *f, void *d)
+{
+    static int warned;
+    if (!handle_bo(f, ((struct drm_gem_flink *)d)->handle))
+        return -ENOENT;
+    if (!warned++)
+        cham_log("a program asked for a GEM name (flink); the card shares buffers by PRIME only");
+    return -EOPNOTSUPP;
+}
+static int op_gem_open(struct fake_fd *f, void *d) { (void)f; (void)d; return -ENOENT; }
 
 #define DRM_CORE_IOCTL_COUNT 0xd1 /* up to DRM_IOCTL_MODE_CLOSEFB */
-#define MASTER 1
+/* The kernel's permission flags (drm_ioctl.h). */
+#define AUTH 1   /* DRM_AUTH: an authenticated file (or a render file) */
+#define MASTER 2 /* DRM_MASTER: the current master */
+#define ROOT 4   /* DRM_ROOT_ONLY: CAP_SYS_ADMIN (root here) */
+#define RENDER 8 /* DRM_RENDER_ALLOW: render files may use it */
 struct ioctl_def {
     unsigned int cmd;
     int (*fn)(struct fake_fd *, void *);
     int flags;
 };
 #define DEF(c, f, fl) [_IOC_NR(c)] = {(unsigned int)(c), (f), (fl)}
-/* What the card answers; core ioctls it doesn't implement are listed with
- * no function when the kernel needs the master to reach them, so a
- * non-master file still gets EACCES as on Linux. */
+/* Linux 6.8's core ioctls (drm_ioctls[], without the legacy ones 6.8 no
+ * longer builds), with its flags. Those the card doesn't implement have no
+ * function: after the permission checks they answer EINVAL. */
 static const struct ioctl_def k_ioctls[DRM_CORE_IOCTL_COUNT] = {
-    DEF(DRM_IOCTL_VERSION, op_version, 0),
+    DEF(DRM_IOCTL_VERSION, op_version, RENDER),
     DEF(DRM_IOCTL_GET_UNIQUE, op_get_unique, 0),
     DEF(DRM_IOCTL_GET_MAGIC, op_get_magic, 0),
-    DEF(DRM_IOCTL_GET_CAP, op_get_cap, 0),
+    DEF(DRM_IOCTL_GET_CLIENT, op_get_client, 0),
+    DEF(DRM_IOCTL_GET_STATS, op_get_stats, 0),
+    DEF(DRM_IOCTL_GET_CAP, op_get_cap, RENDER),
     DEF(DRM_IOCTL_SET_CLIENT_CAP, op_set_client_cap, 0),
-    DEF(DRM_IOCTL_SET_VERSION, NULL, MASTER),
+    DEF(DRM_IOCTL_SET_VERSION, op_set_version, MASTER),
+    DEF(DRM_IOCTL_SET_UNIQUE, op_invalid, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_BLOCK, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_UNBLOCK, op_noop, AUTH | MASTER | ROOT),
     DEF(DRM_IOCTL_AUTH_MAGIC, op_auth_magic, MASTER),
     DEF(DRM_IOCTL_SET_MASTER, op_set_master, 0),
     DEF(DRM_IOCTL_DROP_MASTER, op_drop_master, 0),
-    DEF(DRM_IOCTL_GEM_CLOSE, op_gem_close, 0),
-    DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, op_prime_handle_to_fd, 0),
-    DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, op_prime_fd_to_handle, 0),
+    DEF(DRM_IOCTL_ADD_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_RM_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_FINISH, op_noop, AUTH),
+    DEF(DRM_IOCTL_WAIT_VBLANK, NULL, 0),
+    DEF(DRM_IOCTL_UPDATE_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_GEM_CLOSE, op_gem_close, RENDER),
+    DEF(DRM_IOCTL_GEM_FLINK, op_gem_flink, AUTH),
+    DEF(DRM_IOCTL_GEM_OPEN, op_gem_open, AUTH),
     DEF(DRM_IOCTL_MODE_GETRESOURCES, op_get_resources, 0),
+    DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, op_prime_handle_to_fd, RENDER),
+    DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, op_prime_fd_to_handle, RENDER),
     DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, op_get_plane_resources, 0),
     DEF(DRM_IOCTL_MODE_GETCRTC, op_get_crtc, 0),
     DEF(DRM_IOCTL_MODE_SETCRTC, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_GETPLANE, op_get_plane, 0),
     DEF(DRM_IOCTL_MODE_SETPLANE, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_CURSOR, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_GETGAMMA, NULL, 0),
     DEF(DRM_IOCTL_MODE_SETGAMMA, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_GETENCODER, op_get_encoder, 0),
     DEF(DRM_IOCTL_MODE_GETCONNECTOR, op_get_connector, 0),
@@ -1305,34 +1382,56 @@ static const struct ioctl_def k_ioctls[DRM_CORE_IOCTL_COUNT] = {
     DEF(DRM_IOCTL_MODE_GETPROPERTY, op_get_property, 0),
     DEF(DRM_IOCTL_MODE_SETPROPERTY, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_GETPROPBLOB, op_get_blob, 0),
+    DEF(DRM_IOCTL_MODE_GETFB, NULL, 0),
+    DEF(DRM_IOCTL_MODE_GETFB2, NULL, 0),
+    DEF(DRM_IOCTL_MODE_ADDFB, NULL, 0),
     DEF(DRM_IOCTL_MODE_ADDFB2, op_add_fb2, 0),
     DEF(DRM_IOCTL_MODE_RMFB, op_rmfb, 0),
+    DEF(DRM_IOCTL_MODE_CLOSEFB, op_closefb, 0),
     DEF(DRM_IOCTL_MODE_PAGE_FLIP, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_DIRTYFB, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_CREATE_DUMB, op_no_dumb, 0),
+    DEF(DRM_IOCTL_MODE_MAP_DUMB, op_no_dumb, 0),
+    DEF(DRM_IOCTL_MODE_DESTROY_DUMB, op_no_dumb, 0),
     DEF(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, op_obj_get_properties, 0),
     DEF(DRM_IOCTL_MODE_OBJ_SETPROPERTY, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_CURSOR2, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_ATOMIC, op_atomic, MASTER),
     DEF(DRM_IOCTL_MODE_CREATEPROPBLOB, op_create_blob, 0),
     DEF(DRM_IOCTL_MODE_DESTROYPROPBLOB, op_destroy_blob, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_CREATE, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_DESTROY, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_WAIT, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_RESET, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_SIGNAL, op_no_syncobj, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_CREATE, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_DESTROY, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TRANSFER, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_WAIT, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_EVENTFD, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_RESET, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_SIGNAL, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_QUERY, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_CRTC_GET_SEQUENCE, NULL, 0),
+    DEF(DRM_IOCTL_CRTC_QUEUE_SEQUENCE, NULL, 0),
     DEF(DRM_IOCTL_MODE_CREATE_LEASE, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_LIST_LESSEES, op_list_lessees, MASTER),
     DEF(DRM_IOCTL_MODE_GET_LEASE, NULL, MASTER),
     DEF(DRM_IOCTL_MODE_REVOKE_LEASE, NULL, MASTER),
-    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_QUERY, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_TRANSFER, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_SYNCOBJ_EVENTFD, op_no_syncobj, 0),
-    DEF(DRM_IOCTL_MODE_CLOSEFB, op_closefb, 0),
 };
+
+/* drm_ioctl_permit, in its order. */
+static int permit(const struct fake_fd *f, int flags)
+{
+    if ((flags & ROOT) && card_caller_uid() != 0)
+        return -EACCES;
+    if ((flags & AUTH) && !f->render && !f->authenticated)
+        return -EACCES;
+    if ((flags & MASTER) && g_master != f)
+        return -EACCES;
+    if (!(flags & RENDER) && f->render)
+        return -EACCES;
+    return 0;
+}
 
 /* As the kernel: the ioctl is found by number, the argument is copied in
  * and out by the size the caller declares (the rest zero-filled), and only
@@ -1346,7 +1445,7 @@ int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
     const struct ioctl_def *def = nr < DRM_CORE_IOCTL_COUNT && !(nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END)
                                       ? &k_ioctls[nr]
                                       : NULL; /* driver ioctls: this driver has none */
-    if (!def || (!def->fn && !(def->flags & MASTER))) {
+    if (!def || !def->cmd) { /* not an ioctl of 6.8's */
         if (unknown_warnings++ < 20)
             cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
         return -EINVAL;
@@ -1366,10 +1465,10 @@ int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
     if (!ret) {
         memset(kdata + in_size, 0, ksize - in_size);
         pthread_mutex_lock(&g_lock);
-        if ((def->flags & MASTER) && g_master != f) {
-            if (nr == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) && non_master_commits++ < 5)
+        ret = permit(f, def->flags);
+        if (ret) {
+            if (nr == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) && !f->render && non_master_commits++ < 5)
                 cham_log("refusing a commit from a file that isn't DRM master (EACCES)");
-            ret = -EACCES;
         } else if (!def->fn) {
             if (unknown_warnings++ < 20)
                 cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);

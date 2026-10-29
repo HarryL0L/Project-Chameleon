@@ -93,12 +93,17 @@ screen keeps its first size instead of following the app's window).
   evdev's queue (whole frames, `SYN_DROPPED` when it overflows), live key,
   axis and touch state, its own clock, grab and revoke, and subsystem `drm` is
   the fake card, `card0` with node `/dev/dri/card0`, which compositors find
-  the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`). The card also
-  has the sysfs entries a KMS-only platform card has (`/sys/dev/char/226:0`,
-  `/sys/devices/platform/chameleon`, `/dev/dri` listing `card0`, no render
-  node; `udev/sysfs.c`), from which libdrm names and describes it as for
-  vkms, while it exists. Real entries in `/dev/dri` (a GPU's render node,
-  where Android lets apps reach one) are listed next to it and stay real. Enumerations of other
+  the way they find a GPU (KWin needs no `KWIN_DRM_DEVICES`), and its render
+  node `renderD128` (`/dev/dri/renderD128`): the same device for programs
+  that only render and share buffers, never master and limited to the
+  ioctls the kernel allows render nodes. The card also has the sysfs
+  entries a platform card with a render node has (`/sys/dev/char/226:0`
+  and `226:128`, `/sys/devices/platform/chameleon`, `/dev/dri` listing
+  `card0` and `renderD128`; `udev/sysfs.c`), from which libdrm names and
+  describes it as for virtio-gpu, while it exists, and EGL lists it as the
+  GPU's device (`EGL_EXT_device_drm` with `_render_node`; wlroots opens its
+  display there). Real entries in `/dev/dri` are listed next to them and
+  stay real, except a real `card0` or `renderD128`, which ours hide. Enumerations of other
   subsystems (`power_supply`, `backlight`, ...) pass through to the real
   libudev, without its monitor events. Any program in the session
   (`libinput debug-events`) sees the same devices while KWin runs.
@@ -152,7 +157,9 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
 - the screen following the app's window: the connector's mode and the
   card's hotplug uevent, filtered by subsystem and tag (`evdev_test`);
 - libdrm naming and describing the card from its sysfs entries: primary
-  node, no render node, node type, `drmGetDevice2` (`evdev_test`);
+  and render nodes, node types, `drmGetDevice2` (`evdev_test`);
+- the render node's files: never master, only render ioctls, PRIME with
+  the primary node, across exec (`kms_test`);
 - udev monitors and libinput's udev backend starting on them, and other
   subsystems passing through, with the system's real libudev and libinput
   (`udev_test`);
@@ -162,7 +169,9 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
 real kernel's: `evdev_conformance.c` runs the same reader-side checks on
 the host against Chameleon's keyboard and touchscreen and, in a QEMU VM
 running a real Linux kernel (`refvm.sh`), against uinput devices with the
-same capabilities, and the two transcripts are diffed. Needs QEMU, a static
+same capabilities, and the two transcripts are diffed; likewise the card
+against vkms (`kms_conformance.c`) and its render node against virtio-gpu's
+(`render_conformance.c`). Needs QEMU, a static
 busybox, cpio, zstd and curl (it downloads Ubuntu's kernel from Launchpad
 once). CI runs it on every push too.
 

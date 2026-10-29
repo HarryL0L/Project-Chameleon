@@ -3,8 +3,9 @@
 # Chameleon's devices against the real kernel's. evdev_conformance.c runs on
 # the host against Chameleon's keyboard and touchscreen and, in the reference
 # VM (refvm.sh), against uinput devices with the same capabilities;
-# kms_conformance.c runs against Chameleon's card and against vkms. Each pair
-# of transcripts must be identical.
+# kms_conformance.c runs against Chameleon's card and against vkms;
+# render_conformance.c against Chameleon's render node and virtio-gpu's.
+# Each pair of transcripts must be identical.
 # Needs what run-host-test.sh needs, plus what refvm.sh needs.
 # CACHE (default ~/.cache/chameleon-refvm) keeps the downloaded kernel.
 set -e
@@ -24,6 +25,8 @@ cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/g
 cc -O1 -g -Wall -Wextra -o "$OUT/probe" shim/test/evdev_conformance.c
 cc -O1 -g -Wall -Wextra -Ishim/include -o "$OUT/kms_probe" shim/test/kms_conformance.c "$OUT/libgbm.so" \
     -Wl,-rpath,"$OUT"
+cc -O1 -g -Wall -Wextra -Ishim/include -o "$OUT/render_probe" shim/test/render_conformance.c "$OUT/libgbm.so" \
+    -Wl,-rpath,"$OUT"
 mkdir -p "$OUT/vm" "$OUT/runtime" "$OUT/runtime-kms" && chmod 700 "$OUT/runtime" "$OUT/runtime-kms"
 # The devices' service, as the launcher starts it (it exits with this
 # script): one with the evdev probe's stub app, one with no app.
@@ -32,13 +35,14 @@ XDG_RUNTIME_DIR="$OUT/runtime-kms" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMEL
     2>/dev/null
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/probe" shim/test/evdev_conformance.c
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/kms_probe" shim/test/kms_conformance.c
+cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/render_probe" shim/test/render_conformance.c
 run_host() {
     CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DIR="$OUT/runtime" \
         LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/probe" "$@"
 }
 run_host dump "$OUT/vm/caps.bin" 2>/dev/null
 run_host 2>/dev/null > "$OUT/chameleon.txt"
-sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./probe run caps.bin > "$OUT/kernel.txt"
+REFVM_DRM= sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./probe run caps.bin > "$OUT/kernel.txt"
 grep -q '^@@@ exit 0$' "$OUT/kernel.txt" || { echo "the reference VM run failed:"; cat "$OUT/kernel.txt"; exit 1; }
 sed -i '/^@@@ exit/d' "$OUT/kernel.txt"
 # Known differences, each for a reason:
@@ -59,7 +63,7 @@ fi
 
 CHAMELEON_DRM_PATH="$OUT/card0" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
     LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_probe" 2>/dev/null > "$OUT/kms-chameleon.txt"
-sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./kms_probe > "$OUT/kms-kernel.txt"
+REFVM_DRM= sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./kms_probe > "$OUT/kms-kernel.txt"
 grep -q '^@@@ exit 0$' "$OUT/kms-kernel.txt" || { echo "the reference VM run failed:"; cat "$OUT/kms-kernel.txt"; exit 1; }
 sed -i '/^@@@ exit/d' "$OUT/kms-kernel.txt"
 # Known difference: FIONREAD on the card is answered by its pipe (a byte
@@ -72,6 +76,22 @@ else
     echo "FAILED: card differences from the kernel (- vkms, + Chameleon):"
     cat "$OUT/kms-diff.txt"
     [ -z "$KEEP" ] || cp "$OUT/kms-kernel.txt" "$OUT/kms-chameleon.txt" "$KEEP"
+    failed=1
+fi
+
+CHAMELEON_DRM_PATH="$OUT/card0" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
+    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/render_probe" > "$OUT/render-chameleon.txt" 2>"$OUT/render-chameleon.err" ||
+    { echo "the render probe failed on Chameleon's node:"; cat "$OUT/render-chameleon.txt" "$OUT/render-chameleon.err"; exit 1; }
+REFVM_DRM=virtio sh shim/test/refvm.sh "$CACHE" "$OUT/vm" ./render_probe > "$OUT/render-kernel.txt"
+grep -q '^@@@ exit 0$' "$OUT/render-kernel.txt" ||
+    { echo "the reference VM run failed:"; cat "$OUT/render-kernel.txt"; exit 1; }
+sed -i '/^@@@ exit/d' "$OUT/render-kernel.txt"
+if diff -u "$OUT/render-kernel.txt" "$OUT/render-chameleon.txt" > "$OUT/render-diff.txt"; then
+    echo "PASSED: Chameleon's render node matches virtio-gpu's ($(wc -l < "$OUT/render-kernel.txt") lines)"
+else
+    echo "FAILED: render node differences from the kernel (- virtio-gpu, + Chameleon):"
+    cat "$OUT/render-diff.txt"
+    [ -z "$KEEP" ] || cp "$OUT/render-kernel.txt" "$OUT/render-chameleon.txt" "$KEEP"
     failed=1
 fi
 [ -z "$failed" ]

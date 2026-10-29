@@ -10,6 +10,7 @@
 void *cham_egl_get_proc(const char *name);
 EGLDisplay cham_egl_android_display(void);
 int cham_egl_available(void); /* Android's libEGL.so loads (no driver yet) */
+void *cham_egl_device(void);  /* the card's EGLDeviceEXT (eglQueryDevicesEXT) */
 
 void *cham_egl_real(const char *name);      /* Android's entry point */
 void cham_setEGLError(EGLint error);         /* reported by eglGetError */
