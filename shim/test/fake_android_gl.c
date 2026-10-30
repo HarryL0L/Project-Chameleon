@@ -27,6 +27,7 @@ API struct {
     int create_image_target;
     int query_counter_calls;
     int swaps, swap_interval_calls, last_swap_interval;
+    int readers, geometry_calls;
     void *current_draw;
 } fake_state;
 
@@ -186,6 +187,7 @@ typedef struct {
 } fake_window;
 typedef struct AImageReader {
     int32_t width, height, format, max_images, acquired;
+    int32_t buffer_width, buffer_height; /* what the window gives (setBuffersGeometry) */
     AHardwareBuffer *buffers[READER_SLOTS];
     int state[READER_SLOTS];
     fake_window window;
@@ -199,9 +201,10 @@ API int AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format, uint64_t
                                   AImageReader **out)
 {
     (void)usage;
+    fake_state.readers++;
     AImageReader *r = calloc(1, sizeof *r);
-    r->width = w;
-    r->height = h;
+    r->width = r->buffer_width = w;
+    r->height = r->buffer_height = h;
     r->format = format;
     r->max_images = max_images;
     r->window.magic = 0x5f776e64;
@@ -209,6 +212,18 @@ API int AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format, uint64_t
     for (int i = 0; i < READER_SLOTS; i++)
         r->buffers[i] = fake_ahb_new((uint32_t)w, (uint32_t)h, (uint32_t)format);
     *out = r;
+    return 0;
+}
+/* As a BufferQueue's producer: buffers of this size from the next one on
+ * (0x0: the reader's own size). */
+API int ANativeWindow_setBuffersGeometry(fake_window *w, int32_t width, int32_t height, int32_t format)
+{
+    (void)format;
+    if (!w || w->magic != 0x5f776e64 || width < 0 || height < 0)
+        return -22;
+    w->reader->buffer_width = width ? width : w->reader->width;
+    w->reader->buffer_height = height ? height : w->reader->height;
+    fake_state.geometry_calls++;
     return 0;
 }
 API int AImageReader_getWindow(AImageReader *r, void **window)
@@ -275,9 +290,16 @@ API EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface)
 {
     (void)d;
     fake_surface *s = surface;
+    AImageReader *r = s->reader;
     for (int i = 0; i < READER_SLOTS; i++) {
-        if (s->reader->state[i] == FREE) {
-            s->reader->state[i] = QUEUED;
+        if (r->state[i] == FREE) {
+            AHardwareBuffer *b = r->buffers[i];
+            if ((int32_t)b->desc.width != r->buffer_width || (int32_t)b->desc.height != r->buffer_height) {
+                /* the queue reallocates a buffer of another size */
+                AHardwareBuffer_release(b);
+                r->buffers[i] = fake_ahb_new((uint32_t)r->buffer_width, (uint32_t)r->buffer_height, (uint32_t)r->format);
+            }
+            r->state[i] = QUEUED;
             fake_state.swaps++;
             return EGL_TRUE;
         }
@@ -289,9 +311,9 @@ API EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface surface, EGLint attribut
     (void)d;
     fake_surface *s = surface;
     if (attribute == EGL_WIDTH)
-        *value = s->reader->width;
+        *value = s->reader->buffer_width;
     else if (attribute == EGL_HEIGHT)
-        *value = s->reader->height;
+        *value = s->reader->buffer_height;
     else
         return EGL_FALSE;
     return EGL_TRUE;

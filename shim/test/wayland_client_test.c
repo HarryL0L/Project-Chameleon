@@ -426,6 +426,14 @@ int main(void)
     wl_display_roundtrip(display);
     CHECK(srv.last_width == 80 && srv.last_height == 40 && srv.buffers_unknown == 0,
           "new buffers at %dx%d reach KWin", srv.last_width, srv.last_height);
+    struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
+             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls; } *fake =
+        getenv("CHAMELEON_ANDROID_MEDIANDK") /* the fake driver, loaded by the vendor */
+            ? dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state")
+            : NULL;
+    CHECK(fake && fake->readers == 1 && fake->geometry_calls == 1,
+          "the window was resized in place: %d reader, %d resize", fake ? fake->readers : -1,
+          fake ? fake->geometry_calls : -1);
 
     CHECK(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT), "release the surface");
     CHECK(eglDestroySurface(dpy, surf), "eglDestroySurface");

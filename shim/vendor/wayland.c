@@ -76,6 +76,7 @@ static struct {
     void (*describe)(const AHardwareBuffer *, ahb_desc *);
     const native_handle *(*get_native_handle)(const AHardwareBuffer *);
     int (*send_handle)(const AHardwareBuffer *, int);
+    int (*set_geometry)(ANativeWindow *, int32_t, int32_t, int32_t);
     int (*reader_new)(int32_t, int32_t, int32_t, uint64_t, int32_t, AImageReader **);
     int (*reader_get_window)(AImageReader *, ANativeWindow **);
     int (*reader_acquire_next)(AImageReader *, AImage **, int *);
@@ -106,6 +107,7 @@ static int load_android(void)
     A(nw, describe, "AHardwareBuffer_describe");
     A(nw, get_native_handle, "AHardwareBuffer_getNativeHandle");
     A(nw, send_handle, "AHardwareBuffer_sendHandleToUnixSocket");
+    A(nw, set_geometry, "ANativeWindow_setBuffersGeometry");
     A(media, reader_new, "AImageReader_newWithUsage");
     A(media, reader_get_window, "AImageReader_getWindow");
     A(media, reader_acquire_next, "AImageReader_acquireNextImageAsync");
@@ -113,7 +115,8 @@ static int load_android(void)
     A(media, image_get_ahb, "AImage_getHardwareBuffer");
     A(media, image_delete, "AImage_delete");
 #undef A
-    loaded = android.describe && android.get_native_handle && android.send_handle && android.reader_new &&
+    loaded = android.describe && android.get_native_handle && android.send_handle && android.set_geometry &&
+             android.reader_new &&
              android.reader_get_window && android.reader_acquire_next && android.reader_delete &&
              android.image_get_ahb && android.image_delete;
     if (!loaded)
@@ -447,24 +450,18 @@ static void unregister_buffer(struct display *d, uint32_t id)
 
 /* ---- window surfaces ---- */
 
-#define MAX_BUFFERS 6
+#define MAX_BUFFERS 16
 #define READER_IMAGES 3
 
 struct buffer {
-    AHardwareBuffer *ahb; /* identity only; the reader owns it */
+    AHardwareBuffer *ahb; /* the reader owns it */
+    dev_t dev;
+    ino_t ino;            /* its dmabuf: what tells buffers apart */
+    int width, height;
+    unsigned size_serial; /* the surface's size when it was seen first */
     struct wl_proxy *wl_buffer;
     uint32_t id;          /* registration with chameleon-kernel */
     AImage *image;        /* held while the compositor uses the buffer */
-};
-
-/* One AImageReader + Android window surface at a given size. */
-struct generation {
-    AImageReader *reader;
-    EGLSurface android;
-    int width, height;
-    struct buffer buffers[MAX_BUFFERS];
-    int nbuffers;
-    struct generation *next; /* retired ones, still in use by the compositor */
 };
 
 struct surface {
@@ -478,8 +475,15 @@ struct surface {
     uint32_t surface_version;
     int ahb_format;
     uint32_t drm_format;
-    struct generation *gen;
-    struct generation *retired;
+    /* One AImageReader for the surface's life, as a SurfaceView's window: a
+     * resize asks its window for buffers of the new size, and the driver's
+     * window surface follows from its next buffer. */
+    AImageReader *reader;
+    ANativeWindow *native;
+    EGLSurface android;
+    int width, height;     /* the size asked for */
+    unsigned size_serial;  /* counts those sizes */
+    struct buffer buffers[MAX_BUFFERS];
     struct wl_proxy *frame_callback;
     int swap_interval;
     pthread_mutex_t lock;
@@ -546,49 +550,46 @@ static int load_egl(void)
            real_get_current_context && real_swap_interval && real_make_current;
 }
 
-static struct generation *generation_new(struct surface *s, int width, int height)
+static int reader_open(struct surface *s, int width, int height)
 {
-    struct generation *g = calloc(1, sizeof *g);
-    g->width = width > 0 ? width : 1;
-    g->height = height > 0 ? height : 1;
-    ANativeWindow *window = NULL;
-    if (android.reader_new(g->width, g->height, s->ahb_format, AHB_USAGE_GPU_SAMPLED_IMAGE, READER_IMAGES,
-                           &g->reader) != AMEDIA_OK ||
-        android.reader_get_window(g->reader, &window) != AMEDIA_OK || !window) {
-        cham_log("wayland: AImageReader %dx%d failed", g->width, g->height);
-        if (g->reader)
-            android.reader_delete(g->reader);
-        free(g);
-        return NULL;
+    s->width = width > 0 ? width : 1;
+    s->height = height > 0 ? height : 1;
+    if (android.reader_new(s->width, s->height, s->ahb_format, AHB_USAGE_GPU_SAMPLED_IMAGE, READER_IMAGES,
+                           &s->reader) != AMEDIA_OK ||
+        android.reader_get_window(s->reader, &s->native) != AMEDIA_OK || !s->native) {
+        cham_log("wayland: AImageReader %dx%d failed", s->width, s->height);
+        return -1;
     }
-    g->android = real_create_window_surface(s->dpy, s->config, window, NULL);
-    if (g->android == EGL_NO_SURFACE) {
+    s->android = real_create_window_surface(s->dpy, s->config, s->native, NULL);
+    if (s->android == EGL_NO_SURFACE) {
         cham_log("wayland: eglCreateWindowSurface on the AImageReader failed");
-        android.reader_delete(g->reader);
-        free(g);
-        return NULL;
+        return -1;
     }
-    return g;
+    return 0;
 }
 
-/* Destroys a generation. The compositor keeps what it shows through its own
- * references, so only our side is released here. */
-static void generation_free(struct surface *s, struct generation *g)
+static void buffer_free(struct surface *s, struct buffer *b)
 {
-    for (int i = 0; i < g->nbuffers; i++) {
-        struct buffer *b = &g->buffers[i];
-        if (b->wl_buffer)
-            wl.marshal_flags(b->wl_buffer, 0 /* destroy */, NULL, wl.get_version(b->wl_buffer),
-                             WL_MARSHAL_FLAG_DESTROY);
-        if (b->id)
-            unregister_buffer(s->d, b->id);
-        if (b->image)
-            android.image_delete(b->image);
-    }
-    if (g->android != EGL_NO_SURFACE)
-        real_destroy_surface(s->dpy, g->android);
-    android.reader_delete(g->reader);
-    free(g);
+    if (b->wl_buffer)
+        wl.marshal_flags(b->wl_buffer, 0 /* destroy */, NULL, wl.get_version(b->wl_buffer), WL_MARSHAL_FLAG_DESTROY);
+    if (b->id)
+        unregister_buffer(s->d, b->id);
+    if (b->image)
+        android.image_delete(b->image);
+    memset(b, 0, sizeof *b);
+}
+
+/* Our side of the surface. The compositor keeps what it shows through its
+ * own references. */
+static void reader_close(struct surface *s)
+{
+    for (int i = 0; i < MAX_BUFFERS; i++)
+        if (s->buffers[i].ahb)
+            buffer_free(s, &s->buffers[i]);
+    if (s->android != EGL_NO_SURFACE)
+        real_destroy_surface(s->dpy, s->android);
+    if (s->reader)
+        android.reader_delete(s->reader);
 }
 
 static void buffer_release(void *data, struct wl_proxy *wl_buffer)
@@ -617,16 +618,14 @@ static void (*k_frame_listener[])(void) = {(void (*)(void))frame_done};
 static void follow_resize(struct surface *s);
 
 /* wl_egl_window_resize(). Apps resize right before drawing the next frame
- * (and glvnd skips eglMakeCurrent when nothing changes), so switch to the new
- * size now if the surface is current on this thread; otherwise at the next
- * make-current or swap. */
+ * (and glvnd skips eglMakeCurrent when nothing changes), so ask for the new
+ * size now. */
 static void window_resized(struct wl_egl_window *window, void *data)
 {
     (void)window;
     struct surface *s = data;
     pthread_mutex_lock(&s->lock);
-    if (real_get_current_surface(EGL_DRAW) == s->gen->android)
-        follow_resize(s);
+    follow_resize(s);
     pthread_mutex_unlock(&s->lock);
 }
 
@@ -687,10 +686,9 @@ EGLSurface cham_wl_create_window_surface(EGLDisplay dpy, EGLConfig config, void 
     wl.set_queue(s->wl_surface, s->queue);
     s->dmabuf = wl.create_wrapper(d->dmabuf);
     wl.set_queue(s->dmabuf, s->queue);
-    s->gen = generation_new(s, window->width, window->height);
-    if (!s->gen || !track(s, 1)) {
-        if (s->gen)
-            generation_free(s, s->gen);
+    s->android = EGL_NO_SURFACE;
+    if (reader_open(s, window->width, window->height) != 0 || !track(s, 1)) {
+        reader_close(s);
         wl.wrapper_destroy(s->wl_surface);
         wl.wrapper_destroy(s->dmabuf);
         wl.queue_destroy(s->queue);
@@ -713,32 +711,26 @@ int cham_wl_is_surface(EGLSurface surface)
 EGLSurface cham_wl_android_surface(EGLSurface surface)
 {
     struct surface *s = as_surface(surface);
-    return s ? s->gen->android : surface;
+    return s ? s->android : surface;
 }
 
-/* Follows wl_egl_window_resize(): a new reader at the new size; the old one
- * is kept until the compositor has the first new frame. Called where the app
- * is about to draw (make current) and after a swap. */
+/* Follows wl_egl_window_resize(): the window gives buffers of the new size
+ * from its next one on, and the driver's surface takes that size. Called
+ * when the app resizes, where it is about to draw (make current) and after
+ * a swap. */
 static void follow_resize(struct surface *s)
 {
-    if (!s->window || (s->window->width == s->gen->width && s->window->height == s->gen->height))
+    if (!s->window || (s->window->width == s->width && s->window->height == s->height))
         return;
     if (s->window->width <= 0 || s->window->height <= 0)
         return;
-    struct generation *g = generation_new(s, s->window->width, s->window->height);
-    if (!g)
+    if (android.set_geometry(s->native, s->window->width, s->window->height, 0) != 0) {
+        cham_log("wayland: cannot resize the window to %dx%d", s->window->width, s->window->height);
         return;
-    struct generation *old = s->gen;
-    s->gen = g;
-    old->next = s->retired;
-    s->retired = old;
-    /* Keep rendering on this thread going into the new surface. */
-    EGLContext ctx = real_get_current_context();
-    if (ctx != EGL_NO_CONTEXT && real_get_current_surface(EGL_DRAW) == old->android) {
-        EGLSurface read = real_get_current_surface(EGL_READ);
-        real_make_current(s->dpy, g->android, read == old->android ? g->android : read, ctx);
-        real_swap_interval(s->dpy, 0);
     }
+    s->width = s->window->width;
+    s->height = s->window->height;
+    s->size_serial++;
 }
 
 void cham_wl_before_make_current(EGLSurface draw)
@@ -771,26 +763,18 @@ int cham_wl_swap_interval(EGLint interval)
         struct surface *s = g_surfaces[i];
         if (!s)
             continue;
-        pthread_mutex_lock(&s->lock); /* follow_resize() may swap s->gen */
-        if (s->gen->android == cur) {
+        if (s->android == cur) {
             found = s;
             s->swap_interval = interval < 0 ? 0 : interval;
         }
-        pthread_mutex_unlock(&s->lock);
     }
     pthread_mutex_unlock(&g_surfaces_lock);
     return found != NULL;
 }
 
+/* The buffer of a frame: known (by its dmabuf), or registered now. */
 static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
 {
-    struct generation *g = s->gen;
-    for (int i = 0; i < g->nbuffers; i++)
-        if (g->buffers[i].ahb == ahb)
-            return &g->buffers[i];
-    if (g->nbuffers == MAX_BUFFERS)
-        return NULL;
-
     ahb_desc desc;
     android.describe(ahb, &desc);
     const native_handle *nh = android.get_native_handle(ahb);
@@ -807,11 +791,27 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
     }
     if (dmabuf < 0 && nh && nh->numFds > 0)
         dmabuf = nh->data[0];
-    uint32_t id = dmabuf >= 0 ? register_buffer(s->d, ahb) : 0;
+    struct stat st;
+    if (dmabuf < 0 || fstat(dmabuf, &st) != 0)
+        return NULL;
+    struct buffer *free_slot = NULL;
+    for (int i = 0; i < MAX_BUFFERS; i++) {
+        struct buffer *b = &s->buffers[i];
+        if (b->ahb && b->dev == st.st_dev && b->ino == st.st_ino)
+            return b;
+        if (!b->ahb && !free_slot)
+            free_slot = b;
+    }
+    if (!free_slot) {
+        cham_log("wayland: more than %d buffers in use", MAX_BUFFERS);
+        return NULL;
+    }
+    uint32_t id = register_buffer(s->d, ahb);
     if (!id) {
         cham_log("wayland: the compositor did not take a buffer");
         return NULL;
     }
+    int width = (int)desc.width, height = (int)desc.height;
 
     struct wl_proxy *params =
         wl.marshal_flags(s->dmabuf, 1 /* create_params */, &k_params_iface, wl.get_version(s->dmabuf), 0, NULL);
@@ -819,32 +819,31 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
     wl.marshal_flags(params, PARAMS_ADD, NULL, wl.get_version(params), 0, dmabuf, 0u, 0u, desc.stride * 4,
                      (uint32_t)(DRM_FORMAT_MOD_INVALID >> 32), (uint32_t)(DRM_FORMAT_MOD_INVALID & 0xffffffff));
     struct wl_proxy *wl_buffer = wl.marshal_flags(params, PARAMS_CREATE_IMMED, wl.buffer_iface,
-                                                  wl.get_version(params), 0, NULL, (int32_t)g->width,
-                                                  (int32_t)g->height, s->drm_format, 0u);
+                                                  wl.get_version(params), 0, NULL, (int32_t)width,
+                                                  (int32_t)height, s->drm_format, 0u);
     wl.marshal_flags(params, PARAMS_DESTROY, NULL, wl.get_version(params), WL_MARSHAL_FLAG_DESTROY);
 
-    struct buffer *b = &g->buffers[g->nbuffers++];
+    struct buffer *b = free_slot;
     b->ahb = ahb;
+    b->dev = st.st_dev;
+    b->ino = st.st_ino;
+    b->width = width;
+    b->height = height;
+    b->size_serial = s->size_serial;
     b->id = id;
     b->wl_buffer = wl_buffer;
     wl.add_listener(wl_buffer, k_buffer_listener, b);
     return b;
 }
 
-/* Frees retired generations none of whose buffers the compositor still holds. */
-static void reap_retired(struct surface *s)
+/* Forgets buffers of earlier sizes the compositor has released: the window
+ * replaces them with buffers of the new size. */
+static void reap_old_sizes(struct surface *s)
 {
-    for (struct generation **p = &s->retired; *p;) {
-        struct generation *g = *p;
-        int busy = 0;
-        for (int i = 0; i < g->nbuffers; i++)
-            busy |= g->buffers[i].image != NULL;
-        if (busy) {
-            p = &g->next;
-            continue;
-        }
-        *p = g->next;
-        generation_free(s, g);
+    for (int i = 0; i < MAX_BUFFERS; i++) {
+        struct buffer *b = &s->buffers[i];
+        if (b->ahb && !b->image && b->size_serial != s->size_serial)
+            buffer_free(s, b);
     }
 }
 
@@ -873,14 +872,13 @@ EGLBoolean cham_wl_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
         if (dispatch(s) < 0)
             goto out;
 
-    struct generation *g = s->gen;
-    if (!swap(dpy, g->android, rects, n))
+    if (!swap(dpy, s->android, rects, n))
         goto out;
 
     AImage *image = NULL;
     int fence = -1;
     for (int tries = 0;; tries++) {
-        int r = android.reader_acquire_next(g->reader, &image, &fence);
+        int r = android.reader_acquire_next(s->reader, &image, &fence);
         if (r == AMEDIA_OK && image)
             break;
         if (r == AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED && dispatch(s) == 0)
@@ -928,14 +926,14 @@ EGLBoolean cham_wl_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
     }
     if (s->window) {
         s->window->dx = s->window->dy = 0;
-        s->window->attached_width = g->width;
-        s->window->attached_height = g->height;
+        s->window->attached_width = b->width;
+        s->window->attached_height = b->height;
     }
     int damage_op = s->surface_version >= 4 ? SURFACE_DAMAGE_BUFFER : SURFACE_DAMAGE;
     if (rects && n > 0) {
         for (EGLint i = 0; i < n; i++) {
             const EGLint *r = &rects[i * 4]; /* EGL: origin bottom-left */
-            wl.marshal_flags(s->wl_surface, damage_op, NULL, s->surface_version, 0, r[0], g->height - r[1] - r[3],
+            wl.marshal_flags(s->wl_surface, damage_op, NULL, s->surface_version, 0, r[0], b->height - r[1] - r[3],
                              r[2], r[3]);
         }
     } else {
@@ -945,7 +943,7 @@ EGLBoolean cham_wl_swap(EGLDisplay dpy, EGLSurface surface, const EGLint *rects,
     wl.flush(s->d->wl);
     ok = EGL_TRUE;
 
-    reap_retired(s);
+    reap_old_sizes(s);
     follow_resize(s);
 out:
     pthread_mutex_unlock(&s->lock);
@@ -962,12 +960,7 @@ EGLBoolean cham_wl_destroy_surface(EGLDisplay dpy, EGLSurface surface)
     pthread_mutex_lock(&s->lock);
     if (s->frame_callback)
         wl.proxy_destroy(s->frame_callback);
-    while (s->retired) {
-        struct generation *g = s->retired;
-        s->retired = g->next;
-        generation_free(s, g);
-    }
-    generation_free(s, s->gen);
+    reader_close(s);
     if (s->window) {
         s->window->driver_private = NULL;
         s->window->resize_callback = NULL;

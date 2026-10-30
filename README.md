@@ -198,7 +198,8 @@ Code: [`shim/gbm/`](shim/gbm/)
 - **Wayland apps on the GPU:** under a Chameleon KWin it also takes
   `EGL_PLATFORM_WAYLAND_KHR`. Each `wl_egl_window` renders into an
   `AImageReader`, a real Android window surface, so the driver's buffer
-  handling works as usual. Every frame then reaches KWin as an
+  handling works as usual; a resize asks that window for buffers of the
+  new size, as a `SurfaceView` resizes. Every frame then reaches KWin as an
   `AHardwareBuffer`: it is registered with `chameleon-kernel`, wrapped in a
   `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
   is copied, and frame callbacks pace the app.
