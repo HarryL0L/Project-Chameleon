@@ -52,6 +52,7 @@ flowchart TB
             CORE["KWin compositor<br/>scene · windows · DRM backend"]
             GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
             NODE["libchameleon.so<br/>card node (in every program of the session)"]
+            UDEV["libchameleon_udev.so<br/>udev · sysfs · /dev/input nodes (in every program)"]
         end
         subgraph KS["chameleon-kernel process: what the kernel would be"]
             direction TB
@@ -85,12 +86,13 @@ flowchart TB
     APP --> SF
     TOUCH --> APP
     KMS -->|CHAM_INPUT| INP
-    INP -->|"evdev (libinput) · input method"| CORE
+    INP -->|"evdev devices"| UDEV -->|"udev · libinput"| CORE
+    INP -->|"input method"| CORE
 
     classDef kwin fill:#6C4CF1,stroke:#4b32b8,color:#fff
     classDef shim fill:#22B8E6,stroke:#1789ad,color:#06222c
     classDef android fill:#3DDC84,stroke:#2aa862,color:#06220f
-    class KMS,GBM,VEND,INP,NODE,REG shim
+    class KMS,GBM,VEND,INP,NODE,UDEV,REG shim
     class CORE,GLVND,APPS,CMD kwin
     class DRV,APP,SF,TOUCH android
 ```
@@ -453,11 +455,12 @@ AHardwareBuffer and AImageReader support.
 | [`android/`](android/) | The Chameleon app: presenter (C++, `ASurfaceControl`), input, settings |
 | [`common/`](common/) | Socket protocol shared by both sides |
 | [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard, apps' GPU buffers; `libchameleon.so`: the card node, crash reporter |
+| [`shim/udev/`](shim/udev/) | `libchameleon_udev.so`: udev, the sysfs entries and the `/dev/input` nodes of Chameleon's devices |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
-| [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
-| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd |
+| [`shim/chameleon`](shim/chameleon), [`shim/chameleon-vendor-install`](shim/chameleon-vendor-install) | Launchers |
+| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd; conformance tests against a real Linux kernel in QEMU |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |
@@ -469,7 +472,9 @@ Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml))
 Each push produces one artifact: the APK, the Termux package
 (`chameleon_<version>_aarch64.deb`, built by
 [`packaging/build-deb.sh`](packaging/build-deb.sh)), the same files as a
-plain `chameleon/` folder, and the probe. It also runs the host tests.
+plain `chameleon/` folder, and the probe. It also runs the host tests, and
+the conformance tests, which compare Chameleon's card and input devices with
+a real Linux 6.8 kernel's (vkms, uinput) booted in QEMU.
 
 Locally:
 
@@ -478,12 +483,13 @@ gradle -p android assembleRelease                                     # the app 
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
 packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
-shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev
+shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev
+shim/test/run-conformance.sh   # also needs qemu-system-x86, busybox-static, cpio, zstd
 ```
 
 ## Roadmap
 
-- [x] Zero-copy presenter app with display-accurate frame pacing
+- [x] Presenter app with display-accurate frame pacing (one GPU copy of the desktop frame; app windows zero-copy)
 - [x] KWin without Chameleon patches on a fake KMS device, rendering on the vendor GPU driver
 - [x] Touch, trackpad, mouse and keyboard input
 - [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
