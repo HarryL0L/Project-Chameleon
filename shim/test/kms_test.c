@@ -69,6 +69,50 @@ static volatile int g_stop_presenter;
  * cleared), the app is frozen (presents get no answer), the app's connection
  * drops, the app sends a CONFIG with these flags (-1: none). */
 static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
+/* Like the app, the stub holds each buffer it was sent until BUFFER_REMOVE
+ * or the connection ends: g_held of them now. */
+#define STUB_SLOTS 64
+static int g_held_fd[STUB_SLOTS];
+static volatile int g_held;
+
+static void stub_drop_all(void)
+{
+    for (int i = 0; i < STUB_SLOTS; i++) {
+        if (g_held_fd[i] >= 0) {
+            close(g_held_fd[i]);
+            g_held_fd[i] = -1;
+            g_held--;
+        }
+    }
+}
+
+static void stub_add(int c, uint32_t id)
+{
+    char packet[64];
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    struct iovec iov = {.iov_base = packet, .iov_len = sizeof packet};
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    int fd = -1;
+    if (recvmsg(c, &mh, MSG_CMSG_CLOEXEC) > 0) { /* the (fake) AHardwareBuffer */
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+        if (cm && cm->cmsg_type == SCM_RIGHTS)
+            memcpy(&fd, CMSG_DATA(cm), sizeof fd);
+    }
+    if (id >= STUB_SLOTS || fd < 0) {
+        if (fd >= 0)
+            close(fd);
+        return;
+    }
+    if (g_held_fd[id] >= 0)
+        close(g_held_fd[id]);
+    else
+        g_held++;
+    g_held_fd[id] = fd;
+}
 
 static void *presenter_main(void *arg)
 {
@@ -81,6 +125,8 @@ static void *presenter_main(void *arg)
     listen(l, 1);
     int c = accept(l, NULL, NULL);
     g_accepts++;
+    for (int i = 0; i < STUB_SLOTS; i++)
+        g_held_fd[i] = -1;
     struct cham_msg cfg = {CHAM_CONFIG, 0, 1080ull | (1800ull << 32), 120000};
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
@@ -98,6 +144,7 @@ static void *presenter_main(void *arg)
             held = 0;
         }
         if (g_drop) {
+            stub_drop_all();
             close(c);
             c = accept(l, NULL, NULL);
             g_accepts++;
@@ -112,6 +159,7 @@ static void *presenter_main(void *arg)
             /* like the app: the newest producer wins, the old one is told */
             struct cham_msg bye = {CHAM_BYE, 0, CHAM_BYE_REPLACED, 0};
             cham_send(c, &bye, -1);
+            stub_drop_all();
             close(c);
             c = accept(l, NULL, NULL);
             g_accepts++;
@@ -128,9 +176,14 @@ static void *presenter_main(void *arg)
         if (m.type == CHAM_HELLO) {
             g_copy_mode = (m.b & CHAM_HELLO_COPY) != 0;
         } else if (m.type == CHAM_BUFFER_ADD) {
-            char packet[64];
-            recv(c, packet, sizeof packet, 0); /* the (fake) AHardwareBuffer */
+            stub_add(c, m.id);
             g_buffers_added++;
+        } else if (m.type == CHAM_BUFFER_REMOVE) {
+            if (m.id < STUB_SLOTS && g_held_fd[m.id] >= 0) {
+                close(g_held_fd[m.id]);
+                g_held_fd[m.id] = -1;
+                g_held--;
+            }
         } else if (m.type == CHAM_PRESENT && !g_frozen) {
             g_presents++;
             struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
@@ -148,6 +201,7 @@ static void *presenter_main(void *arg)
             cham_send(c, &done, -1);
         }
     }
+    stub_drop_all();
     close(c);
     close(l);
     return NULL;
@@ -684,6 +738,54 @@ int main(int argc, char **argv)
     }
     CHECK(ok, "10 flips completed by the app again (%.0f ms)", ms_since(t));
     CHECK(g_buffers_added == added + 3, "its 3 buffers sent again (%d)", g_buffers_added - added);
+
+    /* Each mode change gives KWin a new set of buffers and it drops the old
+     * one. The app must drop them too once nothing shows them any more (no
+     * framebuffer, not on the plane), like a display engine, or its table
+     * fills up and the screen freezes. */
+    printf("buffer sets replaced (mode changes)\n");
+    struct stat last = {0};
+    ok = 1;
+    for (int round = 0; round < 30; round++) {
+        struct gbm_bo *set[3];
+        uint32_t set_fbs[3];
+        for (int i = 0; i < 3; i++) {
+            set[i] = gbm_bo_create(gbm, 1080, 1800, DRM_FORMAT_XBGR8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+            int dmabuf = set[i] ? gbm_bo_get_fd(set[i]) : -1;
+            uint32_t handle = 0;
+            if (dmabuf < 0 || drmPrimeFDToHandle(fd, dmabuf, &handle) != 0)
+                ok = 0;
+            if (round == 29 && i == 2)
+                fstat(dmabuf, &last);
+            close(dmabuf);
+            uint32_t handles[4] = {handle}, pitches[4] = {set[i] ? gbm_bo_get_stride(set[i]) : 0}, offsets[4] = {0};
+            if (drmModeAddFB2(fd, 1080, 1800, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &set_fbs[i], 0) != 0)
+                ok = 0;
+            drmCloseBufferHandle(fd, handle);
+        }
+        for (int i = 0; i < 3; i++) {
+            flip_to(fd, plane_id, p_fb, set_fbs[i]);
+            if (!wait_flip(fd, 100))
+                ok = 0;
+        }
+        flip_to(fd, plane_id, p_fb, fbs[0]);
+        if (!wait_flip(fd, 100))
+            ok = 0;
+        for (int i = 0; i < 3; i++) {
+            drmModeRmFB(fd, set_fbs[i]);
+            gbm_bo_destroy(set[i]);
+        }
+    }
+    usleep(100000);
+    CHECK(ok, "30 sets of 3 buffers shown and dropped");
+    CHECK(g_held <= 4, "the app holds only what can still be shown (%d buffers)", g_held);
+    {
+        struct gbm_bo *next = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING); /* frees the rest */
+        if (next)
+            gbm_bo_destroy(next);
+    }
+    CHECK(last.st_ino && fds_anywhere(last.st_dev, last.st_ino) == 0, "a dropped buffer is freed everywhere (%d fds)",
+          fds_anywhere(last.st_dev, last.st_ino));
 
     printf("second producer takes over\n");
     accepts = g_accepts;

@@ -640,6 +640,9 @@ void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
+    /* No handle, framebuffer or plane shows it any more: the app lets go of
+     * it, as a display engine would, so its reference doesn't keep it. */
+    link_forget_bo_locked(bo);
     if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && !bo->in_service && bo->base_refs > 0 &&
         dmabuf_refs(bo) > bo->base_refs)
         return; /* its dmabuf is still held: kept, freed by reap_locked() */
