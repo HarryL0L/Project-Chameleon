@@ -974,6 +974,32 @@ int main(int argc, char **argv)
     gbm_bo_destroy(rbo);
     gbm_device_destroy(rgbm);
 
+    /* Firefox's dmabuf device: gbm and libdrm loaded by their standard
+     * names, buffers on the render node, each plane exported by PRIME. */
+    void *gbm_lib = dlopen("libgbm.so.1", RTLD_LAZY | RTLD_LOCAL);
+    void *drm_lib = dlopen("libdrm.so.2", RTLD_LAZY | RTLD_LOCAL);
+    CHECK(gbm_lib && dlsym(gbm_lib, "gbm_create_device") == (void *)gbm_create_device,
+          "libgbm.so.1 is this gbm (%s)", gbm_lib ? "loaded" : dlerror());
+    int (*prime_to_fd)(int, uint32_t, uint32_t, int *) = drm_lib ? dlsym(drm_lib, "drmPrimeHandleToFD") : NULL;
+    CHECK(prime_to_fd, "libdrm.so.2 has drmPrimeHandleToFD");
+    struct gbm_device *(*create_device)(int) = gbm_lib ? dlsym(gbm_lib, "gbm_create_device") : NULL;
+    struct gbm_device *fgbm = create_device ? create_device(rfd) : NULL;
+    struct gbm_bo *fbo = fgbm ? gbm_bo_create(fgbm, 256, 128, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING) : NULL;
+    int fplane = -1, fwhole = fbo ? gbm_bo_get_fd(fbo) : -1;
+    struct stat pst = {0}, wst = {0};
+    CHECK(fbo && gbm_bo_get_plane_count(fbo) == 1 && prime_to_fd &&
+              prime_to_fd(rfd, gbm_bo_get_handle_for_plane(fbo, 0).u32, DRM_CLOEXEC, &fplane) == 0 &&
+              fstat(fplane, &pst) == 0 && fstat(fwhole, &wst) == 0 && pst.st_ino == wst.st_ino,
+          "a buffer on the render node: its plane's handle exports the buffer's dmabuf");
+    if (fplane >= 0)
+        close(fplane);
+    if (fwhole >= 0)
+        close(fwhole);
+    if (fbo)
+        gbm_bo_destroy(fbo);
+    if (fgbm)
+        gbm_device_destroy(fgbm);
+
     struct drm_client client = {.idx = 0};
     CHECK(drmIoctl(master, DRM_IOCTL_GET_CLIENT, &client) == 0 && client.pid == (unsigned long)getpid() &&
               client.auth == 1,

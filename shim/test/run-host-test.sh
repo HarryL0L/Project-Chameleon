@@ -30,9 +30,13 @@ cc $CFLAGS -shared -fvisibility=hidden -Ishim/include -o "$OUT/libgbm.so" shim/g
     -Wl,-soname,libgbm.so
 cc $CFLAGS -Ishim/include -o "$OUT/kms_test" shim/test/kms_test.c "$OUT/libgbm.so" $(pkg-config --libs libdrm) -lpthread \
     -Wl,-rpath,"$OUT"
+# The standard names of gbm and libdrm, as the launcher makes them.
+mkdir -p "$OUT/names"
+ln -sf "$OUT/libgbm.so" "$OUT/names/libgbm.so.1"
+ln -sf "$(pkg-config --variable=libdir libdrm)/libdrm.so" "$OUT/names/libdrm.so.2"
 start_kernel "$OUT/runtime-kms" "$OUT/presenter" 5
 CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
-    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
+    LD_LIBRARY_PATH="$OUT/names" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)

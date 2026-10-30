@@ -55,6 +55,17 @@ fi
 
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+# The standard file names of gbm and libdrm, which some programs load by name
+# (Firefox: dlopen("libgbm.so.1"), dlopen("libdrm.so.2")); Termux installs
+# them without the version.
+NAMES_DIR="$XDG_RUNTIME_DIR/chameleon-lib"
+mkdir -p "$NAMES_DIR"
+ln -sf "$SHIM_DIR/libgbm.so" "$NAMES_DIR/libgbm.so.1"
+[ ! -e "$PREFIX/lib/libdrm.so" ] || ln -sf "$PREFIX/lib/libdrm.so" "$NAMES_DIR/libdrm.so.2"
+case ":$LD_LIBRARY_PATH:" in
+*":$NAMES_DIR:"*) ;;
+*) export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$NAMES_DIR" ;;
+esac
 # This session gets its displays from its own compositor, not from an outer
 # X/Wayland server; with neither set, compositors pick their DRM backend.
 unset WAYLAND_DISPLAY DISPLAY
