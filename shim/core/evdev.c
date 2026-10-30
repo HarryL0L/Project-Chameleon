@@ -43,14 +43,19 @@ enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_TABLET, DEV_COUNT }
 #define FRAME_EVENTS (TOUCH_SLOTS * 5 + 4)
 #define AXIS_MAX 65535
 
-#define OUT_MAX 16384 /* bytes queued for a reader whose socket is full */
+/* Bytes queued for a reader whose socket is full. The kernel puts events
+ * straight into each reader's queue, so none are lost on the way; here a
+ * reader's process takes them from a socket, and frames wait for it rather
+ * than being lost when it lags. Only a reader this far behind (a stopped
+ * program) loses frames. */
+#define OUT_MAX (1 << 20)
 
 struct reader {
     int fd;   /* 0 = free; closed by the accept thread only */
     int dead; /* the program went away; the accept thread closes it */
     int lost; /* frames didn't fit: it gets a fresh STATE once the queue drains */
-    size_t out_len;
-    char out[OUT_MAX];
+    size_t out_len, out_cap;
+    char *out; /* grown as needed, up to OUT_MAX */
     size_t in_len; /* a request read in part */
     char in[sizeof(struct cham_evdev_record) + sizeof(uint32_t) + sizeof(struct input_absinfo)];
 };
@@ -223,6 +228,25 @@ static int write_all(int fd, const void *buf, size_t len)
 
 /* ---- the readers' streams (under g_evdev_lock) ---- */
 
+/* Room for `len` more bytes in r's queue, up to OUT_MAX. */
+static int reserve(struct reader *r, size_t len)
+{
+    size_t need = r->out_len + len;
+    if (need > OUT_MAX)
+        return 0;
+    if (need <= r->out_cap)
+        return 1;
+    size_t cap = r->out_cap ? r->out_cap : 16384;
+    while (cap < need)
+        cap *= 2;
+    char *out = realloc(r->out, cap < OUT_MAX ? cap : OUT_MAX);
+    if (!out)
+        return 0;
+    r->out = out;
+    r->out_cap = cap < OUT_MAX ? cap : OUT_MAX;
+    return 1;
+}
+
 static void append(struct reader *r, uint32_t type, const void *a, size_t a_len, const void *b, size_t b_len)
 {
     struct cham_evdev_record h = {type, (uint32_t)(a_len + b_len)};
@@ -250,7 +274,8 @@ static void send_out(struct device *d, struct reader *r)
         memmove(r->out, r->out + n, r->out_len);
         if (!r->out_len && r->lost) {
             r->lost = 0;
-            append(r, CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
+            if (reserve(r, sizeof(struct cham_evdev_record) + sizeof d->state))
+                append(r, CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
         }
     }
 }
@@ -264,7 +289,7 @@ static void queue_record(struct device *d, struct reader *r, uint32_t type, cons
     if (r->dead)
         return;
     int frame = type == CHAM_EVDEV_FRAME || type == CHAM_EVDEV_FRAME_GRABBED;
-    int fits = r->out_len + sizeof(struct cham_evdev_record) + a_len + b_len <= sizeof r->out;
+    int fits = reserve(r, sizeof(struct cham_evdev_record) + a_len + b_len);
     if (frame && (r->lost || !fits))
         r->lost = 1;
     else if (fits)
@@ -438,7 +463,8 @@ static void *server_main(void *arg)
             if (!r->dead)
                 continue;
             close(r->fd);
-            r->fd = 0;
+            free(r->out);
+            *r = (struct reader){0};
             d->reader_count--;
             if (d->grab == i)
                 d->grab = -1;
