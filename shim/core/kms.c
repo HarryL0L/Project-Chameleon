@@ -243,13 +243,13 @@ static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 static void kms_init(void)
 {
-    uint32_t w = 0, h = 0, mhz = 0;
+    uint32_t w = 0, h = 0, mhz = 0, win_w = 0, win_h = 0;
     link_start();
     const char *wait = getenv("CHAMELEON_WAIT");
     int timeout_ms = (wait ? atoi(wait) : 30) * 1000;
     cham_log("waiting up to %d s for the Chameleon app to report its screen", timeout_ms / 1000);
-    if (link_wait_config(&w, &h, &mhz, timeout_ms)) {
-        cham_log("screen %ux%u @ %.2f Hz", w, h, mhz / 1000.0);
+    if (link_wait_config(&w, &h, &mhz, &win_w, &win_h, timeout_ms)) {
+        cham_log("screen %ux%u @ %.2f Hz (window %ux%u)", w, h, mhz / 1000.0, win_w, win_h);
     } else {
         const char *mode = getenv("CHAMELEON_MODE");
         double hz = 60;
@@ -259,6 +259,10 @@ static void kms_init(void)
         cham_log("no app yet; using %ux%u @ %.2f Hz (set CHAMELEON_MODE=WxH@Hz to change)", w, h, hz);
     }
     make_mode(w, h, mhz);
+    /* The screen is the app's whole window: the surface may start smaller,
+     * above the keyboard. */
+    if (win_w && win_h)
+        w = win_w, h = win_h;
 
     /* Physical size decides KWin's default scale; phones are ~400 dpi. */
     const char *dpi_env = getenv("CHAMELEON_DPI");

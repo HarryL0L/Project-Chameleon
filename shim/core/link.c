@@ -33,6 +33,7 @@ static struct cham_bo *g_slots[MAX_SLOTS];
 static uint32_t g_cfg_w, g_cfg_h;
 static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
 static uint32_t g_first_w, g_first_h, g_first_mhz; /* ...and what it said */
+static uint32_t g_win_w, g_win_h, g_first_win_w, g_first_win_h; /* the app's whole window (CHAM_WINDOW) */
 static pthread_cond_t g_cond;
 static int g_replaced;              /* another producer took the app over */
 static uint64_t g_app_version;      /* the app speaks another protocol version (CHAM_BYE_VERSION) */
@@ -324,6 +325,8 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             g_first_w = g_cfg_w;
             g_first_h = g_cfg_h;
             g_first_mhz = (uint32_t)m->b;
+            g_first_win_w = g_win_w;
+            g_first_win_h = g_win_h;
         }
         pthread_cond_broadcast(&g_cond);
         if (g_cfg_w && g_cfg_h)
@@ -368,6 +371,11 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             g_replaced = 1;
         else if (m->a == CHAM_BYE_VERSION)
             g_app_version = m->b;
+        break;
+    case CHAM_WINDOW:
+        g_win_w = CHAM_CONFIG_WIDTH(m);
+        g_win_h = CHAM_CONFIG_HEIGHT(m);
+        input_post(m); /* the touchpad's positions are fractions of it (evdev.c) */
         break;
     case CHAM_INPUT:
     case CHAM_CLIPBOARD_OFFER:
@@ -478,7 +486,8 @@ void link_clipboard(uint32_t type, uint64_t a, int fd)
 }
 
 
-int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, int timeout_ms)
+int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, uint32_t *win_width,
+                     uint32_t *win_height, int timeout_ms)
 {
     struct timespec ts;
     timespec_at(&ts, now_ns() + (uint64_t)timeout_ms * 1000000ull);
@@ -492,6 +501,8 @@ int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, i
         *width = g_first_w;
         *height = g_first_h;
         *refresh_mhz = g_first_mhz ? g_first_mhz : 60000;
+        *win_width = g_first_win_w;
+        *win_height = g_first_win_h;
     }
     pthread_mutex_unlock(&g_lock);
     return ok;

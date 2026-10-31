@@ -209,6 +209,8 @@ static void *input_main(void *arg)
             const struct cham_msg *m = &batch[i];
             if (m->type == CHAM_CONFIG) {
                 config(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
+            } else if (m->type == CHAM_WINDOW) {
+                evdev_window(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m));
             } else if (m->type == IME_CONNECTED) {
                 text_ime_attach((int)m->a);
             } else if (m->type == CHAM_INPUT && m->id == CHAM_INPUT_KEYSYM) {
@@ -244,7 +246,7 @@ void input_ime_connected(int fd)
     input_post(&m);
 }
 
-/* CHAM_INPUT, CHAM_CONFIG and CHAM_CLIPBOARD_OFFER messages, from the
+/* CHAM_INPUT, CHAM_CONFIG, CHAM_WINDOW and CHAM_CLIPBOARD_OFFER messages, from the
  * presenter link's thread. */
 void input_post(const struct cham_msg *m)
 {

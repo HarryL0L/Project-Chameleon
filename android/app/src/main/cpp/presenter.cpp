@@ -78,6 +78,7 @@ struct PoolBuf {
 std::mutex g_lock;
 ASurfaceControl *g_sc = nullptr;
 int32_t g_width = 0, g_height = 0, g_refresh_mhz = 60000;
+int32_t g_window_width = 0, g_window_height = 0;  // the whole window, also under the keyboard
 int g_client = -1;
 uint64_t g_client_gen = 0;  // bumped per connection; stale callbacks are dropped
 Buffer g_buffers[kMaxBuffers];
@@ -153,6 +154,9 @@ void send_config_locked()
     if (!g_sc)
         size = 0;
     uint32_t flags = set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0;
+    if (size && g_window_width > 0 && g_window_height > 0)
+        send_locked(CHAM_WINDOW, 0,
+                    (uint64_t)(uint32_t)g_window_width | ((uint64_t)(uint32_t)g_window_height << 32), 0);
     send_locked(CHAM_CONFIG, flags, size, (uint64_t)g_refresh_mhz);
 }
 
@@ -906,13 +910,16 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceCreated(JNIEnv 
 
 JNIEXPORT void JNICALL
 Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceChanged(JNIEnv *, jclass, jint width, jint height,
+                                                                          jint window_width, jint window_height,
                                                                           jint refresh_mhz)
 {
     std::lock_guard<std::mutex> lock(g_lock);
     g_width = width;
     g_height = height;
+    g_window_width = window_width;
+    g_window_height = window_height;
     g_refresh_mhz = refresh_mhz;
-    LOGI("surface %dx%d @ %d mHz", width, height, refresh_mhz);
+    LOGI("surface %dx%d in a %dx%d window @ %d mHz", width, height, window_width, window_height, refresh_mhz);
     send_config_locked();
     reshow_last_locked();
 }

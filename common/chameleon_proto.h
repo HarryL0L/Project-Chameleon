@@ -53,11 +53,16 @@ enum cham_msg_type {
     CHAM_FRAME_QUEUED = 106, /* copy mode: frame a is copied and handed to Android (b = when).
                                The producer's buffer is free (RELEASE carries the copy's
                                fence); the frame waits in Android until FRAME_DONE. */
+    CHAM_WINDOW = 107,      /* a = width | height << 32: the app's whole window, with the part
+                               the keyboard covers (CONFIG's surface is what it leaves), sent
+                               before each CONFIG. The screen's physical size and the touchpad
+                               follow it; touchpad positions are fractions of it. */
 };
 
 /* Input events, presenter -> producer (chameleon-kernel serves them as evdev
  * devices, and the Android keyboard's text through its input method or as
- * keys). Positions are fractions of the surface so they
+ * keys). Positions are fractions of the surface (the touchpad's: of the
+ * window, once CHAM_WINDOW said its size) so they
  * map onto the producer's screen whatever its size or scale:
  *   pos   = CHAM_INPUT_POS(x, y), x/y in [0, 1] as 16.16 fixed point
  *   delta = CHAM_INPUT_DELTA(dx, dy), dx/dy as signed multiples of

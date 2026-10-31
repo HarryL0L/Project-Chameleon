@@ -65,7 +65,12 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
     // ---- touch: every finger where it is, to the touchscreen or touchpad ----
 
     private static void fingers(View v, MotionEvent e, int down) {
-        int w = v.getWidth(), h = v.getHeight();
+        // The touchpad is the whole window (the surface's parent), also where
+        // the keyboard covers the desktop: a finger sliding onto the keyboard
+        // still moves the pointer (Android keeps sending us its touch).
+        View area = down == InputSender.PAD_DOWN && v.getParent() instanceof View ? (View) v.getParent() : v;
+        int w = area.getWidth(), h = area.getHeight();
+        float dx = area == v ? 0 : v.getLeft(), dy = area == v ? 0 : v.getTop();
         if (e.getActionMasked() != MotionEvent.ACTION_MOVE)
             InputSender.time(time(e, -1));
         switch (e.getActionMasked()) {
@@ -73,7 +78,7 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
             case MotionEvent.ACTION_POINTER_DOWN: {
                 int i = e.getActionIndex();
                 InputSender.finger(down, InputSender.DOWN, e.getPointerId(i),
-                        InputSender.pos(e.getX(i), e.getY(i), w, h));
+                        InputSender.pos(dx + e.getX(i), dy + e.getY(i), w, h));
                 InputSender.fingersFrame(down);
                 break;
             }
@@ -83,13 +88,13 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
                     InputSender.time(time(e, s));
                     for (int i = 0; i < e.getPointerCount(); i++)
                         InputSender.finger(down, InputSender.MOTION, e.getPointerId(i),
-                                InputSender.pos(e.getHistoricalX(i, s), e.getHistoricalY(i, s), w, h));
+                                InputSender.pos(dx + e.getHistoricalX(i, s), dy + e.getHistoricalY(i, s), w, h));
                     InputSender.fingersFrame(down);
                 }
                 InputSender.time(time(e, -1));
                 for (int i = 0; i < e.getPointerCount(); i++)
                     InputSender.finger(down, InputSender.MOTION, e.getPointerId(i),
-                            InputSender.pos(e.getX(i), e.getY(i), w, h));
+                            InputSender.pos(dx + e.getX(i), dy + e.getY(i), w, h));
                 InputSender.fingersFrame(down);
                 break;
             case MotionEvent.ACTION_UP:

@@ -72,7 +72,8 @@ public class PresenterActivity extends Activity
 
     private static native void nativeStart();
     private static native void nativeSurfaceCreated(Object surface);
-    private static native void nativeSurfaceChanged(int width, int height, int refreshMilliHz);
+    private static native void nativeSurfaceChanged(int width, int height, int windowWidth, int windowHeight,
+            int refreshMilliHz);
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
@@ -771,7 +772,7 @@ public class PresenterActivity extends Activity
     public void onDisplayChanged(int displayId) {
         Display display = display();
         if (display != null && display.getDisplayId() == displayId && mWidth > 0)
-            nativeSurfaceChanged(mWidth, mHeight, refreshMilliHz());
+            surfaceChanged();
     }
 
     @Override
@@ -816,7 +817,14 @@ public class PresenterActivity extends Activity
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         mWidth = width;
         mHeight = height;
-        nativeSurfaceChanged(width, height, refreshMilliHz());
+        surfaceChanged();
+    }
+
+    /** The surface's size, and the whole window's: the trackpad spans it, also under the keyboard. */
+    private void surfaceChanged() {
+        View root = (View) mSurface.getParent();
+        nativeSurfaceChanged(mWidth, mHeight, root != null ? root.getWidth() : 0, root != null ? root.getHeight() : 0,
+                refreshMilliHz());
     }
 
     @Override

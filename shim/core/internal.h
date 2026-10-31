@@ -41,8 +41,10 @@ int bo_send(const struct cham_bo *bo, int sock);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);
-/* Blocks until the presenter reported a surface size, or the timeout. */
-int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, int timeout_ms);
+/* Blocks until the presenter reported a surface size, or the timeout; the
+ * window's size is 0x0 from an app that doesn't report it. */
+int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, uint32_t *win_width,
+                     uint32_t *win_height, int timeout_ms);
 /* Shows `bo` (acquire fence borrowed, may be -1). Returns 1 if the presenter
  * will answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
@@ -83,6 +85,8 @@ void evdev_start(void);
 void evdev_uevent(uint32_t what);
 /* Takes an input message for a device (input thread); 0 if none. */
 int evdev_input(const struct cham_msg *m);
+/* The app's whole window (CHAM_WINDOW, input thread): the touchpad spans it. */
+void evdev_window(uint32_t width, uint32_t height);
 /* Whether the keyboard device has this Linux key code. */
 int evdev_keyboard_has(unsigned code);
 

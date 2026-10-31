@@ -89,6 +89,7 @@ static struct mt {         /* a multitouch device (protocol B) */
     int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
 } g_touch, g_pad;
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
+static uint32_t g_window_w, g_window_h; /* input thread: the app's whole window, 0 = not reported */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
 static int64_t g_event_time; /* ns, from CHAM_INPUT_TIME; 0 = none yet */
 static struct device *g_pointer = &g_dev[DEV_MOUSE]; /* the mouse or the tablet, whichever moved last */
@@ -658,13 +659,23 @@ static void select_slot(struct device *d, struct mt *t, int slot)
     abs_value(d, ABS_MT_SLOT, slot, &t->cur_slot);
 }
 
-/* pos as fractions of the screen; the touchpad's axes are its pixels. */
+void evdev_window(uint32_t width, uint32_t height)
+{
+    g_window_w = width;
+    g_window_h = height;
+}
+
+/* pos as fractions of the screen; the touchpad's axes are its pixels. The
+ * touchpad is the app's whole window, also where the keyboard covers the
+ * desktop, so its pixels don't change with the desktop's size; an app that
+ * doesn't report the window gives fractions of the desktop. */
 static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
 {
     int32_t x = (int32_t)CHAM_INPUT_X(pos), y = (int32_t)CHAM_INPUT_Y(pos);
     if (t == &g_pad) {
-        uint32_t w, h, mm_w, mm_h;
-        kms_mode_size(&w, &h);
+        uint32_t w = g_window_w, h = g_window_h, mm_w, mm_h;
+        if (!w || !h)
+            kms_mode_size(&w, &h);
         if (!w || !h) /* before the compositor's first modeset */
             kms_screen_size(&w, &h, &mm_w, &mm_h);
         pthread_mutex_lock(&g_evdev_lock);
