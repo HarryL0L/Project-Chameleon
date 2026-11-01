@@ -96,7 +96,8 @@ enum cham_input_kind {
     CHAM_INPUT_TEXT_COMMIT = 22,   /* the code points since the last COMMIT / PREEDIT are typed
                                       text (replacing the text being composed, if any) */
     CHAM_INPUT_TEXT_PREEDIT = 23,  /* ...are the text being composed now (none: no longer) */
-    CHAM_INPUT_TEXT_DELETE = 24,   /* a / b = code points to delete before / after the cursor */
+    CHAM_INPUT_TEXT_DELETE = 24,   /* a / b = characters to delete before / after the cursor, as the
+                                      user sees them: one Backspace / Delete each */
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)

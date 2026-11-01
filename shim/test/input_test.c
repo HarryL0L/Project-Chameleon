@@ -103,8 +103,7 @@ static const struct wl_interface k_context = {"zwp_input_method_context_v1", 1, 
 static struct {
     struct wl_resource *im;
     char commit[64], preedit[64];
-    int delete_index;
-    unsigned delete_length;
+    char seq[256]; /* committed text and keys, in order: "[text]" or "<keysym>" per press */
 } ime;
 
 static void ctx_destroy(struct wl_client *c, struct wl_resource *r)
@@ -119,6 +118,7 @@ static void ctx_commit_string(struct wl_client *c, struct wl_resource *r, uint32
     (void)r;
     (void)serial;
     snprintf(ime.commit, sizeof ime.commit, "%s", text);
+    snprintf(ime.seq + strlen(ime.seq), sizeof ime.seq - strlen(ime.seq), "[%s]", text);
 }
 
 static void ctx_preedit_string(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *text,
@@ -131,12 +131,16 @@ static void ctx_preedit_string(struct wl_client *c, struct wl_resource *r, uint3
     snprintf(ime.preedit, sizeof ime.preedit, "%s", text);
 }
 
-static void ctx_delete(struct wl_client *c, struct wl_resource *r, int32_t index, uint32_t length)
+static void ctx_keysym(struct wl_client *c, struct wl_resource *r, uint32_t serial, uint32_t time, uint32_t sym,
+                       uint32_t state, uint32_t modifiers)
 {
     (void)c;
     (void)r;
-    ime.delete_index = index;
-    ime.delete_length = length;
+    (void)serial;
+    (void)time;
+    (void)modifiers;
+    if (state == 1) /* pressed */
+        snprintf(ime.seq + strlen(ime.seq), sizeof ime.seq - strlen(ime.seq), "<%x>", sym);
 }
 
 static void ctx_other(void)
@@ -145,8 +149,8 @@ static void ctx_other(void)
 
 static const struct {
     void *fns[14];
-} k_context_impl = {{ctx_destroy, ctx_commit_string, ctx_preedit_string, ctx_other, ctx_other, ctx_delete, ctx_other,
-                     ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other}};
+} k_context_impl = {{ctx_destroy, ctx_commit_string, ctx_preedit_string, ctx_other, ctx_other, ctx_other, ctx_other,
+                     ctx_other, ctx_keysym, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other}};
 
 static void bind_im(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 {
@@ -603,15 +607,30 @@ int main(void)
     send_input(c, CHAM_INPUT_TEXT_CHAR, 0x00e9, 0); /* é */
     send_input(c, CHAM_INPUT_TEXT_CHAR, 'x', 0);
     send_input(c, CHAM_INPUT_TEXT_PREEDIT, 0, 0);
-    send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 0);
-    for (int i = 0; i < 25 && !ime.delete_length; i++) {
+    for (int i = 0; i < 25 && !*ime.preedit; i++) {
         wl_event_loop_dispatch(loop, 20);
         wl_display_flush_clients(display);
     }
     CHECK(strcmp(ime.commit, "hi") == 0, "committed text reaches the text field (\"%s\")", ime.commit);
     CHECK(strcmp(ime.preedit, "\xc3\xa9x") == 0, "composing text too (\"%s\")", ime.preedit);
-    CHECK(ime.delete_index == -2 && ime.delete_length == 2, "deleting 2 before the cursor (%d, %u)",
-          ime.delete_index, ime.delete_length);
+    /* Enter and deletions are keys, in order with the text: a newline as
+     * text or a request to delete surrounding text is lost on some apps
+     * (single-line fields, terminals). */
+    ime.seq[0] = 0;
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'a', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'b', 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 1);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    const char *want = "[a]<ff0d>[b]<ff08><ff08><ffff>[]<ff0d>";
+    for (int i = 0; i < 25 && strcmp(ime.seq, want) != 0; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    CHECK(strcmp(ime.seq, want) == 0, "Enter as Return, deleting 2 before and 1 after as BackSpace, Delete (%s)",
+          ime.seq);
     if (ctx)
         wl_resource_post_event(ime.im, 1 /* deactivate */, ctx);
     for (int i = 0; i < 25; i++) {

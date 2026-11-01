@@ -3,10 +3,12 @@
  * The Android keyboard's text (CHAM_INPUT_TEXT_*), the way a Linux on-screen
  * keyboard delivers it: while chameleon-ime, the input method the compositor
  * started, says a text field takes text, the text goes to it (committed text,
- * the word being composed, deletions) and from there to the app through
- * text-input. Otherwise it is typed as keys, like on a real keyboard
- * (keymap.c): composing text is typed as it changes and corrected with
- * Backspace. Runs on input.c's thread.
+ * the word being composed) and from there to the app through text-input;
+ * Enter and deletions are keys (Return, BackSpace, Delete) it sends in the
+ * same stream, which every app takes, unlike a newline as text or a request
+ * to delete surrounding text. Otherwise it is all typed as keys, like on a
+ * real keyboard (keymap.c): composing text is typed as it changes and
+ * corrected with Backspace. Runs on input.c's thread.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -97,20 +99,38 @@ static size_t utf8(uint32_t cp, char *out)
     return 4;
 }
 
-static void ime_send(uint32_t kind, uint32_t before, uint32_t after)
+/* COMMIT / PREEDIT with text[0..len), or KEYSYM tapped count times. */
+static void ime_send(uint32_t kind, const uint32_t *text, size_t len, uint32_t keysym, uint32_t count)
 {
     struct {
         struct cham_evdev_record h;
         struct cham_ime_text t;
         char text[MAX_TEXT * 4];
-    } r = {.t = {kind, before, after}};
-    size_t len = 0;
-    for (size_t i = 0; kind != CHAM_IME_DELETE && i < g_text_len; i++)
-        len += utf8(g_text[i], r.text + len);
-    r.h = (struct cham_evdev_record){CHAM_EVDEV_IME_TEXT, (uint32_t)(sizeof r.t + len)};
+    } r = {.t = {kind, keysym, count}};
+    size_t bytes = 0;
+    for (size_t i = 0; i < len; i++)
+        bytes += utf8(text[i], r.text + bytes);
+    r.h = (struct cham_evdev_record){CHAM_EVDEV_IME_TEXT, (uint32_t)(sizeof r.t + bytes)};
     size_t size = sizeof r.h + r.h.size;
-    if (send(g_ime, &r, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size)
+    if (g_ime >= 0 && send(g_ime, &r, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size)
         ime_closed(); /* gone or stuck: its socket holds far more than one message */
+}
+
+/* Committed text to the text field, each newline in it as Return; the first
+ * part even when empty, as it replaces the text being composed. */
+static void ime_commit(void)
+{
+    size_t start = 0;
+    for (size_t i = 0; i <= g_text_len; i++) {
+        int newline = i < g_text_len && (g_text[i] == '\n' || g_text[i] == '\r');
+        if (i < g_text_len && !newline)
+            continue;
+        if (i > start || start == 0)
+            ime_send(CHAM_IME_COMMIT, g_text + start, i - start, 0, 0);
+        if (newline)
+            ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_RETURN, 1);
+        start = i + 1;
+    }
 }
 
 /* ---- as keys ---- */
@@ -156,8 +176,10 @@ int text_input(const struct cham_msg *m)
         return 1;
     case CHAM_INPUT_TEXT_COMMIT:
     case CHAM_INPUT_TEXT_PREEDIT:
-        if (g_ime >= 0 && g_ime_active) {
-            ime_send(m->id == CHAM_INPUT_TEXT_COMMIT ? CHAM_IME_COMMIT : CHAM_IME_PREEDIT, 0, 0);
+        if (g_ime >= 0 && g_ime_active && m->id == CHAM_INPUT_TEXT_COMMIT) {
+            ime_commit();
+        } else if (g_ime >= 0 && g_ime_active) {
+            ime_send(CHAM_IME_PREEDIT, g_text, g_text_len, 0, 0);
         } else {
             retype();
             g_typed_len = 0;
@@ -170,7 +192,10 @@ int text_input(const struct cham_msg *m)
         return 1;
     case CHAM_INPUT_TEXT_DELETE:
         if (g_ime >= 0 && g_ime_active) {
-            ime_send(CHAM_IME_DELETE, (uint32_t)m->a, (uint32_t)m->b);
+            if (m->a)
+                ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_BACKSPACE, (uint32_t)(m->a < MAX_TEXT ? m->a : MAX_TEXT));
+            if (m->b)
+                ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_DELETE, (uint32_t)(m->b < MAX_TEXT ? m->b : MAX_TEXT));
         } else {
             for (uint64_t i = 0; i < m->a && i < MAX_TEXT; i++)
                 tap(XK_BACKSPACE);

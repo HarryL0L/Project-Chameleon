@@ -6,7 +6,8 @@
  * it a context while the focused app has a text field that takes text
  * (text-input). The keyboard's text reaches it from libchameleon.so over
  * Chameleon's input socket and goes into that context: the word being
- * composed, committed text, deletions. It tells libchameleon.so whether a
+ * composed, committed text, and Enter and deletions as keys (keysym), in
+ * the order they came. It tells libchameleon.so whether a
  * text field takes text; while none does, libchameleon.so types the text as
  * keys instead.
  */
@@ -48,7 +49,7 @@ enum {
     CTX_COMMIT_STRING = 1,
     CTX_PREEDIT_STRING = 2,
     CTX_PREEDIT_CURSOR = 4,
-    CTX_DELETE_SURROUNDING_TEXT = 5,
+    CTX_KEYSYM = 8,
 };
 static const struct wl_message k_context_requests[] = {
     {"destroy", "", k_null},
@@ -83,8 +84,6 @@ static const struct wl_interface k_context_iface = {
 static struct wl_display *g_display;
 static struct wl_proxy *g_registry, *g_im, *g_ctx;
 static uint32_t g_serial;          /* the context's last commit_state */
-static char *g_surrounding;        /* the text field's text around the cursor, if it says */
-static uint32_t g_cursor;          /* byte offset of the cursor in it */
 static int g_shim = -1;            /* connection to libchameleon.so */
 
 /* ---- libchameleon.so ---- */
@@ -137,28 +136,6 @@ static void connect_shim(void)
     tell_shim();
 }
 
-/* Bytes taken by `n` code points before (dir < 0) or after the cursor in the
- * surrounding text; without it, as if the text were ASCII. */
-static uint32_t bytes_for(uint32_t n, int dir)
-{
-    if (!g_surrounding)
-        return n;
-    const unsigned char *t = (const unsigned char *)g_surrounding;
-    size_t len = strlen(g_surrounding), at = g_cursor < len ? g_cursor : len, end = at;
-    for (; n > 0; n--) {
-        if (dir < 0 && end > 0) {
-            do
-                end--;
-            while (end > 0 && (t[end] & 0xc0) == 0x80); /* back over continuation bytes */
-        } else if (dir > 0 && end < len) {
-            do
-                end++;
-            while (end < len && (t[end] & 0xc0) == 0x80);
-        }
-    }
-    return (uint32_t)(dir < 0 ? at - end : end - at);
-}
-
 static void shim_readable(void)
 {
     struct cham_evdev_record h;
@@ -183,25 +160,20 @@ static void shim_readable(void)
         wl.marshal_flags(g_ctx, CTX_PREEDIT_CURSOR, NULL, 1, 0, (int32_t)strlen(text));
         wl.marshal_flags(g_ctx, CTX_PREEDIT_STRING, NULL, 1, 0, g_serial, text, text);
         break;
-    case CHAM_IME_DELETE: {
-        uint32_t before = bytes_for(t.before, -1), after = bytes_for(t.after, 1);
-        wl.marshal_flags(g_ctx, CTX_DELETE_SURROUNDING_TEXT, NULL, 1, 0, -(int32_t)before, before + after);
+    case CHAM_IME_KEYSYM: {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint32_t ms = (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+        for (uint32_t i = 0; i < t.count; i++) {
+            wl.marshal_flags(g_ctx, CTX_KEYSYM, NULL, 1, 0, g_serial, ms, t.keysym, 1 /* pressed */, 0);
+            wl.marshal_flags(g_ctx, CTX_KEYSYM, NULL, 1, 0, g_serial, ms, t.keysym, 0 /* released */, 0);
+        }
         break;
     }
     }
 }
 
 /* ---- the input method ---- */
-
-static void ctx_surrounding_text(void *data, struct wl_proxy *ctx, const char *text, uint32_t cursor, uint32_t anchor)
-{
-    (void)data;
-    (void)ctx;
-    (void)anchor;
-    free(g_surrounding);
-    g_surrounding = text ? strdup(text) : NULL;
-    g_cursor = cursor;
-}
 
 static void ctx_commit_state(void *data, struct wl_proxy *ctx, uint32_t serial)
 {
@@ -211,7 +183,7 @@ static void ctx_commit_state(void *data, struct wl_proxy *ctx, uint32_t serial)
 }
 
 static void (*k_context_listener[])(void) = {
-    (void (*)(void))ctx_surrounding_text,
+    wl_ignore_event, /* surrounding_text */
     wl_ignore_event, /* reset */
     wl_ignore_event, /* content_type */
     wl_ignore_event, /* invoke_button */
@@ -224,8 +196,6 @@ static void drop_context(void)
     if (g_ctx)
         wl.marshal_flags(g_ctx, CTX_DESTROY, NULL, 1, WL_MARSHAL_FLAG_DESTROY);
     g_ctx = NULL;
-    free(g_surrounding);
-    g_surrounding = NULL;
 }
 
 static void im_activate(void *data, struct wl_proxy *im, struct wl_proxy *ctx)

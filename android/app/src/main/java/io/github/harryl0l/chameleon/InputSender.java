@@ -113,7 +113,7 @@ final class InputSender {
         nativeSendInput(commit ? TEXT_COMMIT : TEXT_PREEDIT, 0, 0);
     }
 
-    /** Deletes code points before / after the cursor. */
+    /** Deletes characters (as the user sees them) before / after the cursor. */
     static void deleteText(int before, int after) {
         time(0);
         nativeSendInput(TEXT_DELETE, before, after);
