@@ -93,6 +93,11 @@ STUB(EGLBoolean, eglQueryDmaBufFormatsEXT, (EGLDisplay dpy, EGLint max, EGLint *
 STUB(EGLBoolean, eglQueryDmaBufModifiersEXT,
      (EGLDisplay dpy, EGLint format, EGLint max, EGLuint64KHR *modifiers, EGLBoolean *external, EGLint *num),
      (dpy, format, max, modifiers, external, num), EGL_FALSE)
+STUB(EGLBoolean, eglExportDMABUFImageQueryMESA,
+     (EGLDisplay dpy, EGLImageKHR image, int *fourcc, int *num_planes, EGLuint64KHR *modifiers),
+     (dpy, image, fourcc, num_planes, modifiers), EGL_FALSE)
+STUB(EGLBoolean, eglExportDMABUFImageMESA, (EGLDisplay dpy, EGLImageKHR image, int *fds, EGLint *strides, EGLint *offsets),
+     (dpy, image, fds, strides, offsets), EGL_FALSE)
 STUB(EGLBoolean, eglSwapBuffersWithDamageKHR, (EGLDisplay dpy, EGLSurface surface, const EGLint *rects, EGLint n),
      (dpy, surface, rects, n), EGL_FALSE)
 STUB(EGLBoolean, eglSwapBuffersWithDamageEXT, (EGLDisplay dpy, EGLSurface surface, const EGLint *rects, EGLint n),
@@ -143,7 +148,7 @@ static const struct {
     ENTRY(eglGetSyncAttribKHR),      ENTRY(eglDupNativeFenceFDANDROID), ENTRY(eglQueryDmaBufFormatsEXT),
     ENTRY(eglQueryDmaBufModifiersEXT), ENTRY(eglSwapBuffersWithDamageKHR), ENTRY(eglSwapBuffersWithDamageEXT),
     ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID), ENTRY(eglQueryDeviceStringEXT),
-    ENTRY(eglQueryDeviceAttribEXT),
+    ENTRY(eglQueryDeviceAttribEXT),  ENTRY(eglExportDMABUFImageQueryMESA), ENTRY(eglExportDMABUFImageMESA),
 };
 
 static void *get_dispatch_address(const char *name)

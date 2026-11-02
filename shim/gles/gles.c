@@ -51,13 +51,14 @@ static void (GL_APIENTRY *p_glTexSubImage3D)(GLenum, GLint, GLint, GLint, GLint,
 static void (GL_APIENTRY *p_glBindFramebuffer)(GLenum, GLuint);
 static int g_bounce = 1;
 static int g_unbind = 1;
+static void *g_lib;
 
 __attribute__((constructor)) static void load(void)
 {
     const char *path = getenv("CHAMELEON_ANDROID_GLES"); /* host tests */
     if (!path)
         path = sizeof(void *) == 8 ? "/system/lib64/libGLESv2.so" : "/system/lib/libGLESv2.so";
-    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *lib = g_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
         cham_log("cannot load Android's libGLESv2: %s", dlerror());
         return;
@@ -461,4 +462,10 @@ void *cham_gl_get_proc(const char *name)
         if (strcmp(name, e->name) == 0)
             return *e->fn ? e->wrapper : NULL;
     return NULL;
+}
+
+/* Android's own GLES function, for the vendor's internal use. */
+void *cham_gl_real(const char *name)
+{
+    return g_lib ? dlsym(g_lib, name) : NULL;
 }

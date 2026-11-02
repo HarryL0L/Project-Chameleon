@@ -8,7 +8,7 @@
 #define EGL_EGLEXT_PROTOTYPES
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl31.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -25,7 +25,114 @@ struct fake_state {
     int tex_uploads;
     int create_image_target;
     int query_counter_calls;
+    int swaps, swap_interval_calls, last_swap_interval;
+    int readers, geometry_calls;
+    void *current_draw;
+    int native_images, images_destroyed, copies, finishes;
+    GLuint copy_source;
 };
+
+/* A texture as Firefox makes one for WebGL (bound, level 0 only). */
+static GLuint texture(GLenum internal, GLenum format, int width, int height)
+{
+    GLuint t;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexImage2D(GL_TEXTURE_2D, 0, (GLint)internal, width, height, 0, format, GL_UNSIGNED_BYTE, NULL);
+    return t;
+}
+
+/* EGL_MESA_image_dma_buf_export the way Firefox (WebGL) and GTK 4 use it:
+ * an EGLImage of a texture, queried and exported as a dmabuf for another
+ * process, which imports it. */
+static void export_checks(EGLDisplay dpy, EGLContext ctx, struct fake_state *st)
+{
+    printf("texture export\n");
+    PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC query =
+        (PFNEGLEXPORTDMABUFIMAGEQUERYMESAPROC)eglGetProcAddress("eglExportDMABUFImageQueryMESA");
+    PFNEGLEXPORTDMABUFIMAGEMESAPROC export =
+        (PFNEGLEXPORTDMABUFIMAGEMESAPROC)eglGetProcAddress("eglExportDMABUFImageMESA");
+    PFNEGLCREATEIMAGEKHRPROC create_khr = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
+    CHECK(query && export && create_khr, "eglExportDMABUFImage(Query)MESA via the vendor's dispatch stubs");
+    if (!query || !export || !create_khr)
+        return;
+
+    /* Firefox: glTexImage2D(NULL), eglCreateImage without attributes. */
+    GLuint tex = texture(GL_RGBA, GL_RGBA, 64, 32);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    int images = st->native_images;
+    EGLImage image = eglCreateImage(dpy, ctx, EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uintptr_t)tex, NULL);
+    GLint bound = -1;
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    CHECK(image != EGL_NO_IMAGE && image != (EGLImage)0x42 && st->native_images == images + 1 && st->copies == 0,
+          "an RGBA texture's image is a session buffer's (AHardwareBuffer), contents not copied unless preserved");
+    CHECK(bound == 0 && glGetError() == GL_NO_ERROR, "the app's texture binding is left as it was, no GL error");
+    int fourcc = 0, planes = 0;
+    EGLuint64KHR modifier = 0;
+    CHECK(query(dpy, image, &fourcc, &planes, &modifier) && fourcc == 0x34324241 && planes == 1 &&
+              modifier == 0x00ffffffffffffffULL,
+          "query: ABGR8888, 1 plane, implicit modifier (0x%x, %d)", fourcc, planes);
+    CHECK(query(dpy, image, NULL, NULL, NULL), "query with every output NULL");
+    int fd = -1;
+    EGLint stride = 0, offset = -1;
+    CHECK(export(dpy, image, &fd, &stride, &offset) && fd >= 0 && stride == 64 * 4 && offset == 0,
+          "export: a dmabuf fd, stride %d, offset %d", stride, offset);
+    int fd2 = -1;
+    CHECK(export(dpy, image, &fd2, NULL, NULL) && fd2 >= 0 && fd2 != fd, "each export a new fd for the caller");
+    if (fd2 >= 0)
+        close(fd2);
+    CHECK(!query(dpy, (EGLImageKHR)0x42, &fourcc, &planes, &modifier) && eglGetError() == EGL_BAD_PARAMETER,
+          "the driver's own images aren't exportable: EGL_BAD_PARAMETER");
+
+    /* Gone from this process, the buffer stays chameleon-kernel's as long as
+     * its dmabuf is held: what another process (the compositor) imports. */
+    int destroyed = st->images_destroyed;
+    CHECK(eglDestroyImage(dpy, image) && st->images_destroyed == destroyed + 1, "eglDestroyImage reaches the driver");
+    CHECK(!query(dpy, image, &fourcc, &planes, &modifier), "...and the image is no longer exportable");
+    const EGLint import[] = {EGL_WIDTH, 64, EGL_HEIGHT, 32, EGL_LINUX_DRM_FOURCC_EXT, 0x34324241,
+                             EGL_DMA_BUF_PLANE0_FD_EXT, fd, EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+                             EGL_DMA_BUF_PLANE0_PITCH_EXT, 256, EGL_NONE};
+    void *(*own_bo)(int) = (void *(*)(int))dlsym(RTLD_DEFAULT, "cham_bo_from_fd");
+    CHECK(own_bo && fd >= 0 && !own_bo(fd), "this process let go of the buffer (chameleon-kernel has it)");
+    EGLImageKHR imported = fd >= 0 ? create_khr(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, import) : NULL;
+    CHECK(imported != EGL_NO_IMAGE_KHR, "...and the exported dmabuf imports from there");
+    if (imported)
+        eglDestroyImage(dpy, imported);
+    if (fd >= 0)
+        close(fd);
+
+    /* GTK 4: a finished texture, EGL_IMAGE_PRESERVED_KHR. */
+    GLuint rgb = texture(GL_RGB8, GL_RGB, 16, 16);
+    const EGLint preserved[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    image = create_khr(dpy, ctx, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)rgb, preserved);
+    glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+    CHECK(image != EGL_NO_IMAGE_KHR && image != (EGLImageKHR)0x42 && st->copies == 1 && st->copy_source == rgb &&
+              st->finishes == 1 && query(dpy, image, &fourcc, NULL, NULL) && fourcc == 0x34324258,
+          "preserved: the contents copied (GPU finished), an RGB texture is XBGR8888 (0x%x)", fourcc);
+    CHECK(bound == (GLint)rgb && glGetError() == GL_NO_ERROR, "binding kept, no GL error");
+    eglDestroyImage(dpy, image);
+
+    /* Anything else stays the driver's. */
+    GLuint immutable;
+    glGenTextures(1, &immutable);
+    glBindTexture(GL_TEXTURE_2D, immutable);
+    glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, 8, 8);
+    image = create_khr(dpy, ctx, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)immutable, NULL);
+    CHECK(image == (EGLImageKHR)0x42 && !query(dpy, image, NULL, NULL, NULL),
+          "an immutable texture (glTexStorage2D) is the driver's, not exportable");
+    GLuint mipmapped = texture(GL_RGBA, GL_RGBA, 8, 8);
+    glTexImage2D(GL_TEXTURE_2D, 1, GL_RGBA, 4, 4, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    image = create_khr(dpy, ctx, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)mipmapped, NULL);
+    CHECK(image == (EGLImageKHR)0x42, "...as is one with mipmap levels");
+    GLuint plain = texture(GL_RGBA, GL_RGBA, 8, 8);
+    const EGLint level1[] = {EGL_GL_TEXTURE_LEVEL_KHR, 1, EGL_NONE};
+    image = create_khr(dpy, ctx, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)plain, level1);
+    CHECK(image == (EGLImageKHR)0x42, "...and an image of another level");
+    image = create_khr(dpy, ctx, EGL_GL_TEXTURE_2D_KHR, (EGLClientBuffer)(uintptr_t)999, NULL);
+    CHECK(image == (EGLImageKHR)0x42 && glGetError() == GL_NO_ERROR, "...and a name that isn't a texture, no GL error");
+    CHECK(st->native_images == st->images_destroyed, "every session buffer image destroyed (%d made, %d destroyed)",
+          st->native_images, st->images_destroyed);
+}
 
 /* Chameleon's libgbm (VENDOR_TEST_GBM), by hand: no gbm.h here. */
 static struct {
@@ -180,8 +287,10 @@ int main(void)
                 listed += formats[i] == 0x34324258 || formats[i] == 0x34324241 || formats[i] == 0x34325258 ||
                           formats[i] == 0x34325241; /* XB24 AB24 XR24 AR24 */
         CHECK(listed == 4, "dmabuf import of XBGR/ABGR/XRGB/ARGB8888, gbm's formats (%d of 4)", listed);
+        CHECK(exts && strstr(exts, "EGL_MESA_image_dma_buf_export"), "dmabuf export of textures (Firefox WebGL)");
     } else
-        CHECK(exts && !strstr(exts, "dma_buf_import"), "no dmabuf import without libchameleon.so");
+        CHECK(exts && !strstr(exts, "dma_buf_import") && !strstr(exts, "dma_buf_export"),
+              "no dmabuf import or export without libchameleon.so");
     /* EGL_KHR_platform_gbm: a config's native visual is its GBM format (the
      * stand-in's config is Android's RGBA_8888 with alpha). */
     EGLConfig config;
@@ -247,8 +356,14 @@ int main(void)
     GLenum (*reset_arb)(void) = (GLenum(*)(void))eglGetProcAddress("glGetGraphicsResetStatusARB");
     CHECK(reset_arb && reset_arb() == GL_NO_ERROR, "glGetGraphicsResetStatusARB (Qt) answers GL_NO_ERROR");
 
-    if (session)
+    if (session) {
+        export_checks(dpy, ctx, st);
         gbm_surface_checks(dpy, config);
+    } else {
+        GLuint tex = texture(GL_RGBA, GL_RGBA, 8, 8);
+        CHECK(eglCreateImage(dpy, ctx, EGL_GL_TEXTURE_2D, (EGLClientBuffer)(uintptr_t)tex, NULL) == (EGLImage)0x42,
+              "a texture's image is the driver's without libchameleon.so");
+    }
 
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);

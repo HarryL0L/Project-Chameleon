@@ -53,6 +53,12 @@ static struct {
     AHardwareBuffer *(*buffer_ahb_acquire)(int);
     void (*buffer_ahb_release)(AHardwareBuffer *);
     void *(*gbm_window_get)(void *, uint32_t *);
+    /* for EGL_MESA_image_dma_buf_export */
+    struct cham_bo *(*bo_create)(uint32_t, uint32_t, uint32_t, uint32_t);
+    void (*bo_unref)(struct cham_bo *);
+    int (*bo_export_fd)(struct cham_bo *);
+    uint32_t (*bo_handle_open)(struct cham_bo *, int);
+    void (*bo_handle_close)(int, uint32_t);
 } core;
 
 static void resolve(void)
@@ -63,6 +69,13 @@ static void resolve(void)
     *(void **)&core.buffer_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
     *(void **)&core.buffer_ahb_release = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
     *(void **)&core.gbm_window_get = dlsym(RTLD_DEFAULT, "cham_gbm_window_get");
+    *(void **)&core.bo_create = dlsym(RTLD_DEFAULT, "cham_bo_create");
+    *(void **)&core.bo_unref = dlsym(RTLD_DEFAULT, "cham_bo_unref");
+    *(void **)&core.bo_export_fd = dlsym(RTLD_DEFAULT, "cham_bo_export_fd");
+    *(void **)&core.bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
+    *(void **)&core.bo_handle_close = dlsym(RTLD_DEFAULT, "cham_bo_handle_close");
+    if (!core.bo_create || !core.bo_unref || !core.bo_export_fd || !core.bo_handle_open || !core.bo_handle_close)
+        core.bo_create = NULL; /* no texture export (cham_bo_create() answers NULL) */
     if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.buffer_ahb_acquire || !core.buffer_ahb_release)
         memset(&core, 0, sizeof core);
 }
@@ -132,4 +145,30 @@ const uint32_t *cham_formats(int *count)
         return core.formats(count);
     *count = 0;
     return NULL;
+}
+
+struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)
+{
+    return cham_core_present() && core.bo_create ? core.bo_create(width, height, format, usage) : NULL;
+}
+
+/* The rest only for buffers cham_bo_create() made. */
+void cham_bo_unref(struct cham_bo *bo)
+{
+    core.bo_unref(bo);
+}
+
+int cham_bo_export_fd(struct cham_bo *bo)
+{
+    return core.bo_export_fd(bo);
+}
+
+uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+{
+    return core.bo_handle_open(bo, fd);
+}
+
+void cham_bo_handle_close(int fd, uint32_t handle)
+{
+    core.bo_handle_close(fd, handle);
 }

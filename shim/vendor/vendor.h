@@ -31,6 +31,7 @@ EGLBoolean cham_wl_destroy_surface(EGLDisplay dpy, EGLSurface surface);
 
 /* gles/gles.c */
 void *cham_gl_get_proc(const char *name);
+void *cham_gl_real(const char *name); /* Android's GLES function */
 
 /* bridge.c: is libchameleon.so (the card node, gbm's buffers) in this
  * process? It is in every program of a Chameleon session. */
