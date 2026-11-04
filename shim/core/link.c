@@ -3,7 +3,8 @@
  * Connection from chameleon-kernel to the Chameleon presenter app.
  *
  * - One reader thread (re)connects to $PREFIX/tmp/chameleon-0 and handles
- *   CONFIG, RELEASE, FRAME_QUEUED and FRAME_DONE.
+ *   CONFIG, RELEASE, FRAME_QUEUED and FRAME_DONE; input goes on to the input
+ *   thread without g_lock.
  * - Buffers are registered with the presenter lazily, on first present.
  * - At most one page flip is pending, as with KMS. It completes on a vblank
  *   tick once the presenter copied the previous frame (FRAME_QUEUED) and
@@ -13,6 +14,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <poll.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -51,6 +53,7 @@ static struct {
     int on_tick;                    /* completes at deadline_ns, a vblank tick */
     int held;                       /* waited for a copy or a latch */
     uint64_t prev_frame, prev2_frame; /* the frames shown before it, if any */
+    uint64_t seq;                   /* bumped per queued flip */
 } g_flip;
 /* Like a display engine, and like VKMS: a flip completes on the first
  * vblank tick after the commit reached the app, which copies the new front
@@ -117,11 +120,6 @@ static void timespec_at(struct timespec *ts, uint64_t ns)
 
 static void emit_flip_locked(uint64_t ts_ns)
 {
-    /* Copy mode: the presenter released our buffer with the fence of its
-     * blit. Wait for it so the compositor can't render into a buffer being
-     * copied. */
-    bo_wait_release_fences_locked();
-
     struct drm_event_vblank ev = {
         .base = {.type = DRM_EVENT_FLIP_COMPLETE, .length = sizeof ev},
         .user_data = g_flip.user_data,
@@ -148,6 +146,30 @@ static void emit_flip_locked(uint64_t ts_ns)
 int link_flip_pending_locked(void)
 {
     return g_flip.active;
+}
+
+/* Completes the pending flip (the vblank thread). Copy mode: the presenter
+ * released our buffers with the fences of its blits; they must signal
+ * first, so the compositor can't render into a buffer still being copied.
+ * They are waited for without g_lock, which the compositor's requests and
+ * the app's messages need meanwhile. */
+static void complete_flip_locked(uint64_t ts_ns)
+{
+    int fences[MAX_SLOTS];
+    int n = bo_take_release_fences_locked(fences, MAX_SLOTS);
+    if (n) {
+        uint64_t seq = g_flip.seq;
+        pthread_mutex_unlock(&g_lock);
+        for (int i = 0; i < n; i++) {
+            struct pollfd pfd = {fences[i], POLLIN, 0};
+            poll(&pfd, 1, 100);
+            close(fences[i]);
+        }
+        pthread_mutex_lock(&g_lock);
+        if (!g_flip.active || g_flip.seq != seq)
+            return; /* cancelled meanwhile (its file closed) */
+    }
+    emit_flip_locked(ts_ns);
 }
 
 void link_cancel_flip_locked(int event_fd)
@@ -191,6 +213,7 @@ void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, 
 {
     uint64_t period = 1000000000000ull / (refresh_mhz ? refresh_mhz : 60000);
     g_flip.active = 1;
+    g_flip.seq++;
     g_flip.simulated = !presented;
     g_flip.frame = frame;
     g_flip.user_data = user_data;
@@ -228,13 +251,13 @@ static void *vblank_main(void *arg)
         uint64_t now = now_ns();
         if (now >= g_flip.deadline_ns) {
             if (g_flip.on_tick) {
-                emit_flip_locked(g_flip.deadline_ns);
+                complete_flip_locked(g_flip.deadline_ns);
                 continue;
             }
             if (!g_flip.simulated)
                 cham_log("presenter did not report frame %llu, completing the flip anyway",
                          (unsigned long long)g_flip.frame);
-            emit_flip_locked(now);
+            complete_flip_locked(now);
             continue;
         }
         struct timespec ts;
@@ -355,9 +378,12 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             g_latch_ns = m->b;
         if (m->a > g_latched_frame)
             g_latched_frame = m->a; /* latched, or skipped (b = 0): not waiting in Android */
-        if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame)
-            emit_flip_locked(m->b ? m->b : now_ns());
-        else if (g_early)
+        if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame) {
+            /* latched: complete it now, on the vblank thread */
+            g_flip.on_tick = 1;
+            g_flip.deadline_ns = m->b ? m->b : now_ns();
+            pthread_cond_broadcast(&g_cond);
+        } else if (g_early)
             schedule_tick_locked(); /* the pending flip may have waited for this latch */
         break;
     case CHAM_FRAME_QUEUED:
@@ -376,10 +402,6 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         g_win_w = CHAM_CONFIG_WIDTH(m);
         g_win_h = CHAM_CONFIG_HEIGHT(m);
         input_post(m); /* the touchpad's positions are fractions of it (evdev.c) */
-        break;
-    case CHAM_INPUT:
-    case CHAM_CLIPBOARD_OFFER:
-        input_post(m);
         break;
     }
 }
@@ -414,6 +436,14 @@ static void *reader_main(void *arg)
             int fd = -1;
             if (cham_recv(s, &m, &fd) <= 0)
                 break;
+            if (m.type == CHAM_INPUT || m.type == CHAM_CLIPBOARD_OFFER) {
+                /* for the input thread, in order with WINDOW and CONFIG
+                 * (this thread posts those too); nothing here needs g_lock */
+                input_post(&m);
+                if (fd >= 0)
+                    close(fd);
+                continue;
+            }
             pthread_mutex_lock(&g_lock);
             handle_msg_locked(&m, &fd);
             pthread_mutex_unlock(&g_lock);

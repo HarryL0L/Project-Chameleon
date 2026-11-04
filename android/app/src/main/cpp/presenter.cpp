@@ -72,6 +72,16 @@ struct PoolBuf {
     uint64_t serial = 0;    // guards against callbacks for a reallocated slot
 };
 
+// The producer's connection. Messages go out under g_send_lock alone,
+// which only keeps g_client open while one is sent; a SOCK_SEQPACKET message
+// goes whole, so senders on several threads don't interleave. Input (UI
+// thread) and Android's latch callbacks (binder threads) don't wait for the
+// presenting work below. Both are changed under g_lock and g_send_lock, in
+// that order, and may be read under either.
+std::mutex g_send_lock;
+int g_client = -1;
+std::atomic<uint64_t> g_client_gen{0};  // bumped per connection; stale callbacks are dropped
+
 // All state below is guarded by g_lock. SurfaceFlinger completion callbacks
 // arrive on binder threads, surface events on the UI thread, protocol
 // messages on the server thread.
@@ -79,8 +89,6 @@ std::mutex g_lock;
 ASurfaceControl *g_sc = nullptr;
 int32_t g_width = 0, g_height = 0, g_refresh_mhz = 60000;
 int32_t g_window_width = 0, g_window_height = 0;  // the whole window, also under the keyboard
-int g_client = -1;
-uint64_t g_client_gen = 0;  // bumped per connection; stale callbacks are dropped
 Buffer g_buffers[kMaxBuffers];
 int64_t g_displayed = -1;   // buffer id currently latched on g_sc
 float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
@@ -138,14 +146,22 @@ SetOnCommitFn set_on_commit()
     return fn;
 }
 
-void send_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, int fd = -1)
+// To connection `gen` only (0: the current one), if it is still there.
+void send_msg(uint32_t type, uint32_t id, uint64_t a, uint64_t b, int fd = -1, uint64_t gen = 0)
 {
-    if (g_client < 0)
+    std::lock_guard<std::mutex> lock(g_send_lock);
+    if (g_client < 0 || (gen && gen != g_client_gen))
         return;
     cham_msg msg{type, id, a, b};
     int rc = cham_send(g_client, &msg, fd);
     if (rc < 0)
         LOGE("send type %u failed: %s", type, strerror(-rc));
+}
+
+// The same, for code holding g_lock.
+void send_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, int fd = -1)
+{
+    send_msg(type, id, a, b, fd);
 }
 
 void send_config_locked()
@@ -182,11 +198,7 @@ void on_commit(void *context, ASurfaceTransactionStats *stats)
 {
     auto *ctx = static_cast<FrameCtx *>(context);
     int64_t latch = ASurfaceTransactionStats_getLatchTime(stats);
-    {
-        std::lock_guard<std::mutex> lock(g_lock);
-        if (ctx->gen == g_client_gen)
-            send_locked(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch);
-    }
+    send_msg(CHAM_FRAME_DONE, 0, ctx->frame, (uint64_t)latch, -1, ctx->gen);  // the page flip's analogue: no waiting
     unref(ctx);
 }
 
@@ -685,8 +697,11 @@ void serve(int client, int arrivals)
 {
     {
         std::lock_guard<std::mutex> lock(g_lock);
-        g_client = client;
-        g_client_gen++;
+        {
+            std::lock_guard<std::mutex> send_lock(g_send_lock);
+            g_client = client;
+            g_client_gen++;
+        }
         g_displayed = -1;
         g_copy_mode = false;
         send_config_locked();
@@ -795,8 +810,11 @@ void serve(int client, int arrivals)
 done:
     {
         std::lock_guard<std::mutex> lock(g_lock);
-        g_client = -1;
-        g_client_gen++;
+        {
+            std::lock_guard<std::mutex> send_lock(g_send_lock);
+            g_client = -1;  // before close(client) below: no send reaches a reused fd
+            g_client_gen++;
+        }
         g_displayed = -1;
         g_screen_off = false;
         for (uint32_t i = 0; i < kMaxBuffers; i++)
@@ -1006,12 +1024,12 @@ Java_io_github_harryl0l_chameleon_ClipboardShare_nativeClipboardOffer(JNIEnv *, 
 }
 
 // Touch, pointer and key events for the producer (CHAM_INPUT); dropped when
-// no producer is connected.
+// no producer is connected. Not under g_lock: input never waits for a frame
+// being presented.
 JNIEXPORT void JNICALL
 Java_io_github_harryl0l_chameleon_InputSender_nativeSendInput(JNIEnv *, jclass, jint kind, jlong a, jlong b)
 {
-    std::lock_guard<std::mutex> lock(g_lock);
-    send_locked(CHAM_INPUT, (uint32_t)kind, (uint64_t)a, (uint64_t)b);
+    send_msg(CHAM_INPUT, (uint32_t)kind, (uint64_t)a, (uint64_t)b);
 }
 
 }  // extern "C"

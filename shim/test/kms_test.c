@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
@@ -69,6 +70,19 @@ static volatile int g_stop_presenter;
  * cleared), the app is frozen (presents get no answer), the app's connection
  * drops, the app sends a CONFIG with these flags (-1: none). */
 static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
+static volatile int g_slow_copy_ms; /* the "blit" fence of a RELEASE signals this late */
+
+static void *signal_later(void *arg) /* a GPU copy finishing: {eventfd, after ms} */
+{
+    int efd = ((int *)arg)[0], ms = ((int *)arg)[1];
+    free(arg);
+    usleep((useconds_t)ms * 1000);
+    uint64_t one = 1;
+    if (write(efd, &one, sizeof one) != sizeof one)
+        perror("eventfd");
+    close(efd);
+    return NULL;
+}
 /* Like the app, the stub holds each buffer it was sent until BUFFER_REMOVE
  * or the connection ends: g_held of them now. */
 #define STUB_SLOTS 64
@@ -186,11 +200,24 @@ static void *presenter_main(void *arg)
             }
         } else if (m.type == CHAM_PRESENT && !g_frozen) {
             g_presents++;
+            int slow_copy_ms = g_slow_copy_ms;
             struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
             cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
             usleep(8333);
             struct cham_msg rel = {CHAM_RELEASE, (uint32_t)m.id, 0, 0};
-            cham_send(c, &rel, -1); /* copy mode: released right after the "blit" */
+            int fence = -1;
+            if (slow_copy_ms) { /* with the blit's fence, still running */
+                fence = eventfd(0, EFD_CLOEXEC);
+                int *arg = malloc(2 * sizeof *arg);
+                arg[0] = dup(fence);
+                arg[1] = slow_copy_ms;
+                pthread_t t;
+                pthread_create(&t, NULL, signal_later, arg);
+                pthread_detach(t);
+            }
+            cham_send(c, &rel, fence); /* copy mode: released right after the "blit" */
+            if (fence >= 0)
+                close(fence);
             (void)displayed;
             displayed = m.id;
             if (g_hold_latch) {
@@ -233,6 +260,25 @@ static void *calls_main(void *arg) /* a thread in card calls while another forks
     int fd = (int)(intptr_t)arg;
     while (!g_stop_calls)
         drmModeFreeResources(drmModeGetResources(fd));
+    return NULL;
+}
+
+static volatile int g_stop_probe;
+static double g_probe_max_ms;
+
+static void *probe_main(void *arg) /* card requests while a flip waits: how long each takes */
+{
+    int fd = (int)(intptr_t)arg;
+    while (!g_stop_probe) {
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        drmModeFreeResources(drmModeGetResources(fd));
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        double ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6;
+        if (ms > g_probe_max_ms)
+            g_probe_max_ms = ms;
+        usleep(2000);
+    }
     return NULL;
 }
 
@@ -721,6 +767,31 @@ int main(int argc, char **argv)
     g_frozen = 0;
     flip_to(fd, plane_id, p_fb, fbs[0]);
     CHECK(wait_flip(fd, 100), "the app answers again: flips complete at once");
+
+    /* The flip waits for the copy's fence, as a display engine completes a
+     * flip only when scanout is done with the old buffer; the compositor's
+     * other requests don't wait with it. */
+    printf("a slow copy\n");
+    pthread_t probe;
+    g_probe_max_ms = 0;
+    g_stop_probe = 0;
+    pthread_create(&probe, NULL, probe_main, (void *)(intptr_t)fd);
+    g_slow_copy_ms = 80;
+    t = now_ns();
+    flip_to(fd, plane_id, p_fb, fbs[2]); /* its copy is still running when the app releases it */
+    ok = wait_flip(fd, 300);
+    g_slow_copy_ms = 0;
+    if (ok && ms_since(t) < 70) { /* completed before the release came: the next flip waits */
+        flip_to(fd, plane_id, p_fb, fbs[0]);
+        ok = wait_flip(fd, 300);
+    }
+    ms = ms_since(t);
+    g_stop_probe = 1;
+    pthread_join(probe, NULL);
+    CHECK(ok && ms > 75, "a flip after the release completes once that copy is done (%.0f ms)", ms);
+    CHECK(g_probe_max_ms < 20, "other card requests meanwhile don't wait for it (longest %.1f ms)", g_probe_max_ms);
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    CHECK(wait_flip(fd, 100), "copies done at once again: flips complete at once");
 
     printf("app reconnects\n");
     int added = g_buffers_added, accepts = g_accepts;

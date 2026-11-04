@@ -706,14 +706,14 @@ void cham_bo_unlock(struct cham_bo *bo)
         ahb.unlock(bo->ahb, NULL);
 }
 
-void bo_wait_release_fences_locked(void)
+int bo_take_release_fences_locked(int *fences, int max)
 {
-    for (struct cham_bo *bo = g_bos; bo; bo = bo->next) {
-        if (bo->release_fence < 0)
-            continue;
-        struct pollfd pfd = {bo->release_fence, POLLIN, 0};
-        poll(&pfd, 1, 100);
-        close(bo->release_fence);
-        bo->release_fence = -1;
+    int n = 0;
+    for (struct cham_bo *bo = g_bos; bo && n < max; bo = bo->next) {
+        if (bo->release_fence >= 0) {
+            fences[n++] = bo->release_fence;
+            bo->release_fence = -1;
+        }
     }
+    return n;
 }

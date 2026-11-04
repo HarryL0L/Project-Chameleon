@@ -18,8 +18,9 @@ uint64_t now_ns(void);
 /* ---- ahb.c ---- */
 void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
-/* Waits (briefly) for every pending presenter release fence. */
-void bo_wait_release_fences_locked(void);
+/* Takes every pending presenter release fence (up to max) for the caller
+ * to wait on and close. */
+int bo_take_release_fences_locked(int *fences, int max);
 /* An AHardwareBuffer sent by another process (clients.c, card.c). */
 AHardwareBuffer *ahb_recv(int sock);
 /* The bo for a buffer another process sent (card.c), one per buffer however

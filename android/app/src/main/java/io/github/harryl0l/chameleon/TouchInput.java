@@ -42,8 +42,23 @@ final class TouchInput implements View.OnTouchListener, View.OnGenericMotionList
         return e.isFromSource(InputDevice.SOURCE_MOUSE) && e.getToolType(0) == MotionEvent.TOOL_TYPE_MOUSE;
     }
 
+    /**
+     * Android hands an app touch and mouse motion in batches, once per display
+     * frame; the desktop should get each event when it happens, as from evdev
+     * hardware, not in bursts timed with the frames it draws. Unbuffered
+     * dispatch for every pointer source of `v` (Android 11+; on Android 10
+     * onTouch asks per gesture).
+     */
+    static void unbuffered(View v) {
+        if (Build.VERSION.SDK_INT >= 30)
+            v.requestUnbufferedDispatch(InputDevice.SOURCE_CLASS_POINTER | InputDevice.SOURCE_CLASS_POSITION
+                    | InputDevice.SOURCE_CLASS_TRACKBALL);
+    }
+
     @Override
     public boolean onTouch(View v, MotionEvent e) {
+        if (Build.VERSION.SDK_INT < 30 && e.getActionMasked() == MotionEvent.ACTION_DOWN)
+            v.requestUnbufferedDispatch(e);
         if (isMouse(e))
             return mouse(v, e);
         fingers(v, e, mFingersTo);

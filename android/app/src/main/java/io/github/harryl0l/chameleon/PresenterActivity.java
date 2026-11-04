@@ -159,6 +159,7 @@ public class PresenterActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
+        TouchInput.unbuffered(view);
         // KWin draws its own cursor in the frames; Android's would be a second one.
         view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
@@ -184,6 +185,7 @@ public class PresenterActivity extends Activity
         // view usually holds the focus, else the surface.
         view.setOnCapturedPointerListener(mTouch);
         mImeView.setOnCapturedPointerListener(mTouch);
+        TouchInput.unbuffered(mImeView);
         FrameLayout root = new FrameLayout(this);
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
