@@ -46,9 +46,23 @@ void link_start(void);
  * window's size is 0x0 from an app that doesn't report it. */
 int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, uint32_t *win_width,
                      uint32_t *win_height, int timeout_ms);
-/* Shows `bo` (acquire fence borrowed, may be -1). Returns 1 if the presenter
- * will answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
+/* Shows `bo` (acquire fence borrowed, may be -1); NULL leaves the frame on
+ * screen as it is (only the cursor changed). Returns 1 if the presenter will
+ * answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
+/* The app shows a cursor plane (it said so in its first CONFIG), unless
+ * CHAMELEON_CURSOR_PLANE=0/1 says otherwise. */
+int link_app_cursor(void);
+/* The cursor plane as committed, shown with the next present: bo NULL hides
+ * it; new_image: its FB_ID was set (copy it again). Takes over fence. */
+struct link_cursor {
+    struct cham_bo *bo;
+    int new_image;
+    int32_t x, y;               /* top left on the screen */
+    uint32_t src_x, src_y, w, h; /* the part of the buffer shown, pixels */
+    int fence;
+};
+void link_cursor_locked(const struct link_cursor *c);
 void link_forget_bo_locked(struct cham_bo *bo);
 /* Tells the presenter the compositor turned its screen off (1) or on (0). */
 void link_screen_off_locked(int off);

@@ -31,6 +31,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
@@ -107,6 +108,24 @@ int64_t g_pool_last = -1;
 uint64_t g_pool_last_serial = 0;
 uint64_t g_pool_last_gen = 0;
 uint64_t g_pool_serial = 0;
+int32_t g_frame_width = 0, g_frame_height = 0;  // the producer's last frame, for placing the cursor
+
+// The producer's cursor plane (CHAM_CURSOR): a layer of its own over the
+// frame, so the pointer moves without a new frame. Its image is copied into
+// a small pool of ours, as frames are (the producer reuses its buffer after
+// the next page flip), and only when it changes.
+constexpr int kCursorPoolSize = 3;  // shown + one being released + the new copy
+ASurfaceControl *g_cursor_sc = nullptr;
+struct CursorState {
+    uint32_t id = CHAM_CURSOR_HIDE;
+    int32_t x = 0, y = 0;
+    uint64_t rect = 0;
+    int fence = -1;
+};
+CursorState g_cursor;           // as the producer last said
+bool g_cursor_dirty = false;    // ...and not shown yet
+PoolBuf g_cursor_pool[kCursorPoolSize];
+int64_t g_cursor_shown = -1;    // pool index on g_cursor_sc
 
 // libandroid.so functions newer than minSdk 29, or null.
 template <class Fn>
@@ -169,7 +188,7 @@ void send_config_locked()
     uint64_t size = (uint64_t)(uint32_t)g_width | ((uint64_t)(uint32_t)g_height << 32);
     if (!g_sc)
         size = 0;
-    uint32_t flags = set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0;
+    uint32_t flags = (set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0) | CHAM_CONFIG_CURSOR;
     if (size && g_window_width > 0 && g_window_height > 0)
         send_locked(CHAM_WINDOW, 0,
                     (uint64_t)(uint32_t)g_window_width | ((uint64_t)(uint32_t)g_window_height << 32), 0);
@@ -186,6 +205,8 @@ struct FrameCtx {
     std::atomic<int> refs;  // one per registered callback
     bool copy = false;       // id/prev are pool indices
     uint64_t serial = 0;     // pool serial of `prev`
+    int64_t cursor_prev = -1;   // the cursor pool buffer this transaction replaced
+    uint64_t cursor_serial = 0; // ...its serial
 };
 
 void unref(FrameCtx *ctx)
@@ -209,18 +230,28 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
     int release_fence = -1;
     ASurfaceControl **controls = nullptr;
     size_t count = 0;
+    int cursor_fence = -1;
     ASurfaceTransactionStats_getASurfaceControls(stats, &controls, &count);
     for (size_t i = 0; i < count; i++) {
-        if (controls[i] == ctx->sc) {
+        if (controls[i] == ctx->sc && release_fence < 0)
             release_fence = ASurfaceTransactionStats_getPreviousReleaseFenceFd(stats, controls[i]);
-            break;
-        }
+        else if (ctx->cursor_prev >= 0 && controls[i] != ctx->sc && cursor_fence < 0)
+            cursor_fence = ASurfaceTransactionStats_getPreviousReleaseFenceFd(stats, controls[i]);
     }
     ASurfaceTransactionStats_releaseASurfaceControls(controls);
     int64_t latch = ASurfaceTransactionStats_getLatchTime(stats);
 
     if (ctx->copy) {
         std::lock_guard<std::mutex> lock(g_lock);
+        // ...and the cursor image it replaced.
+        if (ctx->cursor_prev >= 0 && g_cursor_pool[ctx->cursor_prev].serial == ctx->cursor_serial) {
+            PoolBuf &p = g_cursor_pool[ctx->cursor_prev];
+            p.held = false;
+            if (p.release_fence >= 0)
+                close(p.release_fence);
+            p.release_fence = cursor_fence;
+            cursor_fence = -1;
+        }
         // The pool buffer this frame replaced is ours again once the fence signals.
         if (ctx->prev >= 0 && ctx->prev != ctx->id && g_pool[ctx->prev].serial == ctx->serial) {
             PoolBuf &p = g_pool[ctx->prev];
@@ -244,6 +275,8 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
     }
     if (release_fence >= 0)
         close(release_fence);
+    if (cursor_fence >= 0)
+        close(cursor_fence);
     unref(ctx);
 }
 
@@ -448,17 +481,17 @@ void pool_free_locked(PoolBuf &p)
     p = PoolBuf{};
 }
 
-// Returns a pool index we may draw into at the current surface size, or -1.
-int pool_acquire_locked()
+// Returns an index of `pool` we may draw into at w x h in `format`, or -1.
+int pool_acquire_in(PoolBuf *pool, int n, int32_t w, int32_t h, uint32_t format)
 {
     int empty = -1, stale = -1;
-    for (int i = 0; i < kPoolSize; i++) {
-        PoolBuf &p = g_pool[i];
+    for (int i = 0; i < n; i++) {
+        PoolBuf &p = pool[i];
         if (!p.ahb) {
             if (empty < 0)
                 empty = i;
         } else if (!p.held) {
-            if (p.width == g_width && p.height == g_height)
+            if (p.width == w && p.height == h)
                 return i;
             if (stale < 0)
                 stale = i;
@@ -467,24 +500,97 @@ int pool_acquire_locked()
     int i = empty >= 0 ? empty : stale;
     if (i < 0)
         return -1;
-    pool_free_locked(g_pool[i]);
-    PoolBuf &p = g_pool[i];
+    pool_free_locked(pool[i]);
+    PoolBuf &p = pool[i];
     AHardwareBuffer_Desc desc{};
-    desc.width = (uint32_t)g_width;
-    desc.height = (uint32_t)g_height;
+    desc.width = (uint32_t)w;
+    desc.height = (uint32_t)h;
     desc.layers = 1;
-    desc.format = AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM;
+    desc.format = format;
     desc.usage = AHARDWAREBUFFER_USAGE_GPU_SAMPLED_IMAGE | AHARDWAREBUFFER_USAGE_GPU_COLOR_OUTPUT |
                  AHARDWAREBUFFER_USAGE_COMPOSER_OVERLAY;
     if (AHardwareBuffer_allocate(&desc, &p.ahb) != 0 || !wrap_ahb(p.ahb, &p.image, &p.tex, &p.fbo)) {
-        LOGE("copy mode: cannot allocate a %dx%d pool buffer", g_width, g_height);
+        LOGE("copy mode: cannot allocate a %dx%d pool buffer", w, h);
         pool_free_locked(p);
         return -1;
     }
-    p.width = g_width;
-    p.height = g_height;
+    p.width = w;
+    p.height = h;
     p.serial = ++g_pool_serial;
     return i;
+}
+
+// A frame buffer at the current surface size.
+int pool_acquire_locked()
+{
+    return pool_acquire_in(g_pool, kPoolSize, g_width, g_height, AHARDWAREBUFFER_FORMAT_R8G8B8X8_UNORM);
+}
+
+// Puts the producer's cursor plane as it last said on g_cursor_sc in `txn`
+// (copying its image if it changed): where it is in the frame, placed and
+// clipped like the frame on the surface.
+void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
+{
+    if (!g_cursor_dirty || !g_cursor_sc)
+        return;
+    g_cursor_dirty = false;
+    CursorState &c = g_cursor;
+    int fence = c.fence;
+    c.fence = -1;
+    uint32_t slot = c.id & ~CHAM_CURSOR_NEW;
+    Buffer *buf = c.id != CHAM_CURSOR_HIDE && slot < kMaxBuffers && g_buffers[slot].ahb ? &g_buffers[slot] : nullptr;
+    // Where it goes: the frame's pixels x0..x1, y0..y1 (the part on the frame).
+    int32_t w = (int32_t)CHAM_CURSOR_RECT_W(c.rect), h = (int32_t)CHAM_CURSOR_RECT_H(c.rect);
+    Placement pl = place(g_frame_width, g_frame_height, g_width, g_height);
+    int64_t x0 = std::max<int64_t>(c.x, pl.src.left), y0 = std::max<int64_t>(c.y, pl.src.top);
+    int64_t x1 = std::min<int64_t>((int64_t)c.x + w, pl.src.right), y1 = std::min<int64_t>((int64_t)c.y + h, pl.src.bottom);
+    if (!buf || x0 >= x1 || y0 >= y1 || pl.src.right <= pl.src.left || pl.src.bottom <= pl.src.top) {
+        if (fence >= 0)
+            close(fence);
+        ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+        return;
+    }
+    if ((c.id & CHAM_CURSOR_NEW) || g_cursor_shown < 0) {
+        int pi = pool_acquire_in(g_cursor_pool, kCursorPoolSize, buf->width, buf->height,
+                                 AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
+        if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
+            if (fence >= 0)
+                close(fence);
+            ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+            return;
+        }
+        PoolBuf &p = g_cursor_pool[pi];
+        gpu_wait(p.release_fence);  // SurfaceFlinger is done with it
+        p.release_fence = -1;
+        gpu_wait(fence);            // the producer finished drawing the cursor
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, buf->fbo);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p.fbo);
+        glBlitFramebuffer(0, 0, buf->width, buf->height, 0, 0, p.width, p.height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        int blit_fence = gpu_fence();
+        send_locked(CHAM_RELEASE, slot, 0, 0, blit_fence);  // the producer's buffer is free once copied
+        ASurfaceTransaction_setBuffer(txn, g_cursor_sc, p.ahb, blit_fence);  // takes ownership
+        ctx->cursor_prev = g_cursor_shown;
+        ctx->cursor_serial = g_cursor_shown >= 0 ? g_cursor_pool[g_cursor_shown].serial : 0;
+        p.held = true;
+        g_cursor_shown = pi;
+    } else if (fence >= 0) {
+        close(fence);
+    }
+    // The frame's pixels to the surface's, as the frame is placed.
+    auto sx = [&](int64_t v) {
+        return (int32_t)(pl.dst.left + (v - pl.src.left) * (pl.dst.right - pl.dst.left) / (pl.src.right - pl.src.left));
+    };
+    auto sy = [&](int64_t v) {
+        return (int32_t)(pl.dst.top + (v - pl.src.top) * (pl.dst.bottom - pl.dst.top) / (pl.src.bottom - pl.src.top));
+    };
+    int32_t bx = (int32_t)CHAM_CURSOR_RECT_X(c.rect) + (int32_t)(x0 - c.x);
+    int32_t by = (int32_t)CHAM_CURSOR_RECT_Y(c.rect) + (int32_t)(y0 - c.y);
+    ARect src{bx, by, bx + (int32_t)(x1 - x0), by + (int32_t)(y1 - y0)};
+    ARect dst{sx(x0), sy(y0), sx(x1), sy(y1)};
+    ASurfaceTransaction_setGeometry(txn, g_cursor_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
+    ASurfaceTransaction_setBufferTransparency(txn, g_cursor_sc, ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT);
+    ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
 }
 
 void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
@@ -498,6 +604,8 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     PoolBuf &p = g_pool[pi];
     g_stats.shown++;
     g_stats.copied++;
+    g_frame_width = buf->width;
+    g_frame_height = buf->height;
     gpu_wait(p.release_fence);  // SurfaceFlinger finished scanning it out
     p.release_fence = -1;
     gpu_wait(fence);            // the producer finished rendering
@@ -542,6 +650,7 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     uint64_t prev_serial = prev >= 0 ? g_pool[prev].serial : 0;
     auto *ctx = new FrameCtx{g_client_gen, g_sc, (uint32_t)pi, prev, frame, commit, {commit ? 2 : 1}, true, prev_serial};
     g_pool_displayed = pi;
+    apply_cursor_locked(txn, ctx);  // in the same transaction: the pointer moves with the frame
     if (commit)
         set_on_commit()(txn, ctx, on_commit);
     ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
@@ -581,11 +690,40 @@ void reshow_last_locked()
     LOGI("showing the last frame again until KWin draws a new one");
 }
 
+// PRESENT(CHAM_PRESENT_UNCHANGED): only the cursor changed. The frame on
+// screen stays; the cursor's change still completes like a page flip.
+void present_unchanged_locked(uint64_t frame, int fence)
+{
+    if (fence >= 0)
+        close(fence);
+    if (!g_copy_mode || !g_sc || g_pool_displayed < 0 || !gl_init()) {
+        skip_frame_locked(CHAM_PRESENT_UNCHANGED, frame, -1);
+        return;
+    }
+    ASurfaceTransaction *txn = ASurfaceTransaction_create();
+    // The frame's layer is part of it, so the transaction's callbacks report
+    // its latch even if the cursor didn't change after all.
+    ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
+    bool commit = set_on_commit() != nullptr;
+    auto *ctx = new FrameCtx{g_client_gen, g_sc, (uint32_t)g_pool_displayed, -1, frame, commit, {commit ? 2 : 1}, true, 0};
+    apply_cursor_locked(txn, ctx);
+    if (commit)
+        set_on_commit()(txn, ctx, on_commit);
+    ASurfaceTransaction_setOnComplete(txn, ctx, on_complete);
+    ASurfaceTransaction_apply(txn);
+    ASurfaceTransaction_delete(txn);
+    send_locked(CHAM_FRAME_QUEUED, 0, frame, (uint64_t)mono_ns());
+}
+
 void present(uint32_t id, uint64_t frame, int fence)
 {
     std::lock_guard<std::mutex> lock(g_lock);
     g_stats.presents++;
     stats_log_locked();
+    if (id == CHAM_PRESENT_UNCHANGED) {
+        present_unchanged_locked(frame, fence);
+        return;
+    }
     Buffer *buf = id < kMaxBuffers ? &g_buffers[id] : nullptr;
     if (!g_sc || !buf || !buf->ahb) {
         // Nothing to show on: hand the buffer straight back.
@@ -785,6 +923,15 @@ void serve(int client, int arrivals)
                 queue_clipboard(msg.type, msg.a != 0, fd);
             fd = -1;
             break;
+        case CHAM_CURSOR: {
+            std::lock_guard<std::mutex> lock(g_lock);
+            if (g_cursor.fence >= 0)
+                close(g_cursor.fence);
+            g_cursor = CursorState{msg.id, CHAM_INPUT_DX(msg.a), CHAM_INPUT_DY(msg.a), msg.b, fd};
+            g_cursor_dirty = true;
+            fd = -1;
+            break;
+        }
         case CHAM_SCREEN: {
             // KWin's screen went off (idle): show black, not its last frame,
             // and let the activity offer "tap to wake". Its next frame shows
@@ -823,6 +970,10 @@ done:
         // screen after it quit): the status line shows on black instead.
         // The next producer's first frame shows the layer again.
         g_pool_last = -1;
+        if (g_cursor.fence >= 0)
+            close(g_cursor.fence);
+        g_cursor = CursorState{};
+        g_cursor_dirty = true;  // hidden with the next producer's first frame
         if (g_sc) {
             ASurfaceTransaction *txn = ASurfaceTransaction_create();
             ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
@@ -919,8 +1070,11 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceCreated(JNIEnv 
         return;
     ASurfaceControl *sc = ASurfaceControl_createFromWindow(window, "chameleon");
     ANativeWindow_release(window);
+    ASurfaceControl *cursor = sc ? ASurfaceControl_create(sc, "chameleon-cursor") : nullptr;
     std::lock_guard<std::mutex> lock(g_lock);
     g_sc = sc;
+    g_cursor_sc = cursor;
+    g_cursor_dirty = true;  // its image again, with the next frame
     g_displayed = -1;
     g_vote_dirty = true;
     LOGI("surface control %s", sc ? "created" : "FAILED");
@@ -954,6 +1108,13 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceDestroyed(JNIEn
         ASurfaceControl_release(g_sc);
         g_sc = nullptr;
     }
+    if (g_cursor_sc) {
+        ASurfaceControl_release(g_cursor_sc);  // went with its parent
+        g_cursor_sc = nullptr;
+    }
+    for (PoolBuf &p : g_cursor_pool)
+        p.held = false;
+    g_cursor_shown = -1;
     // Detached from the display: SurfaceFlinger drops every pool buffer.
     for (PoolBuf &p : g_pool)
         p.held = false;

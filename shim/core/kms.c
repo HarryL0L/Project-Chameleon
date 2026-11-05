@@ -48,6 +48,7 @@
 #define ID_CRTC 33
 #define ID_PLANE 34
 #define ID_EDID_BLOB 35
+#define ID_CURSOR 36 /* the cursor plane, offered with an app that shows it (link_app_cursor) */
 
 enum {
     P_CONN_CRTC_ID = 100,
@@ -114,21 +115,26 @@ static const uint32_t k_plane_props[] = {P_PLANE_TYPE, P_PLANE_FB_ID, P_PLANE_CR
                                          P_SRC_W, P_SRC_H, P_CRTC_X, P_CRTC_Y, P_CRTC_W, P_CRTC_H,
                                          P_IN_FENCE_FD};
 
+struct plane_state {
+    uint32_t fb;
+    uint32_t crtc;
+    uint32_t src_x, src_y, src_w, src_h; /* 16.16 */
+    int32_t crtc_x, crtc_y;
+    uint32_t crtc_w, crtc_h;
+};
+
 struct kms_state {
     uint32_t conn_crtc;
     uint64_t dpms;
     uint64_t active;
     uint32_t mode_blob;
-    uint32_t fb;
-    uint32_t plane_crtc;
-    uint32_t src_x, src_y, src_w, src_h;
-    int32_t crtc_x, crtc_y;
-    uint32_t crtc_w, crtc_h;
+    struct plane_state primary, cursor;
     int64_t in_fence;
 };
 
 struct fb {
     uint32_t id;
+    uint32_t width, height;
     struct cham_bo *bo; /* holds a ref */
     struct fake_fd *owner; /* the file that created it; NULL once it let go (CLOSEFB) */
     struct fb *next;
@@ -146,6 +152,8 @@ struct blob {
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
 static int g_plane_shown;           /* ...and it fills the active CRTC */
+static struct cham_bo *g_cursor_bo; /* the cursor plane's buffer; holds a ref */
+static int g_has_cursor;            /* the card has a cursor plane */
 static int g_screen_off;            /* The compositor turned its screen off (idle, DPMS) */
 static int g_screen_was_on;         /* ...after it had been on */
 static struct fb *g_fbs;
@@ -259,6 +267,9 @@ static void kms_init(void)
         cham_log("no app yet; using %ux%u @ %.2f Hz (set CHAMELEON_MODE=WxH@Hz to change)", w, h, hz);
     }
     make_mode(w, h, mhz);
+    /* A cursor plane, as GPUs have, if the app can show one (an older app
+     * leaves the compositor drawing its pointer into its frames). */
+    g_has_cursor = link_app_cursor();
     /* The screen is the app's whole window: the surface may start smaller,
      * above the keyboard. */
     if (win_w && win_h)
@@ -336,9 +347,10 @@ static struct blob *blob_find(uint32_t id)
     return NULL;
 }
 
-static uint64_t prop_value(uint32_t prop)
+static uint64_t prop_value(uint32_t obj, uint32_t prop)
 {
     const struct kms_state *s = &g_state;
+    const struct plane_state *p = obj == ID_CURSOR ? &s->cursor : &s->primary;
     switch (prop) {
     case P_CONN_CRTC_ID: return s->conn_crtc;
     case P_CONN_DPMS: return s->dpms;
@@ -346,17 +358,17 @@ static uint64_t prop_value(uint32_t prop)
     case P_CONN_EDID: return ID_EDID_BLOB;
     case P_CRTC_ACTIVE: return s->active;
     case P_CRTC_MODE_ID: return s->mode_blob;
-    case P_PLANE_TYPE: return 1; /* Primary */
-    case P_PLANE_FB_ID: return s->fb;
-    case P_PLANE_CRTC_ID: return s->plane_crtc;
-    case P_SRC_X: return s->src_x;
-    case P_SRC_Y: return s->src_y;
-    case P_SRC_W: return s->src_w;
-    case P_SRC_H: return s->src_h;
-    case P_CRTC_X: return (uint64_t)(int64_t)s->crtc_x;
-    case P_CRTC_Y: return (uint64_t)(int64_t)s->crtc_y;
-    case P_CRTC_W: return s->crtc_w;
-    case P_CRTC_H: return s->crtc_h;
+    case P_PLANE_TYPE: return obj == ID_CURSOR ? 2 : 1; /* Cursor, Primary */
+    case P_PLANE_FB_ID: return p->fb;
+    case P_PLANE_CRTC_ID: return p->crtc;
+    case P_SRC_X: return p->src_x;
+    case P_SRC_Y: return p->src_y;
+    case P_SRC_W: return p->src_w;
+    case P_SRC_H: return p->src_h;
+    case P_CRTC_X: return (uint64_t)(int64_t)p->crtc_x;
+    case P_CRTC_Y: return (uint64_t)(int64_t)p->crtc_y;
+    case P_CRTC_W: return p->crtc_w;
+    case P_CRTC_H: return p->crtc_h;
     case P_IN_FENCE_FD: return (uint64_t)(int64_t)-1;
     }
     return 0;
@@ -373,7 +385,10 @@ static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *coun
         *type = DRM_MODE_OBJECT_CRTC;
         *count = sizeof k_crtc_props / sizeof k_crtc_props[0];
         return k_crtc_props;
-    case ID_PLANE:
+    case ID_CURSOR:
+    case ID_PLANE: /* the same properties */
+        if (obj == ID_CURSOR && !g_has_cursor)
+            return NULL;
         *type = DRM_MODE_OBJECT_PLANE;
         *count = sizeof k_plane_props / sizeof k_plane_props[0];
         return k_plane_props;
@@ -406,7 +421,7 @@ static int get_resources(const struct fake_fd *f, struct drm_mode_card_res *r)
 
 /* An object's properties as `f` sees them (atomic ones only with the
  * atomic client cap): as many as fit, then the count. */
-static int put_props(const struct fake_fd *f, const uint32_t *props, uint32_t n, uint64_t ids_ptr,
+static int put_props(const struct fake_fd *f, uint32_t obj, const uint32_t *props, uint32_t n, uint64_t ids_ptr,
                      uint64_t values_ptr, uint32_t *count)
 {
     uint32_t k = 0;
@@ -414,7 +429,7 @@ static int put_props(const struct fake_fd *f, const uint32_t *props, uint32_t n,
         if ((k_props[props[i] - 100].flags & DRM_MODE_PROP_ATOMIC) && !f->atomic)
             continue;
         if (*count > k) {
-            uint64_t v = prop_value(props[i]);
+            uint64_t v = prop_value(obj, props[i]);
             if (copy_to_user(ids_ptr + k * sizeof props[i], &props[i], sizeof props[i]) ||
                 copy_to_user(values_ptr + k * sizeof v, &v, sizeof v))
                 return -EFAULT;
@@ -444,7 +459,7 @@ static int get_connector(struct fake_fd *f, struct drm_mode_get_connector *c)
         return -EFAULT;
     c->count_modes = 1;
     c->encoder_id = g_state.conn_crtc ? ID_ENCODER : 0; /* the one it drives now */
-    return put_props(f, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
+    return put_props(f, ID_CONNECTOR, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
                      c->prop_values_ptr, &c->count_props);
 }
 
@@ -463,9 +478,9 @@ static int get_crtc(struct drm_mode_crtc *c)
 {
     if (c->crtc_id != ID_CRTC)
         return -ENOENT;
-    c->fb_id = g_state.fb;
-    c->x = g_state.src_x >> 16;
-    c->y = g_state.src_y >> 16;
+    c->fb_id = g_state.primary.fb;
+    c->x = g_state.primary.src_x >> 16;
+    c->y = g_state.primary.src_y >> 16;
     c->gamma_size = 0;
     /* A CRTC with a mode is enabled, active or not (DPMS off keeps it). */
     struct blob *b = blob_find(g_state.mode_blob);
@@ -479,9 +494,9 @@ static int get_crtc(struct drm_mode_crtc *c)
 
 static int get_plane_resources(const struct fake_fd *f, struct drm_mode_get_plane_res *r)
 {
-    static const uint32_t planes[] = {ID_PLANE};
-    /* The one plane is the primary: listed only for universal-planes clients. */
-    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? 1u : 0u);
+    static const uint32_t planes[] = {ID_PLANE, ID_CURSOR};
+    /* The primary and cursor planes: listed only for universal-planes clients. */
+    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? 1u + (g_has_cursor != 0) : 0u);
 }
 
 /* The plane's formats: what gbm allocates (RGBA and BGRA Android buffers),
@@ -500,11 +515,12 @@ static int plane_has_format(uint32_t format)
 
 static int get_plane(struct drm_mode_get_plane *p)
 {
-    if (p->plane_id != ID_PLANE)
+    if (p->plane_id != ID_PLANE && (p->plane_id != ID_CURSOR || !g_has_cursor))
         return -ENOENT;
+    const struct plane_state *ps = p->plane_id == ID_CURSOR ? &g_state.cursor : &g_state.primary;
     const uint32_t n = sizeof k_plane_formats / sizeof k_plane_formats[0];
-    p->crtc_id = g_state.plane_crtc;
-    p->fb_id = g_state.fb;
+    p->crtc_id = ps->crtc;
+    p->fb_id = ps->fb;
     p->possible_crtcs = 1;
     p->gamma_size = 0;
     if (p->count_format_types >= n && copy_to_user(p->format_type_ptr, k_plane_formats, sizeof k_plane_formats))
@@ -523,7 +539,7 @@ static int obj_get_properties(const struct fake_fd *f, struct drm_mode_obj_get_p
         return -EINVAL; /* an object without properties */
     if (!props || (o->obj_type && o->obj_type != type))
         return -ENOENT;
-    return put_props(f, props, n, o->props_ptr, o->prop_values_ptr, &o->count_props);
+    return put_props(f, o->obj_id, props, n, o->props_ptr, o->prop_values_ptr, &o->count_props);
 }
 
 static int get_property(struct drm_mode_get_property *p)
@@ -686,6 +702,8 @@ static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
         return -EINVAL;
     struct fb *fb = calloc(1, sizeof *fb);
     fb->id = g_next_object_id++;
+    fb->width = c->width;
+    fb->height = c->height;
     fb->bo = bo;
     fb->owner = f;
     bo_ref_locked(bo);
@@ -701,7 +719,7 @@ static void free_unused_fbs(void)
 {
     for (struct fb **p = &g_fbs; *p;) {
         struct fb *fb = *p;
-        if (!fb->owner && fb->id != g_state.fb) {
+        if (!fb->owner && fb->id != g_state.primary.fb && fb->id != g_state.cursor.fb) {
             *p = fb->next;
             bo_unref_locked(fb->bo);
             free(fb);
@@ -715,10 +733,20 @@ static void free_unused_fbs(void)
  * file closing): the kernel takes it off the plane; the CRTC stays on. */
 static void plane_drop_fb(uint32_t id)
 {
-    if (!id || g_state.fb != id)
+    if (id && g_state.cursor.fb == id) {
+        g_state.cursor.fb = 0;
+        g_state.cursor.crtc = 0;
+        if (g_cursor_bo)
+            bo_unref_locked(g_cursor_bo);
+        g_cursor_bo = NULL;
+        link_cursor_locked(&(struct link_cursor){.fence = -1}); /* hidden, */
+        if (g_plane_shown)
+            link_present_locked(NULL, -1, 0); /* now, without a page flip */
+    }
+    if (!id || g_state.primary.fb != id)
         return;
-    g_state.fb = 0;
-    g_state.plane_crtc = 0;
+    g_state.primary.fb = 0;
+    g_state.primary.crtc = 0;
     if (g_plane_bo)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = NULL;
@@ -782,10 +810,13 @@ static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
 }
 
 static int g_in_fence = -1; /* our copy of the commit's IN_FENCE_FD, under g_lock */
+static int g_cursor_fence = -1; /* ...the cursor plane's */
 
 /* ---- atomic ---- */
 
-static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v)
+/* Sets a property in `s`; *touched gets the planes it changes (1 primary,
+ * 2 cursor). */
+static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v, int *touched)
 {
     switch (obj) {
     case ID_CONNECTOR:
@@ -808,33 +839,41 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         }
         return -EINVAL;
     case ID_PLANE:
+    case ID_CURSOR: {
+        int cursor = obj == ID_CURSOR;
+        struct plane_state *p = cursor ? &s->cursor : &s->primary;
+        *touched |= cursor ? 2 : 1;
         switch (prop) {
         case P_PLANE_FB_ID:
-            s->fb = (uint32_t)v; /* checked to exist by prop_value_ok */
+            p->fb = (uint32_t)v; /* checked to exist by prop_value_ok */
             return 0;
         case P_PLANE_CRTC_ID:
             if (v != 0 && v != ID_CRTC)
                 return -EINVAL;
-            s->plane_crtc = (uint32_t)v;
+            p->crtc = (uint32_t)v;
             return 0;
-        case P_SRC_X: s->src_x = (uint32_t)v; return 0;
-        case P_SRC_Y: s->src_y = (uint32_t)v; return 0;
-        case P_SRC_W: s->src_w = (uint32_t)v; return 0;
-        case P_SRC_H: s->src_h = (uint32_t)v; return 0;
-        case P_CRTC_X: s->crtc_x = (int32_t)v; return 0;
-        case P_CRTC_Y: s->crtc_y = (int32_t)v; return 0;
-        case P_CRTC_W: s->crtc_w = (uint32_t)v; return 0;
-        case P_CRTC_H: s->crtc_h = (uint32_t)v; return 0;
-        case P_IN_FENCE_FD:
-            if (g_in_fence >= 0)
-                close(g_in_fence);
-            g_in_fence = (int64_t)v >= 0 ? card_fd_get((int)v) : -1;
-            if (g_in_fence < 0 && (int64_t)v >= 0)
+        case P_SRC_X: p->src_x = (uint32_t)v; return 0;
+        case P_SRC_Y: p->src_y = (uint32_t)v; return 0;
+        case P_SRC_W: p->src_w = (uint32_t)v; return 0;
+        case P_SRC_H: p->src_h = (uint32_t)v; return 0;
+        case P_CRTC_X: p->crtc_x = (int32_t)v; return 0;
+        case P_CRTC_Y: p->crtc_y = (int32_t)v; return 0;
+        case P_CRTC_W: p->crtc_w = (uint32_t)v; return 0;
+        case P_CRTC_H: p->crtc_h = (uint32_t)v; return 0;
+        case P_IN_FENCE_FD: {
+            int *fence = cursor ? &g_cursor_fence : &g_in_fence;
+            if (*fence >= 0)
+                close(*fence);
+            *fence = (int64_t)v >= 0 ? card_fd_get((int)v) : -1;
+            if (*fence < 0 && (int64_t)v >= 0)
                 return -EINVAL; /* not an open file */
-            s->in_fence = g_in_fence;
+            if (!cursor)
+                s->in_fence = *fence;
             return 0;
         }
+        }
         return -EINVAL;
+    }
     }
     return -ENOENT;
 }
@@ -929,6 +968,7 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     } while (0)
 
     uint64_t k = 0;
+    int touched = 0;
     for (uint32_t i = 0; i < a->count_objs; i++) {
         uint32_t obj, count, type, nprops;
         if (copy_from_user(&obj, a->objs_ptr + i * sizeof obj, sizeof obj))
@@ -950,7 +990,7 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
                 REFUSE(-ENOENT, "object %u has no property %u", obj, prop);
             if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
                 return -EFAULT;
-            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v) : -EINVAL;
+            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, &touched) : -EINVAL;
             if (ret)
                 REFUSE(ret, "object %u property %u = %llu", obj, prop, (unsigned long long)v);
         }
@@ -974,14 +1014,28 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
      * can't be scanned out); it is accepted but not shown, since the app
      * shows whole buffers - the previous frame stays until a full one comes. */
     int partial = 0;
-    if (s.fb && !s.plane_crtc)
+    const struct plane_state *pp = &s.primary, *cp = &s.cursor;
+    if ((pp->fb && !pp->crtc) || (cp->fb && !cp->crtc))
         REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
-    if (s.plane_crtc && !s.fb)
+    if ((pp->crtc && !pp->fb) || (cp->crtc && !cp->fb))
         REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
     /* A plane on a CRTC that is off or has no mode stays attached, unseen. */
-    if (s.fb && on)
-        partial = s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
-                  (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay;
+    if (pp->fb && on)
+        partial = pp->crtc_x > 0 || pp->crtc_y > 0 || (int64_t)pp->crtc_x + pp->crtc_w < mode->hdisplay ||
+                  (int64_t)pp->crtc_y + pp->crtc_h < mode->vdisplay;
+    /* The cursor plane, as vkms's: any size and position (off the screen
+     * too), part of its framebuffer, no scaling (drm_atomic_plane_check,
+     * then the helper's check with DRM_PLANE_NO_SCALING). */
+    if (cp->fb) {
+        const struct fb *cfb = fb_find(cp->fb);
+        uint64_t fw = (uint64_t)cfb->width << 16, fh = (uint64_t)cfb->height << 16;
+        if ((int64_t)cp->crtc_x + cp->crtc_w > INT32_MAX || (int64_t)cp->crtc_y + cp->crtc_h > INT32_MAX)
+            REFUSE(-ERANGE, "cursor at %d,%d size %ux%u", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h);
+        if (cp->src_w > fw || cp->src_x > fw - cp->src_w || cp->src_h > fh || cp->src_y > fh - cp->src_h)
+            REFUSE(-ENOSPC, "cursor source outside its framebuffer");
+        if (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16)
+            REFUSE(-ERANGE, "cursor scaled");
+    }
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
         if (!s.active && !g_state.active) /* an event for turning it off is fine */
             REFUSE(-EINVAL, "page-flip event with the CRTC off");
@@ -995,13 +1049,23 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     /* Commit. The kernel doesn't take ownership of IN_FENCE_FD either. */
     int in_fence = (int)s.in_fence;
     s.in_fence = -1;
-    struct fb *fb = s.fb ? fb_find(s.fb) : NULL;
+    struct fb *fb = pp->fb ? fb_find(pp->fb) : NULL;
     struct cham_bo *bo = fb ? fb->bo : NULL;
     if (bo)
         bo_ref_locked(bo);
     if (g_plane_bo)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = bo;
+    /* A compositor draws a new cursor image into another buffer (the shown
+     * one is being scanned out), so a new framebuffer is a new image. */
+    int cursor_new = cp->fb != g_state.cursor.fb;
+    struct fb *cfb = cp->fb ? fb_find(cp->fb) : NULL;
+    struct cham_bo *cbo = cfb ? cfb->bo : NULL;
+    if (cbo)
+        bo_ref_locked(cbo);
+    if (g_cursor_bo)
+        bo_unref_locked(g_cursor_bo);
+    g_cursor_bo = cbo;
     g_state = s;
     free_destroyed_blobs();
     free_unused_fbs(); /* a closed framebuffer the plane just let go of */
@@ -1024,8 +1088,23 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     uint64_t frame = ++g_frame;
     int presented = 0;
     g_plane_shown = bo && on && s.dpms == 0 && !partial;
+    if (g_has_cursor) {
+        /* The app shows it over the frame, from the next present on. */
+        struct link_cursor c = {.fence = -1};
+        if (cbo && on && s.dpms == 0)
+            c = (struct link_cursor){cbo, cursor_new, g_state.cursor.crtc_x, g_state.cursor.crtc_y,
+                                     g_state.cursor.src_x >> 16, g_state.cursor.src_y >> 16, g_state.cursor.crtc_w,
+                                     g_state.cursor.crtc_h, g_cursor_fence};
+        else if (g_cursor_fence >= 0)
+            close(g_cursor_fence);
+        g_cursor_fence = -1; /* the link's now */
+        link_cursor_locked(&c);
+    }
+    /* A commit of the cursor alone leaves the frame on screen as it is (the
+     * app needn't copy it again). */
+    int cursor_only = (touched & 3) == 2 && !modeset;
     if (g_plane_shown)
-        presented = link_present_locked(bo, in_fence, frame);
+        presented = link_present_locked(cursor_only ? NULL : bo, in_fence, frame);
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
         link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, mode_mhz(mode));
     return 0;
@@ -1036,7 +1115,9 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
     int ret = commit(f, a);
     if (g_in_fence >= 0)
         close(g_in_fence); /* the caller's fence stays the caller's */
-    g_in_fence = -1;
+    if (g_cursor_fence >= 0)
+        close(g_cursor_fence);
+    g_in_fence = g_cursor_fence = -1;
     return ret;
 }
 
@@ -1053,8 +1134,8 @@ static int get_cap(struct drm_get_cap *c)
     case DRM_CAP_PRIME: c->value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; return 0;
     case DRM_CAP_TIMESTAMP_MONOTONIC: c->value = 1; return 0;
     case DRM_CAP_ASYNC_PAGE_FLIP: c->value = 0; return 0;
-    case DRM_CAP_CURSOR_WIDTH: c->value = 64; return 0;
-    case DRM_CAP_CURSOR_HEIGHT: c->value = 64; return 0;
+    case DRM_CAP_CURSOR_WIDTH: c->value = 512; return 0; /* as vkms: the app shows any size */
+    case DRM_CAP_CURSOR_HEIGHT: c->value = 512; return 0;
     /* Gralloc picks the layout (maybe AFBC); expose implicit modifiers only. */
     case DRM_CAP_ADDFB2_MODIFIERS: c->value = 0; return 0;
     case DRM_CAP_PAGE_FLIP_TARGET: c->value = 0; return 0;

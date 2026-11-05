@@ -71,6 +71,11 @@ static volatile int g_stop_presenter;
  * drops, the app sends a CONFIG with these flags (-1: none). */
 static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
 static volatile int g_slow_copy_ms; /* the "blit" fence of a RELEASE signals this late */
+static volatile int g_no_latch; /* FRAME_DONE says -1: Android latched nothing (nothing changed) */
+/* The cursor plane as the app last heard it (CHAM_CURSOR), and how often. */
+static volatile uint32_t g_cursor_id;
+static volatile uint64_t g_cursor_a, g_cursor_b;
+static volatile int g_cursor_msgs, g_unchanged_presents;
 
 static void *signal_later(void *arg) /* a GPU copy finishing: {eventfd, after ms} */
 {
@@ -141,7 +146,7 @@ static void *presenter_main(void *arg)
     g_accepts++;
     for (int i = 0; i < STUB_SLOTS; i++)
         g_held_fd[i] = -1;
-    struct cham_msg cfg = {CHAM_CONFIG, 0, 1080ull | (1800ull << 32), 120000};
+    struct cham_msg cfg = {CHAM_CONFIG, CHAM_CONFIG_CURSOR, 1080ull | (1800ull << 32), 120000}; /* as the app */
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
     uint64_t held = 0; /* the newest frame Android holds, 0 for none */
@@ -198,11 +203,25 @@ static void *presenter_main(void *arg)
                 g_held_fd[m.id] = -1;
                 g_held--;
             }
+        } else if (m.type == CHAM_CURSOR) {
+            g_cursor_id = m.id;
+            g_cursor_a = m.a;
+            g_cursor_b = m.b;
+            g_cursor_msgs++;
+            if (m.id != CHAM_CURSOR_HIDE && (m.id & CHAM_CURSOR_NEW)) { /* copied: the app is done with it */
+                struct cham_msg rel = {CHAM_RELEASE, m.id & ~CHAM_CURSOR_NEW, 0, 0};
+                cham_send(c, &rel, -1);
+            }
         } else if (m.type == CHAM_PRESENT && !g_frozen) {
             g_presents++;
+            g_unchanged_presents += m.id == CHAM_PRESENT_UNCHANGED;
             int slow_copy_ms = g_slow_copy_ms;
             struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
             cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
+            if (g_no_latch) { /* answered before that tick */
+                struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, UINT64_MAX};
+                cham_send(c, &done, -1);
+            }
             usleep(8333);
             struct cham_msg rel = {CHAM_RELEASE, (uint32_t)m.id, 0, 0};
             int fence = -1;
@@ -224,6 +243,8 @@ static void *presenter_main(void *arg)
                 held = m.a;
                 continue;
             }
+            if (g_no_latch)
+                continue; /* answered already */
             struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, now_ns()};
             cham_send(c, &done, -1);
         }
@@ -449,8 +470,8 @@ int main(int argc, char **argv)
 
     printf("objects\n");
     drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
-    CHECK(pres && pres->count_planes == 1, "one plane");
-    uint32_t plane_id = pres ? pres->planes[0] : 0;
+    CHECK(pres && pres->count_planes == 2, "two planes (the app shows a cursor plane)");
+    uint32_t plane_id = pres ? pres->planes[0] : 0, cursor_id = pres && pres->count_planes > 1 ? pres->planes[1] : 0;
     drmModeFreePlaneResources(pres);
     drmModePlane *plane = drmModeGetPlane(fd, plane_id);
     CHECK(plane && plane->count_formats == 4 && plane->formats[0] == DRM_FORMAT_XRGB8888 &&
@@ -733,7 +754,7 @@ int main(int argc, char **argv)
     CHECK(late && ms > 200 && ms < 400, "...until the watchdog completes it (%.0f ms)", ms);
     g_hold_latch = 0;
     usleep(150000);
-    g_send_flags = CHAM_CONFIG_BACK_PRESSURE;
+    g_send_flags = CHAM_CONFIG_BACK_PRESSURE | CHAM_CONFIG_CURSOR;
     usleep(150000);
     flip_to(fd, plane_id, p_fb, fbs[2]);
     wait_flip(fd, 100);
@@ -750,7 +771,7 @@ int main(int argc, char **argv)
     CHECK(!early && late, "...a third waits (%.0f ms)", ms_since(t));
     g_hold_latch = 0;
     usleep(150000);
-    g_send_flags = 0;
+    g_send_flags = CHAM_CONFIG_CURSOR;
     usleep(150000);
 
     /* A flip needs the frame before it copied, not its own: the first one
@@ -792,6 +813,17 @@ int main(int argc, char **argv)
     CHECK(g_probe_max_ms < 20, "other card requests meanwhile don't wait for it (longest %.1f ms)", g_probe_max_ms);
     flip_to(fd, plane_id, p_fb, fbs[1]);
     CHECK(wait_flip(fd, 100), "copies done at once again: flips complete at once");
+
+    /* A commit that changes nothing Android shows (e.g. the cursor plane set
+     * to where it already is) latches nothing; Android's latch time is -1. */
+    printf("nothing latched\n");
+    g_no_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    ok = wait_flip(fd, 100);
+    g_no_latch = 0;
+    CHECK(ok, "a flip whose frame latched nothing (latch time -1) completes at once");
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "...and the next one too");
 
     printf("app reconnects\n");
     int added = g_buffers_added, accepts = g_accepts;
@@ -858,6 +890,119 @@ int main(int argc, char **argv)
     CHECK(last.st_ino && fds_anywhere(last.st_dev, last.st_ino) == 0, "a dropped buffer is freed everywhere (%d fds)",
           fds_anywhere(last.st_dev, last.st_ino));
 
+    /* A cursor plane as vkms has one (shim/test/refvm.sh): the app shows it
+     * over the frame, and a commit of the cursor alone leaves the frame as
+     * it is. */
+    printf("cursor plane\n");
+    {
+        uint64_t ctype = 0, cap_w = 0, cap_h = 0;
+        prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "type", &ctype);
+        drmModePlane *cpl = drmModeGetPlane(fd, cursor_id);
+        int argb = 0;
+        for (uint32_t i = 0; cpl && i < cpl->count_formats; i++)
+            argb |= cpl->formats[i] == DRM_FORMAT_ARGB8888;
+        CHECK(ctype == 2 && cpl && cpl->possible_crtcs == 1 && argb, "the second is a Cursor plane, ARGB8888, crtc mask 1");
+        drmModeFreePlane(cpl);
+        CHECK(drmGetCap(fd, DRM_CAP_CURSOR_WIDTH, &cap_w) == 0 && drmGetCap(fd, DRM_CAP_CURSOR_HEIGHT, &cap_h) == 0 &&
+                  cap_w == 512 && cap_h == 512,
+              "cursor size 512x512, as vkms");
+        const char *names[] = {"FB_ID", "CRTC_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H", "SRC_X", "SRC_Y", "SRC_W", "SRC_H"};
+        uint32_t cp[10];
+        for (int i = 0; i < 10; i++)
+            cp[i] = prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, names[i], NULL);
+        struct gbm_bo *cbo = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR | GBM_BO_USE_RENDERING);
+        int dmabuf = cbo ? gbm_bo_get_fd(cbo) : -1;
+        uint32_t ch = 0, cfb = 0;
+        drmPrimeFDToHandle(fd, dmabuf, &ch);
+        close(dmabuf);
+        uint32_t handles[4] = {ch}, pitches[4] = {cbo ? gbm_bo_get_stride(cbo) : 0}, offsets[4] = {0};
+        CHECK(drmModeAddFB2(fd, 64, 64, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &cfb, 0) == 0, "a 64x64 ARGB cursor");
+        drmCloseBufferHandle(fd, ch);
+#define CURSOR(req, fb, x, y, w, h, sw, sh)                                                              \
+    do {                                                                                                 \
+        uint64_t v[10] = {(fb), (fb) ? crtc_id : 0, (uint64_t)(int64_t)(x), (uint64_t)(int64_t)(y), (w), (h), \
+                          0, 0, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16};                          \
+        for (int i_ = 0; i_ < 10; i_++)                                                                  \
+            drmModeAtomicAddProperty((req), cursor_id, cp[i_], v[i_]);                                  \
+    } while (0)
+        const uint32_t flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, test = DRM_MODE_ATOMIC_TEST_ONLY;
+        int msgs = g_cursor_msgs, unchanged = g_unchanged_presents;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[1]);
+        CURSOR(req, cfb, 100, 120, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == 100 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 120 && CHAM_CURSOR_RECT_W(g_cursor_b) == 64 &&
+                  CHAM_CURSOR_RECT_H(g_cursor_b) == 64 && g_unchanged_presents == unchanged,
+              "with a frame: the app gets the new cursor image at 100,120, then the frame");
+        msgs = g_cursor_msgs;
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, -20, 300, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && !(g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == -20 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 300 && g_unchanged_presents == unchanged + 1,
+              "the cursor alone moved (partly off the screen): no new image, the frame stays, the flip completes");
+        msgs = g_cursor_msgs;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)-20);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0;
+        errno = 0;
+        int busy = drmModeAtomicCommit(fd, req, flip, NULL) != 0 && errno == EBUSY;
+        ok = ok && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && busy && g_cursor_msgs == msgs && g_unchanged_presents == unchanged + 2,
+              "a commit that changes nothing: no message, flip completes; another while it's pending: EBUSY");
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 1060, 1790, 64, 64, 64, 64);
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) == 0, "past the screen's corner: ok");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 10, 10, 32, 32, 64, 64);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ERANGE, "scaled: ERANGE (no scaling, as vkms)");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 10, 10, 32, 32, 32, 32);
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) == 0, "part of the buffer: ok");
+        drmModeAtomicAddProperty(req, cursor_id, cp[6], 48ull << 16);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ENOSPC, "...past its edge: ENOSPC");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, cursor_id, cp[1], 0);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == EINVAL, "a framebuffer without a CRTC: EINVAL");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        CURSOR(req, 0, 0, 0, 0, 0, 0, 0);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "cursor off: the app hides it");
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 5, 5, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        ok = ok && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE;
+        msgs = g_cursor_msgs;
+        unchanged = g_unchanged_presents;
+        drmModeRmFB(fd, cfb);
+        usleep(20000);
+        uint64_t cfb_now = 9;
+        prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &cfb_now);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE && g_cursor_msgs == msgs + 1 && g_unchanged_presents == unchanged + 1 &&
+                  cfb_now == 0,
+              "RMFB of the cursor's framebuffer takes it off the plane: the app hides it at once");
+#undef CURSOR
+        gbm_bo_destroy(cbo);
+    }
+
     printf("second producer takes over\n");
     accepts = g_accepts;
     int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -907,7 +1052,7 @@ int main(int argc, char **argv)
     CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 3) != 0 && errno == EINVAL, "atomic cap 3: EINVAL");
     CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "atomic cap on the second file");
     pres = drmModeGetPlaneResources(fd2);
-    CHECK(pres && pres->count_planes == 1, "...which lists the plane");
+    CHECK(pres && pres->count_planes == 2, "...which lists the planes");
     drmModeFreePlaneResources(pres);
     req = drmModeAtomicAlloc();
     drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);

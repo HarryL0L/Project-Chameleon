@@ -34,7 +34,7 @@ static uint64_t g_gen;              /* bumped per presenter connection */
 static struct cham_bo *g_slots[MAX_SLOTS];
 static uint32_t g_cfg_w, g_cfg_h;
 static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
-static uint32_t g_first_w, g_first_h, g_first_mhz; /* ...and what it said */
+static uint32_t g_first_w, g_first_h, g_first_mhz, g_first_flags; /* ...and what it said */
 static uint32_t g_win_w, g_win_h, g_first_win_w, g_first_win_h; /* the app's whole window (CHAM_WINDOW) */
 static pthread_cond_t g_cond;
 static int g_replaced;              /* another producer took the app over */
@@ -109,6 +109,13 @@ static const char *socket_path(void)
     const char *p = getenv("CHAMELEON_SOCKET");
     return p ? p : CHAM_SOCKET_PATH;
 }
+
+/* The cursor plane as last committed, and whether the presenter has it. */
+static struct link_cursor g_cursor = {.fence = -1};
+static int g_cursor_sent;
+static uint64_t g_cursor_gen;
+static int g_cfg_cursor;            /* this app shows it (CHAM_CONFIG_CURSOR) */
+static void send_cursor_locked(int new_image, int fence);
 
 static void timespec_at(struct timespec *ts, uint64_t ns)
 {
@@ -275,6 +282,33 @@ static int send_msg_locked(uint32_t type, uint32_t id, uint64_t a, uint64_t b, i
     return g_sock >= 0 ? cham_send(g_sock, &msg, fd) : -ENOTCONN;
 }
 
+/* The presenter's id for `bo`, registered with it now if it has none on this
+ * connection; -1 if that fails. */
+static int slot_locked(struct cham_bo *bo)
+{
+    if (bo->slot >= 0 && bo->slot_gen == g_gen)
+        return bo->slot;
+    int slot = -1;
+    for (int i = 0; i < MAX_SLOTS; i++) {
+        if (!g_slots[i]) {
+            slot = i;
+            break;
+        }
+    }
+    if (slot < 0) {
+        cham_log("presenter buffer table full");
+        return -1;
+    }
+    if (send_msg_locked(CHAM_BUFFER_ADD, (uint32_t)slot, 0, 0, -1) < 0 || ahb_send(bo->ahb, g_sock) != 0) {
+        cham_log("cannot send buffer to the presenter");
+        return -1;
+    }
+    g_slots[slot] = bo;
+    bo->slot = slot;
+    bo->slot_gen = g_gen;
+    return slot;
+}
+
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
 {
     g_stats.commits++;
@@ -282,29 +316,66 @@ int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
         g_stats.not_shown++;
         return 0;
     }
-    if (bo->slot < 0 || bo->slot_gen != g_gen) {
-        int slot = -1;
-        for (int i = 0; i < MAX_SLOTS; i++) {
-            if (!g_slots[i]) {
-                slot = i;
-                break;
-            }
-        }
-        if (slot < 0) {
-            cham_log("presenter buffer table full");
-            return 0;
-        }
-        if (send_msg_locked(CHAM_BUFFER_ADD, (uint32_t)slot, 0, 0, -1) < 0 || ahb_send(bo->ahb, g_sock) != 0) {
-            cham_log("cannot send buffer to the presenter");
-            return 0;
-        }
-        g_slots[slot] = bo;
-        bo->slot = slot;
-        bo->slot_gen = g_gen;
-    }
-    int ok = send_msg_locked(CHAM_PRESENT, (uint32_t)bo->slot, frame, now_ns(), in_fence) == 0;
+    int slot = bo ? slot_locked(bo) : (int)CHAM_PRESENT_UNCHANGED;
+    if (bo && slot < 0)
+        return 0;
+    int ok = send_msg_locked(CHAM_PRESENT, (uint32_t)slot, frame, now_ns(), in_fence) == 0;
     g_stats.presented += ok;
     return ok;
+}
+
+int link_app_cursor(void)
+{
+    const char *env = getenv("CHAMELEON_CURSOR_PLANE");
+    if (env && *env)
+        return *env == '1';
+    pthread_mutex_lock(&g_lock);
+    int yes = g_cfg_seen && (g_first_flags & CHAM_CONFIG_CURSOR);
+    pthread_mutex_unlock(&g_lock);
+    return yes;
+}
+
+/* Sends the cursor plane's state (g_cursor) to the presenter; new_image: it
+ * must copy the buffer again. Takes over fence. */
+static void send_cursor_locked(int new_image, int fence)
+{
+    struct cham_msg m = {CHAM_CURSOR, CHAM_CURSOR_HIDE, 0, 0};
+    g_cursor_sent = 0;
+    if (!g_cfg_cursor) { /* an app without it (CHAMELEON_CURSOR_PLANE=1) doesn't know the message */
+        if (fence >= 0)
+            close(fence);
+        return;
+    }
+    if (g_cursor.bo) {
+        new_image |= g_cursor.bo->slot < 0 || g_cursor.bo->slot_gen != g_gen || g_cursor_gen != g_gen;
+        int slot = g_sock >= 0 ? slot_locked(g_cursor.bo) : -1;
+        m.id = slot < 0 ? CHAM_CURSOR_HIDE : (uint32_t)slot | (new_image ? CHAM_CURSOR_NEW : 0);
+        m.a = CHAM_INPUT_DELTA(g_cursor.x, g_cursor.y);
+        m.b = CHAM_CURSOR_RECT(g_cursor.src_x, g_cursor.src_y, g_cursor.w, g_cursor.h);
+    }
+    if (g_sock >= 0 && cham_send(g_sock, &m, fence) == 0) {
+        g_cursor_sent = 1;
+        g_cursor_gen = g_gen;
+    }
+    if (fence >= 0)
+        close(fence);
+}
+
+void link_cursor_locked(const struct link_cursor *c)
+{
+    const struct link_cursor *o = &g_cursor;
+    int same = c->bo == o->bo && !c->new_image &&
+               (!c->bo || (c->x == o->x && c->y == o->y && c->src_x == o->src_x && c->src_y == o->src_y &&
+                           c->w == o->w && c->h == o->h));
+    int new_image = c->new_image || c->bo != o->bo;
+    g_cursor = *c;
+    g_cursor.fence = -1;
+    if (same && g_cursor_sent && g_cursor_gen == g_gen) {
+        if (c->fence >= 0)
+            close(c->fence);
+        return;
+    }
+    send_cursor_locked(new_image, c->fence);
 }
 
 void link_screen_off_locked(int off)
@@ -314,6 +385,8 @@ void link_screen_off_locked(int off)
 
 void link_forget_bo_locked(struct cham_bo *bo)
 {
+    if (g_cursor.bo == bo)
+        g_cursor.bo = NULL; /* the plane let go of it already */
     if (bo->slot >= 0 && bo->slot_gen == g_gen) {
         g_slots[bo->slot] = NULL;
         send_msg_locked(CHAM_BUFFER_REMOVE, (uint32_t)bo->slot, 0, 0, -1);
@@ -343,11 +416,13 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         g_cfg_w = CHAM_CONFIG_WIDTH(m);
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
         g_back_pressure = !!(m->id & CHAM_CONFIG_BACK_PRESSURE);
+        g_cfg_cursor = !!(m->id & CHAM_CONFIG_CURSOR);
         if (g_cfg_w && g_cfg_h && !g_cfg_seen) {
             g_cfg_seen = 1;
             g_first_w = g_cfg_w;
             g_first_h = g_cfg_h;
             g_first_mhz = (uint32_t)m->b;
+            g_first_flags = m->id;
             g_first_win_w = g_win_w;
             g_first_win_h = g_win_h;
         }
@@ -360,8 +435,10 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
          * background) and draws nothing new if nothing changes. Frame 0
          * completes no page flip. */
         struct cham_bo *shown = !had_surface && g_cfg_w && g_cfg_h ? kms_screen_bo_locked() : NULL;
-        if (shown)
+        if (shown) {
+            send_cursor_locked(1, -1); /* a new surface: the cursor's image again too */
             link_present_locked(shown, -1, 0);
+        }
         break;
     }
     case CHAM_RELEASE:
@@ -373,19 +450,24 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             *fd = -1;
         }
         break;
-    case CHAM_FRAME_DONE:
-        if (m->b)
-            g_latch_ns = m->b;
+    case CHAM_FRAME_DONE: {
+        /* b: when Android latched it; 0 if skipped. A transaction that changed
+         * nothing on screen latches nothing, and Android reports -1 for it: a
+         * time that isn't in the past is no latch time. */
+        uint64_t now = now_ns(), latch = m->b <= now ? m->b : 0;
+        if (latch)
+            g_latch_ns = latch;
         if (m->a > g_latched_frame)
-            g_latched_frame = m->a; /* latched, or skipped (b = 0): not waiting in Android */
+            g_latched_frame = m->a; /* latched, or skipped: not waiting in Android */
         if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame) {
             /* latched: complete it now, on the vblank thread */
             g_flip.on_tick = 1;
-            g_flip.deadline_ns = m->b ? m->b : now_ns();
+            g_flip.deadline_ns = latch ? latch : now;
             pthread_cond_broadcast(&g_cond);
         } else if (g_early)
             schedule_tick_locked(); /* the pending flip may have waited for this latch */
         break;
+    }
     case CHAM_FRAME_QUEUED:
         if (m->a > g_copied_frame)
             g_copied_frame = m->a;

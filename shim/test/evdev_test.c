@@ -567,6 +567,11 @@ int main(void)
           conn ? conn->mmHeight : 0);
     drmModeFreeConnector(conn);
     drmModeFreeResources(res);
+    drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
+    CHECK(pres && pres->count_planes == 1, "an app that doesn't show a cursor plane: the primary plane only (%d)",
+          pres ? (int)pres->count_planes : -1);
+    drmModeFreePlaneResources(pres);
     cham_send(c, &cfg, -1); /* the same window again: nothing changed */
     CHECK(poll(&mp, 1, 300) == 0, "the same size again: no uevent");
     struct pollfd ip = {udev_monitor_get_fd(input_mon), POLLIN, 0};

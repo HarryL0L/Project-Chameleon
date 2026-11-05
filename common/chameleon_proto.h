@@ -38,6 +38,12 @@ enum cham_msg_type {
                                    a = 1: a password manager marked it secret */
     CHAM_CLIPBOARD_REQUEST = 7, /* a desktop app pastes the presenter's text: fd = pipe to
                                    write it into (UTF-8), then close */
+    CHAM_CURSOR = 8,        /* the cursor plane (only to a presenter that set CHAM_CONFIG_CURSOR),
+                               shown over the frame from the next PRESENT on:
+                               id = buffer | CHAM_CURSOR_NEW (its image may have changed: copy it
+                               again), or CHAM_CURSOR_HIDE; a = x | y << 32, where its top left goes
+                               in the frame (signed pixels, CHAM_INPUT_DELTA's packing); b = the part
+                               of the buffer shown, CHAM_CURSOR_RECT; fd = acquire fence (optional) */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),
@@ -130,6 +136,24 @@ enum cham_input_kind {
  * presenter queues (API 31) instead of dropping one that arrives before the
  * previous was latched, so the producer may have two frames waiting. */
 #define CHAM_CONFIG_BACK_PRESSURE 1u
+/* CHAM_CONFIG_CURSOR: the presenter shows a cursor plane (CHAM_CURSOR) as a
+ * layer of its own over the frame, so the compositor's pointer moves without
+ * a new frame. */
+#define CHAM_CONFIG_CURSOR 2u
+
+/* PRESENT id: the frame on screen stays as it is (only the cursor changed). */
+#define CHAM_PRESENT_UNCHANGED 0xffffffffu
+
+/* CHAM_CURSOR id flags and its buffer rectangle (pixels, 16 bits each). */
+#define CHAM_CURSOR_NEW 0x80000000u
+#define CHAM_CURSOR_HIDE 0xffffffffu
+#define CHAM_CURSOR_RECT(x, y, w, h) \
+    ((uint64_t)((x) & 0xffffu) | (uint64_t)((y) & 0xffffu) << 16 | (uint64_t)((w) & 0xffffu) << 32 | \
+     (uint64_t)((h) & 0xffffu) << 48)
+#define CHAM_CURSOR_RECT_X(v) ((uint32_t)((v) & 0xffffu))
+#define CHAM_CURSOR_RECT_Y(v) ((uint32_t)((v) >> 16 & 0xffffu))
+#define CHAM_CURSOR_RECT_W(v) ((uint32_t)((v) >> 32 & 0xffffu))
+#define CHAM_CURSOR_RECT_H(v) ((uint32_t)((v) >> 48 & 0xffffu))
 
 struct cham_msg {
     uint32_t type;

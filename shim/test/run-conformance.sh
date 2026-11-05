@@ -31,7 +31,8 @@ mkdir -p "$OUT/vm" "$OUT/runtime" "$OUT/runtime-kms" && chmod 700 "$OUT/runtime"
 # The devices' service, as the launcher starts it (it exits with this
 # script): one with the evdev probe's stub app, one with no app.
 XDG_RUNTIME_DIR="$OUT/runtime" CHAMELEON_SOCKET="$OUT/presenter" "$OUT/chameleon-kernel" $$ 2>/dev/null
-XDG_RUNTIME_DIR="$OUT/runtime-kms" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMELEON_WAIT=0 "$OUT/chameleon-kernel" $$ \
+XDG_RUNTIME_DIR="$OUT/runtime-kms" CHAMELEON_SOCKET="$OUT/presenter-none" CHAMELEON_WAIT=0 CHAMELEON_CURSOR_PLANE=1 \
+    "$OUT/chameleon-kernel" $$ \
     2>/dev/null
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/probe" shim/test/evdev_conformance.c
 cc -O1 -Wall -Wextra -static -DREF_KERNEL -o "$OUT/vm/kms_probe" shim/test/kms_conformance.c
