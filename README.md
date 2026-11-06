@@ -13,6 +13,17 @@
   <a href="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml"><img src="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml/badge.svg" alt="Build"></a>
 </p>
 
+> [!NOTE]
+> **This is the experimental branch.** New work lands here first and is
+> tested on real phones before it reaches
+> [`main`](https://github.com/HarryL0L/Project-Chameleon/tree/main), so things
+> can change or break between commits. `main` has the older state and gets
+> these changes when this branch is merged into it.
+
+<p align="center">
+  <img src="branding/mascot.gif" width="360" alt="Pixel-art chameleon next to a Wayland-style disc">
+</p>
+
 ---
 
 Chameleon gives Linux graphics software in Termux what it expects from a PC
