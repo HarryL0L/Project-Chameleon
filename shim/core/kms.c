@@ -941,6 +941,46 @@ int kms_screen_off_locked(void)
     return g_screen_off;
 }
 
+/* A commit's four lists. The kernel reads them entry by entry with
+ * get_user(); for us each read crosses into the caller (process_vm_readv),
+ * so they are read whole first when they are of a sane size. If that fails
+ * (a bad pointer somewhere), the entries are read one by one as before, so
+ * errors come in the kernel's order (an unknown object before a bad address
+ * further on). */
+#define LIST_OBJS 64
+#define LIST_PROPS 512
+struct commit_lists {
+    int whole; /* read at once: the arrays below hold them */
+    uint32_t objs[LIST_OBJS], counts[LIST_OBJS], props[LIST_PROPS];
+    uint64_t values[LIST_PROPS];
+};
+
+static void read_lists(const struct drm_mode_atomic *a, struct commit_lists *l)
+{
+    l->whole = 0;
+    uint32_t n = a->count_objs;
+    if (n > LIST_OBJS || copy_from_user(l->objs, a->objs_ptr, n * sizeof l->objs[0]) ||
+        copy_from_user(l->counts, a->count_props_ptr, n * sizeof l->counts[0]))
+        return;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < n; i++)
+        total += l->counts[i];
+    if (total > LIST_PROPS || copy_from_user(l->props, a->props_ptr, total * sizeof l->props[0]) ||
+        copy_from_user(l->values, a->prop_values_ptr, total * sizeof l->values[0]))
+        return;
+    l->whole = 1;
+}
+
+/* List entry i: from the lists read whole, else from the caller. */
+static int list_u32(const struct commit_lists *l, const uint32_t *whole, uint64_t ptr, uint64_t i, uint32_t *v)
+{
+    if (l->whole) {
+        *v = whole[i];
+        return 0;
+    }
+    return copy_from_user(v, ptr + i * sizeof *v, sizeof *v);
+}
+
 static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (!f->atomic)
@@ -967,28 +1007,32 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
         return (err);                                                                    \
     } while (0)
 
+    struct commit_lists lists, *l = &lists; /* ~7 KB on the caller's thread */
+    read_lists(a, l);
     uint64_t k = 0;
     int touched = 0;
     for (uint32_t i = 0; i < a->count_objs; i++) {
         uint32_t obj, count, type, nprops;
-        if (copy_from_user(&obj, a->objs_ptr + i * sizeof obj, sizeof obj))
+        if (list_u32(l, l->objs, a->objs_ptr, i, &obj))
             return -EFAULT;
         const uint32_t *obj_props = object_props(obj, &type, &nprops);
         if (!obj_props)
             REFUSE(-ENOENT, "object %u has no properties", obj);
-        if (copy_from_user(&count, a->count_props_ptr + i * sizeof count, sizeof count))
+        if (list_u32(l, l->counts, a->count_props_ptr, i, &count))
             return -EFAULT;
         for (uint32_t j = 0; j < count; j++, k++) {
             uint32_t prop;
             uint64_t v;
-            if (copy_from_user(&prop, a->props_ptr + k * sizeof prop, sizeof prop))
+            if (list_u32(l, l->props, a->props_ptr, k, &prop))
                 return -EFAULT;
             uint32_t m = 0;
             while (m < nprops && obj_props[m] != prop)
                 m++;
             if (m == nprops)
                 REFUSE(-ENOENT, "object %u has no property %u", obj, prop);
-            if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
+            if (l->whole)
+                v = l->values[k];
+            else if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
                 return -EFAULT;
             int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, &touched) : -EINVAL;
             if (ret)

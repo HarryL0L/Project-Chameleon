@@ -347,6 +347,13 @@ int main(void)
     result("ACTIVE = 2", commit(fd, t, 1, &g_crtc, &one, &p_active, &v2, 0));
     result("NULL objects pointer, 1 object", commit(fd, t, 1, NULL, &one, &p_fb, &v_fb, 0));
     result("nothing (0 objects)", commit(fd, t, 0, NULL, NULL, NULL, NULL, 0));
+    /* Which error a bad pointer gives depends on what was read before it. */
+    const void *bad = (const void *)8;
+    result("unknown object, bad other pointers", commit(fd, t, 1, &unknown, bad, bad, bad, 0));
+    result("bad values pointer", commit(fd, t, 1, &g_plane, &one, &p_fb, bad, 0));
+    result("a property the object lacks, bad values pointer", commit(fd, t, 1, &g_crtc, &one, &p_fb, bad, 0));
+    uint32_t two_objs[2] = {g_plane, unknown}, two_counts[2] = {1, 1}, two_props[2] = {p_fb, p_fb};
+    result("an unknown object after a bad values pointer", commit(fd, t, 2, two_objs, two_counts, two_props, bad, 0));
     result("LIST_LESSEES pad set", ioctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &(struct drm_mode_list_lessees){.pad = 1}));
 
     printf("== framebuffer lifetime, CRTC states\n");
@@ -363,6 +370,19 @@ int main(void)
         values[4 + i] = plane_values[i];
     }
     result("modeset showing fb1", commit(fd, DRM_MODE_ATOMIC_ALLOW_MODESET, 3, objs, counts, props, values, 0));
+    /* Long lists (fb1 is shown: setting it again changes nothing). */
+    static uint32_t many_props[600];
+    static uint64_t many_values[600];
+    for (int i = 0; i < 600; i++) {
+        many_props[i] = p_fb;
+        many_values[i] = fb1;
+    }
+    uint32_t n_many = 600, n_some = 100;
+    result("the same property 600 times", commit(fd, t, 1, &g_plane, &n_many, many_props, many_values, 0));
+    result("the same property 100 times", commit(fd, t, 1, &g_plane, &n_some, many_props, many_values, 0));
+    many_props[99] = p_active;
+    result("100 properties, the last one the object lacks",
+           commit(fd, t, 1, &g_plane, &n_some, many_props, many_values, 0));
     printf("== cursor plane\n");
     cursor_checks(fd);
     result("CLOSEFB fb1 (on screen)", ioctl(fd, DRM_IOCTL_MODE_CLOSEFB, &(struct drm_mode_closefb){.fb_id = fb1}));
