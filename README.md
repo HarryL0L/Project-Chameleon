@@ -13,6 +13,17 @@
   <a href="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml"><img src="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml/badge.svg" alt="Build"></a>
 </p>
 
+> [!NOTE]
+> **This branch is out of date.** Development happens on the
+> [`experimental`](https://github.com/HarryL0L/Project-Chameleon/tree/experimental)
+> branch and the feature branches that merge into it; `main` stays behind
+> until `experimental` is merged into it.
+> The progress card below is a snapshot of the roadmap, not a live status.
+
+<p align="center">
+  <img src="branding/roadmap.gif" width="100%" alt="Project Chameleon roadmap: kernel service, GPU render node and Firefox acceleration done; smooth pointer in progress; Glamor, screen sharing, any GPU driver, Vulkan and release planned">
+</p>
+
 ---
 
 Chameleon gives Linux graphics software in Termux what it expects from a PC
