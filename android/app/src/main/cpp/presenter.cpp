@@ -277,6 +277,13 @@ void on_complete(void *context, ASurfaceTransactionStats *stats)
         close(release_fence);
     if (cursor_fence >= 0)
         close(cursor_fence);
+    // It signals as the display starts showing the frame: the producer's
+    // vblank ticks follow these vsyncs.
+    int present_fence = ASurfaceTransactionStats_getPresentFenceFd(stats);
+    if (present_fence >= 0) {
+        send_msg(CHAM_PRESENTED, 0, ctx->frame, 0, present_fence, ctx->gen);
+        close(present_fence);
+    }
     unref(ctx);
 }
 

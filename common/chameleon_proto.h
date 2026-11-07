@@ -63,6 +63,10 @@ enum cham_msg_type {
                                the keyboard covers (CONFIG's surface is what it leaves), sent
                                before each CONFIG. The screen's physical size and the touchpad
                                follow it; touchpad positions are fractions of it. */
+    CHAM_PRESENTED = 108,   /* a = frame number; fd = Android's present fence of the transaction
+                               that showed it. It signals as the display starts showing the
+                               frame, so its signal time is a vsync; the producer's vblank
+                               ticks follow these (older producers ignore it, closing the fd). */
 };
 
 /* Input events, presenter -> producer (chameleon-kernel serves them as evdev

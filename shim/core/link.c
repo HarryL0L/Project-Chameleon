@@ -11,12 +11,16 @@
  *   Android latched enough frames (FRAME_DONE), see g_flip; or on a
  *   simulated vblank when nothing is on screen (app closed or paused), so
  *   the compositor keeps running either way.
+ * - Vblank ticks follow the display's vsync, from Android's present fences
+ *   (CHAM_PRESENTED), see "the vsync grid".
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <linux/sync_file.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <time.h>
@@ -54,6 +58,7 @@ static struct {
     int held;                       /* waited for a copy or a latch */
     uint64_t prev_frame, prev2_frame; /* the frames shown before it, if any */
     uint64_t seq;                   /* bumped per queued flip */
+    int grid;                       /* deadline_ns is on the display's vsync grid */
 } g_flip;
 /* Like a display engine, and like VKMS: a flip completes on the first
  * vblank tick after the commit reached the app, which copies the new front
@@ -75,6 +80,7 @@ static uint64_t g_latched_frame;    /* newest frame Android has latched (or skip
 static uint64_t g_copied_frame;     /* newest frame the app has copied (FRAME_QUEUED) */
 static uint64_t g_presented_frame, g_presented_prev; /* newest frames handed to the app */
 static uint32_t g_sequence;
+static uint64_t g_last_flip_ns;     /* the last page-flip event's time */
 
 /* Activity counters, logged every 5 s while something happens. */
 static struct {
@@ -82,6 +88,7 @@ static struct {
     uint64_t wait_sum, wait_max;    /* commit to shown, shown flips */
     unsigned held;                  /* flips that waited for a copy or a latch */
     unsigned second;                /* flips only a second frame in Android let through */
+    unsigned on_vsync;              /* flips on the display's vsync grid */
     uint64_t since;
 } g_stats;
 
@@ -95,10 +102,11 @@ static void stats_maybe_log_locked(void)
     if (g_stats.commits || g_stats.flips) {
         unsigned shown = g_stats.flips - g_stats.simulated;
         cham_log("last 5 s: %u commits, %u presented, %u not shown (no app surface), %u flips (%u simulated); "
-                 "commit to shown %.1f ms avg, %.1f max; %u waited for Android, %u used a second frame there",
+                 "commit to shown %.1f ms avg, %.1f max; %u waited for Android, %u used a second frame there; "
+                 "%u on the display's vsync",
                  g_stats.commits, g_stats.presented, g_stats.not_shown, g_stats.flips, g_stats.simulated,
                  shown ? g_stats.wait_sum / shown / 1e6 : 0.0, g_stats.wait_max / 1e6, g_stats.held,
-                 g_stats.second);
+                 g_stats.second, g_stats.on_vsync);
     }
     memset(&g_stats, 0, sizeof g_stats);
     g_stats.since = now;
@@ -123,6 +131,195 @@ static void timespec_at(struct timespec *ts, uint64_t ns)
     ts->tv_nsec = (long)(ns % 1000000000ull);
 }
 
+/* ---- the vsync grid ---- */
+
+/* A display engine completes flips on its vblanks, so page-flip events are
+ * whole refreshes apart, and compositors plan their frames on that grid.
+ * Android's latch times wander by milliseconds with SurfaceFlinger's load,
+ * so ticks don't follow them directly: the period and phase of the grid
+ * come from Android's present fences, which signal on the display's vsync,
+ * and ticks sit at the point of each refresh where Android latches (the
+ * start of the stretch the recent latches fall in). Without present fences
+ * (an older app) ticks follow the last latch. */
+#define PRESENT_FENCES 4
+#define LATCHES 16
+#define GRID_MAX_AGE_NS 500000000ull     /* older vsyncs and latches aren't used */
+static int g_present_fd[PRESENT_FENCES]; /* not signalled yet, oldest first */
+static int g_present_fds;
+static uint64_t g_vsync_ns;              /* newest vsync seen */
+static uint64_t g_vsync_ref_ns;          /* an older one: the period is measured from it */
+static uint64_t g_vsync_period;          /* measured, 0 until known */
+static uint64_t g_mode_period;           /* the mode's (the compositor's) refresh period */
+static uint64_t g_latches[LATCHES];      /* recent latch times */
+static unsigned g_latch_next;
+static uint64_t g_tick_phase;            /* ticks: at a vsync + this, ... */
+static uint64_t g_tick_phase_period;     /* ...on a grid of this period (0: none yet) */
+
+/* A sync file's signal time: 1 with *ns, 0 if not signalled yet, -1 if it
+ * has none (error, or signalled with an error). */
+static int fence_time(int fd, uint64_t *ns)
+{
+    struct sync_fence_info fi[8];
+    struct sync_file_info info;
+    memset(&info, 0, sizeof info);
+    memset(fi, 0, sizeof fi);
+    info.num_fences = 8;
+    info.sync_fence_info = (uint64_t)(uintptr_t)fi;
+    if (ioctl(fd, SYNC_IOC_FILE_INFO, &info) != 0) {
+#ifdef CHAM_HOST_TEST
+        /* the test's stand-in: a socket that holds the 8-byte time once signalled */
+        struct pollfd p = {fd, POLLIN, 0};
+        if (errno == ENOTTY && poll(&p, 1, 0) == 0)
+            return 0;
+        return errno == ENOTTY && read(fd, ns, sizeof *ns) == (ssize_t)sizeof *ns && *ns ? 1 : -1;
+#endif
+        return -1;
+    }
+    if (info.status <= 0)
+        return info.status == 0 ? 0 : -1;
+    uint64_t t = 0;
+    for (uint32_t i = 0; i < info.num_fences && i < 8; i++)
+        if ((uint64_t)fi[i].timestamp_ns > t)
+            t = (uint64_t)fi[i].timestamp_ns;
+    *ns = t;
+    return t ? 1 : -1;
+}
+
+static void vsync_seen_locked(uint64_t t)
+{
+    uint64_t p = g_mode_period;
+    if (!p || t <= g_vsync_ns)
+        return;
+    if (!g_vsync_ref_ns || t - g_vsync_ref_ns > 4000000000ull)
+        g_vsync_ref_ns = t; /* a fresh start: the mode may have changed meanwhile */
+    else if (t - g_vsync_ref_ns >= 200000000ull) {
+        uint64_t n = (t - g_vsync_ref_ns + p / 2) / p, est = (t - g_vsync_ref_ns) / n;
+        if (est > p - p / 20 && est < p + p / 20)
+            g_vsync_period = est;
+        else
+            g_vsync_ref_ns = t, g_vsync_period = 0; /* the display runs at another rate */
+    }
+    if (!g_vsync_ns)
+        cham_log("vblank ticks follow the display's vsync (Android's present fences)");
+    g_vsync_ns = t;
+}
+
+static void read_present_fences_locked(void)
+{
+    int keep = 0;
+    for (int i = 0; i < g_present_fds; i++) {
+        uint64_t t;
+        int r = fence_time(g_present_fd[i], &t);
+        if (r == 0) {
+            g_present_fd[keep++] = g_present_fd[i];
+            continue;
+        }
+        close(g_present_fd[i]);
+        if (r > 0)
+            vsync_seen_locked(t);
+    }
+    g_present_fds = keep;
+}
+
+static void add_present_fence_locked(int fd)
+{
+    read_present_fences_locked();
+    if (g_present_fds == PRESENT_FENCES) { /* never signalled: drop the oldest */
+        close(g_present_fd[0]);
+        memmove(g_present_fd, g_present_fd + 1, sizeof g_present_fd - sizeof g_present_fd[0]);
+        g_present_fds--;
+    }
+    g_present_fd[g_present_fds++] = fd;
+}
+
+static void close_present_fences_locked(void)
+{
+    for (int i = 0; i < g_present_fds; i++)
+        close(g_present_fd[i]);
+    g_present_fds = 0;
+}
+
+/* t's place in a refresh of period p that starts at `base`, in [0, p). */
+static uint64_t phase_of(uint64_t t, uint64_t base, uint64_t p)
+{
+    int64_t r = (int64_t)(t - base) % (int64_t)p;
+    return (uint64_t)(r < 0 ? r + (int64_t)p : r);
+}
+
+/* The grid: ticks at anchor + k * period. 1: on the display's vsync; 0: on
+ * the last latch (no vsyncs known); -1: none yet. */
+static int grid_locked(uint64_t now, uint64_t *anchor, uint64_t *period)
+{
+    uint64_t p = g_mode_period, v = g_vsync_period;
+    if (v > p - p / 20 && v < p + p / 20)
+        p = v; /* measured, and still the mode's rate */
+    if (p && g_vsync_ns && (now > g_vsync_ns ? now - g_vsync_ns : 0) < GRID_MAX_AGE_NS) {
+        /* where in the refresh the recent latches fall: they come late by
+         * varying amounts, never early, so the stretch they cover starts
+         * after the widest gap between them */
+        uint64_t ph[LATCHES];
+        int n = 0;
+        for (int i = 0; i < LATCHES; i++) {
+            uint64_t l = g_latches[i];
+            if (!l || (l < g_vsync_ns ? g_vsync_ns - l : l - g_vsync_ns) > GRID_MAX_AGE_NS)
+                continue;
+            uint64_t v = phase_of(l, g_vsync_ns, p);
+            int j = n++;
+            for (; j > 0 && ph[j - 1] > v; j--)
+                ph[j] = ph[j - 1];
+            ph[j] = v;
+        }
+        if (n >= 4) {
+            uint64_t start = ph[0], widest = ph[0] + p - ph[n - 1];
+            for (int i = 1; i < n; i++) {
+                if (ph[i] - ph[i - 1] > widest) {
+                    widest = ph[i] - ph[i - 1];
+                    start = ph[i];
+                }
+            }
+            /* Which latches are in the window changes the start a little;
+             * ticks move only to an earlier latch, or when the latches
+             * moved for real (more than 1 ms later). */
+            uint64_t later = phase_of(start, g_tick_phase, p), q = g_tick_phase_period;
+            if (q < p - p / 100 || q > p + p / 100 || later > 1000000) {
+                g_tick_phase = start;
+                g_tick_phase_period = p;
+            }
+            *anchor = g_vsync_ns + g_tick_phase;
+            *period = p;
+            return 1;
+        }
+    }
+    if (g_latch_ns && g_flip.period_ns) {
+        *anchor = g_latch_ns;
+        *period = g_flip.period_ns;
+        return 0;
+    }
+    return -1;
+}
+
+/* The tick a flip completes on: the first after t (nearest: the one nearest
+ * t), and on the vsync grid never at or before the last page flip's. */
+static uint64_t tick_locked(uint64_t t, int nearest)
+{
+    uint64_t a, p;
+    int grid = grid_locked(now_ns(), &a, &p);
+    if (grid < 0 || (grid == 0 && nearest))
+        return t; /* no grid; or as before: at the latch itself */
+    int64_t d = (int64_t)(t - a), k = d / (int64_t)p;
+    if (d < 0 && k * (int64_t)p != d)
+        k--; /* floor */
+    uint64_t tick = a + (uint64_t)(k * (int64_t)p);
+    if (nearest ? t - tick > p / 2 : tick <= t)
+        tick += p;
+    if (grid == 1) {
+        while (g_last_flip_ns && tick < g_last_flip_ns + p / 2)
+            tick += p;
+        g_flip.grid = 1;
+    }
+    return tick;
+}
+
 /* ---- page flips ---- */
 
 static void emit_flip_locked(uint64_t ts_ns)
@@ -139,6 +336,9 @@ static void emit_flip_locked(uint64_t ts_ns)
         cham_log("cannot deliver page-flip event: %s", strerror(errno));
     g_flip.active = 0;
     g_flip.on_tick = g_flip.held = 0;
+    g_last_flip_ns = ts_ns;
+    g_stats.on_vsync += g_flip.grid;
+    g_flip.grid = 0;
     g_stats.flips++;
     g_stats.simulated += g_flip.simulated;
     if (!g_flip.simulated) {
@@ -208,10 +408,9 @@ static void schedule_tick_locked(void)
         return;
     }
     g_stats.second += g_latched_frame < g_flip.prev_frame; /* the previous frame still waits */
-    uint64_t now = now_ns(), p = g_flip.period_ns;
-    uint64_t tick = g_latch_ns && now > g_latch_ns ? g_latch_ns + ((now - g_latch_ns) / p + 1) * p : now;
+    read_present_fences_locked();
     g_flip.on_tick = 1;
-    g_flip.deadline_ns = tick;
+    g_flip.deadline_ns = tick_locked(now_ns(), 0);
     pthread_cond_broadcast(&g_cond);
 }
 
@@ -232,6 +431,13 @@ void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, 
     g_flip.deadline_ns = g_flip.queued_ns + (presented ? 250000000ull : period);
     g_flip.period_ns = period;
     g_flip.on_tick = g_flip.held = 0;
+    g_flip.grid = 0;
+    if (period != g_mode_period) {
+        /* another refresh rate: what was measured at the old one doesn't apply */
+        g_mode_period = period;
+        g_vsync_ref_ns = g_vsync_period = g_tick_phase_period = 0;
+        memset(g_latches, 0, sizeof g_latches);
+    }
     if (presented) {
         g_flip.prev2_frame = g_presented_prev;
         g_flip.prev_frame = g_presented_frame;
@@ -455,14 +661,18 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
          * nothing on screen latches nothing, and Android reports -1 for it: a
          * time that isn't in the past is no latch time. */
         uint64_t now = now_ns(), latch = m->b <= now ? m->b : 0;
-        if (latch)
+        if (latch) {
             g_latch_ns = latch;
+            g_latches[g_latch_next++ % LATCHES] = latch;
+        }
         if (m->a > g_latched_frame)
             g_latched_frame = m->a; /* latched, or skipped: not waiting in Android */
         if (g_flip.active && !g_flip.simulated && m->a >= g_flip.frame) {
-            /* latched: complete it now, on the vblank thread */
+            /* latched: complete it on the tick of that latch (in the past
+             * by now, so at once), on the vblank thread */
+            read_present_fences_locked();
             g_flip.on_tick = 1;
-            g_flip.deadline_ns = latch ? latch : now;
+            g_flip.deadline_ns = latch ? tick_locked(latch, 1) : now;
             pthread_cond_broadcast(&g_cond);
         } else if (g_early)
             schedule_tick_locked(); /* the pending flip may have waited for this latch */
@@ -484,6 +694,12 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         g_win_w = CHAM_CONFIG_WIDTH(m);
         g_win_h = CHAM_CONFIG_HEIGHT(m);
         input_post(m); /* the touchpad's positions are fractions of it (evdev.c) */
+        break;
+    case CHAM_PRESENTED:
+        if (*fd >= 0) {
+            add_present_fence_locked(*fd);
+            *fd = -1;
+        }
         break;
     }
 }
@@ -536,6 +752,7 @@ static void *reader_main(void *arg)
         pthread_mutex_lock(&g_lock);
         g_sock = -1;
         g_cfg_w = g_cfg_h = 0;
+        close_present_fences_locked();
         memset(g_slots, 0, sizeof g_slots);
         if (g_flip.active && !g_flip.simulated) {
             g_flip.simulated = 1;

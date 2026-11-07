@@ -72,10 +72,64 @@ static volatile int g_stop_presenter;
 static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
 static volatile int g_slow_copy_ms; /* the "blit" fence of a RELEASE signals this late */
 static volatile int g_no_latch; /* FRAME_DONE says -1: Android latched nothing (nothing changed) */
+/* A display with its own vsync (VSYNC_PERIOD from g_vsync0): Android latches
+ * a frame VSYNC_LATCH before a vsync, late by up to 3 ms (its load), shows it
+ * on that vsync and sends its present fence (CHAM_PRESENTED). */
+#define VSYNC_PERIOD 8340000ull /* the display's real rate: a little off the mode's 120.00 Hz */
+#define VSYNC_LATCH 3000000ull
+static volatile uint64_t g_vsync0;
 /* The cursor plane as the app last heard it (CHAM_CURSOR), and how often. */
 static volatile uint32_t g_cursor_id;
 static volatile uint64_t g_cursor_a, g_cursor_b;
 static volatile int g_cursor_msgs, g_unchanged_presents;
+
+/* A present fence: {socket, vsync time}; the stand-in reads the time once it
+ * is there (a socket: the reader may have closed it, no SIGPIPE). */
+static void *signal_vsync(void *arg)
+{
+    uint64_t *a = arg, t = a[1];
+    int fd = (int)a[0];
+    free(arg);
+    struct timespec at = {(time_t)(t / 1000000000ull), (long)(t % 1000000000ull)};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL);
+    send(fd, &t, sizeof t, MSG_NOSIGNAL);
+    close(fd);
+    return NULL;
+}
+
+static void sleep_until(uint64_t t)
+{
+    struct timespec at = {(time_t)(t / 1000000000ull), (long)(t % 1000000000ull)};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL);
+}
+
+/* A frame copied now on the display of g_vsync0: latched before the next
+ * vsync it can make, shown on it. */
+static void stub_vsync_frame(int c, uint64_t frame, uint32_t id)
+{
+    static uint32_t rnd = 1;
+    uint64_t v0 = g_vsync0, t = now_ns() + 500000; /* the copy */
+    uint64_t k = (t + VSYNC_LATCH - v0) / VSYNC_PERIOD + 1, vsync = v0 + k * VSYNC_PERIOD;
+    rnd = rnd * 1103515245u + 12345u;
+    uint64_t latch = vsync - VSYNC_LATCH + (rnd >> 8) % 3000000;
+    sleep_until(latch);
+    struct cham_msg rel = {CHAM_RELEASE, id, 0, 0};
+    cham_send(c, &rel, -1);
+    struct cham_msg done = {CHAM_FRAME_DONE, 0, frame, latch};
+    cham_send(c, &done, -1);
+    int fence[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fence) != 0)
+        return;
+    uint64_t *arg = malloc(2 * sizeof *arg);
+    arg[0] = (uint64_t)fence[1];
+    arg[1] = vsync;
+    pthread_t th;
+    pthread_create(&th, NULL, signal_vsync, arg);
+    pthread_detach(th);
+    struct cham_msg presented = {CHAM_PRESENTED, 0, frame, 0};
+    cham_send(c, &presented, fence[0]);
+    close(fence[0]);
+}
 
 static void *signal_later(void *arg) /* a GPU copy finishing: {eventfd, after ms} */
 {
@@ -218,6 +272,10 @@ static void *presenter_main(void *arg)
             int slow_copy_ms = g_slow_copy_ms;
             struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
             cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
+            if (g_vsync0) {
+                stub_vsync_frame(c, m.a, m.id);
+                continue;
+            }
             if (g_no_latch) { /* answered before that tick */
                 struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, UINT64_MAX};
                 cham_send(c, &done, -1);
@@ -305,6 +363,9 @@ static void *probe_main(void *arg) /* card requests while a flip waits: how long
 
 static int g_flips;
 static uint64_t g_last_flip_ns, g_max_gap_ns;
+#define FLIP_TIMES 200
+static uint64_t g_flip_times[FLIP_TIMES]; /* the first page-flip events' times, while g_record */
+static int g_record, g_recorded;
 static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned crtc, void *data)
 {
     (void)fd, (void)seq, (void)crtc, (void)data;
@@ -313,6 +374,8 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
         g_max_gap_ns = t - g_last_flip_ns;
     g_last_flip_ns = t;
     g_flips++;
+    if (g_record && g_recorded < FLIP_TIMES)
+        g_flip_times[g_recorded++] = t;
 }
 
 /* This process's fds of the file with inode `ino`. */
@@ -824,6 +887,46 @@ int main(int argc, char **argv)
     CHECK(ok, "a flip whose frame latched nothing (latch time -1) completes at once");
     flip_to(fd, plane_id, p_fb, fbs[0]);
     CHECK(wait_flip(fd, 100), "...and the next one too");
+
+    /* Page-flip events come on the display's vsync, whole refreshes apart,
+     * though Android's latch times wander. */
+    printf("flips on the display's vsync\n");
+    uint64_t v0 = now_ns();
+    g_vsync0 = v0;
+    ok = 1;
+    for (int i = 0; i < 160 && ok; i++) {
+        g_record = i >= 40; /* the grid is known by then */
+        flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+        ok = wait_flip(fd, 200);
+    }
+    g_record = 0;
+    usleep(30000);
+    g_vsync0 = 0;
+    int whole = 0, phase_ok = 0;
+    double worst = 0, worst_phase = 0;
+    for (int i = 0; i < g_recorded; i++) {
+        if (i) {
+            uint64_t d = g_flip_times[i] - g_flip_times[i - 1];
+            uint64_t n = (d + VSYNC_PERIOD / 2) / VSYNC_PERIOD;
+            double off = ((double)d - (double)(n * VSYNC_PERIOD)) / 1e6;
+            off = off < 0 ? -off : off;
+            whole += n >= 1 && off < 0.25;
+            if (off > worst)
+                worst = off;
+        }
+        /* at the start of the stretch Android latches in */
+        double ph = (double)((g_flip_times[i] + VSYNC_LATCH - v0) % VSYNC_PERIOD) / 1e6;
+        if (ph > VSYNC_PERIOD / 2e6)
+            ph -= VSYNC_PERIOD / 1e6;
+        phase_ok += ph > -0.3 && ph < 0.8;
+        if ((ph < 0 ? -ph : ph) > (worst_phase < 0 ? -worst_phase : worst_phase))
+            worst_phase = ph;
+    }
+    CHECK(ok && g_recorded == 120, "120 flips while Android's latch times wander by 3 ms");
+    CHECK(whole == g_recorded - 1, "...all whole refreshes apart (%d of %d; worst %.2f ms off)", whole,
+          g_recorded - 1, worst);
+    CHECK(phase_ok == g_recorded, "...at the point Android latches in (%d of %d; worst %.2f ms off)", phase_ok,
+          g_recorded, worst_phase);
 
     printf("app reconnects\n");
     int added = g_buffers_added, accepts = g_accepts;
