@@ -44,6 +44,12 @@ enum cham_msg_type {
                                again), or CHAM_CURSOR_HIDE; a = x | y << 32, where its top left goes
                                in the frame (signed pixels, CHAM_INPUT_DELTA's packing); b = the part
                                of the buffer shown, CHAM_CURSOR_RECT; fd = acquire fence (optional) */
+    CHAM_PLANE = 9,         /* the next PRESENT's buffer doesn't make the whole frame (only to a
+                               presenter that set CHAM_CONFIG_PLANE): id = the frame's (screen's)
+                               width | height << 16; a = the part of the buffer shown, b = where it
+                               goes in the frame, clipped to it (w or h 0: nothing), both in
+                               CHAM_CURSOR_RECT's packing, scaled from a to b; the rest of the frame
+                               is black. A PRESENT without it shows its whole buffer as the frame. */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),
@@ -144,6 +150,10 @@ enum cham_input_kind {
  * layer of its own over the frame, so the compositor's pointer moves without
  * a new frame. */
 #define CHAM_CONFIG_CURSOR 2u
+/* CHAM_CONFIG_PLANE: the presenter shows a frame whose buffer covers only part
+ * of the screen, or more of it (CHAM_PLANE), so the compositor may put it on
+ * the screen as it is (e.g. an app's window) where a display would. */
+#define CHAM_CONFIG_PLANE 4u
 
 /* PRESENT id: the frame on screen stays as it is (only the cursor changed). */
 #define CHAM_PRESENT_UNCHANGED 0xffffffffu

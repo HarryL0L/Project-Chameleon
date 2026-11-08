@@ -63,6 +63,19 @@ struct link_cursor {
     int fence;
 };
 void link_cursor_locked(const struct link_cursor *c);
+/* The primary plane as committed, for the next presents: plain if its whole
+ * buffer is the whole screen; else the part of the buffer shown (pixels) and
+ * where it goes on the screen, clipped to it (w or h 0: nothing), the rest
+ * black. */
+struct link_plane {
+    int plain;
+    uint32_t crtc_w, crtc_h;
+    uint32_t src_x, src_y, src_w, src_h;
+    uint32_t dst_x, dst_y, dst_w, dst_h;
+};
+void link_plane_locked(const struct link_plane *p);
+/* The app shows a plane that isn't the whole screen (CHAM_CONFIG_PLANE). */
+int link_shows_planes_locked(void);
 void link_forget_bo_locked(struct cham_bo *bo);
 /* Tells the presenter the compositor turned its screen off (1) or on (0). */
 void link_screen_off_locked(int off);

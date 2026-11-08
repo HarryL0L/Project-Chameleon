@@ -109,6 +109,15 @@ uint64_t g_pool_last_serial = 0;
 uint64_t g_pool_last_gen = 0;
 uint64_t g_pool_serial = 0;
 int32_t g_frame_width = 0, g_frame_height = 0;  // the producer's last frame, for placing the cursor
+// The producer's next frame when its buffer doesn't make the whole frame
+// (CHAM_PLANE): the frame's size, the part of the buffer shown and where it
+// goes in the frame; the rest is black.
+struct PlaneGeom {
+    bool set = false;
+    int32_t frame_w = 0, frame_h = 0;
+    ARect src{}, dst{};
+};
+PlaneGeom g_next_plane;
 
 // The producer's cursor plane (CHAM_CURSOR): a layer of its own over the
 // frame, so the pointer moves without a new frame. Its image is copied into
@@ -189,7 +198,7 @@ void send_config_locked()
     uint64_t size = (uint64_t)(uint32_t)g_width | ((uint64_t)(uint32_t)g_height << 32);
     if (!g_sc)
         size = 0;
-    uint32_t flags = (set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0) | CHAM_CONFIG_CURSOR;
+    uint32_t flags = (set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0) | CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
     if (size && g_window_width > 0 && g_window_height > 0)
         send_locked(CHAM_WINDOW, 0,
                     (uint64_t)(uint32_t)g_window_width | ((uint64_t)(uint32_t)g_window_height << 32), 0);
@@ -617,7 +626,7 @@ void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
     ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
 }
 
-void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
+void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf, const PlaneGeom *pg)
 {
     int pi = gl_init() ? pool_acquire_locked() : -1;
     if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
@@ -628,23 +637,40 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf)
     PoolBuf &p = g_pool[pi];
     g_stats.shown++;
     g_stats.copied++;
-    g_frame_width = buf->width;
-    g_frame_height = buf->height;
+    g_frame_width = pg ? pg->frame_w : buf->width;
+    g_frame_height = pg ? pg->frame_h : buf->height;
     gpu_wait(p.release_fence);  // SurfaceFlinger finished scanning it out
     p.release_fence = -1;
     gpu_wait(fence);            // the producer finished rendering
 
     // Row 0 is the top in both buffers, so GL's y runs downwards here and
     // the ARects apply as they are.
-    Placement pl = place(buf->width, buf->height, p.width, p.height);
+    Placement pl = place(g_frame_width, g_frame_height, p.width, p.height);
     glBindFramebuffer(GL_READ_FRAMEBUFFER, buf->fbo);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, p.fbo);
-    if (!pl.covers) {
+    if (!pl.covers || pg) {
         glClearColor(0, 0, 0, 1);
         glClear(GL_COLOR_BUFFER_BIT);
     }
-    glBlitFramebuffer(pl.src.left, pl.src.top, pl.src.right, pl.src.bottom, pl.dst.left, pl.dst.top,
-                      pl.dst.right, pl.dst.bottom, GL_COLOR_BUFFER_BIT, pl.exact ? GL_NEAREST : GL_LINEAR);
+    if (!pg) {
+        glBlitFramebuffer(pl.src.left, pl.src.top, pl.src.right, pl.src.bottom, pl.dst.left, pl.dst.top,
+                          pl.dst.right, pl.dst.bottom, GL_COLOR_BUFFER_BIT, pl.exact ? GL_NEAREST : GL_LINEAR);
+    } else if (pg->dst.right > pg->dst.left && pg->dst.bottom > pg->dst.top && pl.src.right > pl.src.left &&
+               pl.src.bottom > pl.src.top && pg->src.right > pg->src.left && pg->src.bottom > pg->src.top &&
+               pg->src.right <= buf->width && pg->src.bottom <= buf->height) {
+        // Its place in the frame, as the frame is placed on our buffer (GL
+        // drops what falls outside it).
+        auto bx = [&](int64_t v) {
+            return (GLint)(pl.dst.left + (v - pl.src.left) * (pl.dst.right - pl.dst.left) / (pl.src.right - pl.src.left));
+        };
+        auto by = [&](int64_t v) {
+            return (GLint)(pl.dst.top + (v - pl.src.top) * (pl.dst.bottom - pl.dst.top) / (pl.src.bottom - pl.src.top));
+        };
+        GLint x0 = bx(pg->dst.left), y0 = by(pg->dst.top), x1 = bx(pg->dst.right), y1 = by(pg->dst.bottom);
+        bool same = pg->src.right - pg->src.left == x1 - x0 && pg->src.bottom - pg->src.top == y1 - y0;
+        glBlitFramebuffer(pg->src.left, pg->src.top, pg->src.right, pg->src.bottom, x0, y0, x1, y1,
+                          GL_COLOR_BUFFER_BIT, same ? GL_NEAREST : GL_LINEAR);
+    }
     if (g_stats.sample) {
         // Once per stats period: is the copied frame actually non-black?
         glBindFramebuffer(GL_READ_FRAMEBUFFER, p.fbo);
@@ -744,6 +770,8 @@ void present(uint32_t id, uint64_t frame, int fence)
     std::lock_guard<std::mutex> lock(g_lock);
     g_stats.presents++;
     stats_log_locked();
+    PlaneGeom plane = g_next_plane;  // for this frame only
+    g_next_plane = PlaneGeom{};
     if (id == CHAM_PRESENT_UNCHANGED) {
         present_unchanged_locked(frame, fence);
         return;
@@ -755,7 +783,7 @@ void present(uint32_t id, uint64_t frame, int fence)
         return;
     }
     if (g_copy_mode) {
-        present_copy_locked(id, frame, fence, buf);
+        present_copy_locked(id, frame, fence, buf, plane.set ? &plane : nullptr);
         return;
     }
     g_stats.shown++;
@@ -967,6 +995,15 @@ void serve(int client, int arrivals)
             g_cursor_dirty = true;
             break;
         }
+        case CHAM_PLANE: {
+            std::lock_guard<std::mutex> lock(g_lock);
+            auto rect = [](uint64_t v) {
+                int32_t x = (int32_t)CHAM_CURSOR_RECT_X(v), y = (int32_t)CHAM_CURSOR_RECT_Y(v);
+                return ARect{x, y, x + (int32_t)CHAM_CURSOR_RECT_W(v), y + (int32_t)CHAM_CURSOR_RECT_H(v)};
+            };
+            g_next_plane = PlaneGeom{true, (int32_t)(msg.id & 0xffffu), (int32_t)(msg.id >> 16), rect(msg.a), rect(msg.b)};
+            break;
+        }
         case CHAM_SCREEN: {
             // KWin's screen went off (idle): show black, not its last frame,
             // and let the activity offer "tap to wake". Its next frame shows
@@ -1009,6 +1046,7 @@ done:
             close(g_cursor.fence);
         g_cursor = CursorState{};
         g_cursor_dirty = true;  // hidden with the next producer's first frame
+        g_next_plane = PlaneGeom{};
         if (g_sc) {
             ASurfaceTransaction *txn = ASurfaceTransaction_create();
             ASurfaceTransaction_setVisibility(txn, g_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);

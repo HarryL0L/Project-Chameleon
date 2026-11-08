@@ -82,6 +82,11 @@ static volatile uint64_t g_vsync0;
 static volatile uint32_t g_cursor_id;
 static volatile uint64_t g_cursor_a, g_cursor_b;
 static volatile int g_cursor_msgs, g_unchanged_presents;
+/* The primary plane's place as the app last heard it (CHAM_PLANE), how
+ * often, and whether the last PRESENT came right after one. */
+static volatile uint32_t g_plane_id;
+static volatile uint64_t g_plane_a, g_plane_b;
+static volatile int g_plane_msgs, g_present_placed;
 
 /* A present fence: {socket, vsync time}; the stand-in reads the time once it
  * is there (a socket: the reader may have closed it, no SIGPIPE). */
@@ -200,10 +205,12 @@ static void *presenter_main(void *arg)
     g_accepts++;
     for (int i = 0; i < STUB_SLOTS; i++)
         g_held_fd[i] = -1;
-    struct cham_msg cfg = {CHAM_CONFIG, CHAM_CONFIG_CURSOR, 1080ull | (1800ull << 32), 120000}; /* as the app */
+    struct cham_msg cfg = {CHAM_CONFIG, CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE, 1080ull | (1800ull << 32),
+                           120000}; /* as the app */
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
     uint64_t held = 0; /* the newest frame Android holds, 0 for none */
+    int placed = 0;    /* a CHAM_PLANE came for the next PRESENT */
     while (!g_stop_presenter) {
         if (g_send_flags >= 0) {
             struct cham_msg flags = cfg;
@@ -266,7 +273,15 @@ static void *presenter_main(void *arg)
                 struct cham_msg rel = {CHAM_RELEASE, m.id & ~CHAM_CURSOR_NEW, 0, 0};
                 cham_send(c, &rel, -1);
             }
+        } else if (m.type == CHAM_PLANE) {
+            g_plane_id = m.id;
+            g_plane_a = m.a;
+            g_plane_b = m.b;
+            g_plane_msgs++;
+            placed = 1;
         } else if (m.type == CHAM_PRESENT && !g_frozen) {
+            g_present_placed = placed;
+            placed = 0;
             g_presents++;
             g_unchanged_presents += m.id == CHAM_PRESENT_UNCHANGED;
             int slow_copy_ms = g_slow_copy_ms;
@@ -817,7 +832,7 @@ int main(int argc, char **argv)
     CHECK(late && ms > 200 && ms < 400, "...until the watchdog completes it (%.0f ms)", ms);
     g_hold_latch = 0;
     usleep(150000);
-    g_send_flags = CHAM_CONFIG_BACK_PRESSURE | CHAM_CONFIG_CURSOR;
+    g_send_flags = CHAM_CONFIG_BACK_PRESSURE | CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
     usleep(150000);
     flip_to(fd, plane_id, p_fb, fbs[2]);
     wait_flip(fd, 100);
@@ -834,7 +849,7 @@ int main(int argc, char **argv)
     CHECK(!early && late, "...a third waits (%.0f ms)", ms_since(t));
     g_hold_latch = 0;
     usleep(150000);
-    g_send_flags = CHAM_CONFIG_CURSOR;
+    g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
     usleep(150000);
 
     /* A flip needs the frame before it copied, not its own: the first one
@@ -1104,6 +1119,103 @@ int main(int argc, char **argv)
               "RMFB of the cursor's framebuffer takes it off the plane: the app hides it at once");
 #undef CURSOR
         gbm_bo_destroy(cbo);
+    }
+
+
+    /* The primary plane anywhere, as vkms's (KWin scans a window out on it,
+     * or puts something alone on an empty screen): the app hears where its
+     * buffer goes, clipped to the screen, and shows the rest black. */
+    printf("a primary plane not covering the screen\n");
+    {
+#define PLANE(req, fb, sx, sy, sw, sh, dx, dy, dw, dh)                                                         \
+    do {                                                                                                     \
+        uint64_t s_[4] = {(uint64_t)(sx) << 16, (uint64_t)(sy) << 16, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16}; \
+        uint64_t d_[4] = {(uint64_t)(int64_t)(dx), (uint64_t)(int64_t)(dy), (dw), (dh)};                    \
+        drmModeAtomicAddProperty((req), plane_id, p_fb, (fb));                                               \
+        for (int i_ = 0; i_ < 4; i_++) {                                                                     \
+            drmModeAtomicAddProperty((req), plane_id, p_src[i_], s_[i_]);                                    \
+            drmModeAtomicAddProperty((req), plane_id, p_dst[i_], d_[i_]);                                    \
+        }                                                                                                    \
+    } while (0)
+#define RECT_IS(v, x, y, w, h) \
+    (CHAM_CURSOR_RECT_X(v) == (x) && CHAM_CURSOR_RECT_Y(v) == (y) && CHAM_CURSOR_RECT_W(v) == (w) && CHAM_CURSOR_RECT_H(v) == (h))
+        const uint32_t flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, test = DRM_MODE_ATOMIC_TEST_ONLY;
+        int msgs = g_plane_msgs, presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 400, 300, 100, 200, 400, 300);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && g_present_placed && g_presents == presents + 1 &&
+                  g_plane_id == (1080u | 1800u << 16) && RECT_IS(g_plane_a, 0, 0, 400, 300) &&
+                  RECT_IS(g_plane_b, 100, 200, 400, 300),
+              "400x300 of the buffer at 100,200: the app hears where it goes on the 1080x1800 screen, then the frame");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 200, 100, -100, -50, 400, 200);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && g_present_placed && RECT_IS(g_plane_a, 50, 25, 150, 75) &&
+                  RECT_IS(g_plane_b, 0, 0, 300, 150),
+              "scaled 2x, hanging off the top left: clipped, the source with it (50,25 150x75 -> 0,0 300x150)");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[0], 0, 0, 1080, 1800, 0, 0, 1200, 1900);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && RECT_IS(g_plane_a, 0, 0, 972, 1705) && RECT_IS(g_plane_b, 0, 0, 1080, 1800),
+              "bigger than the screen: the part on it (972x1705 of the buffer, scaled)");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 100, 100, 2000, 10, 100, 100);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && CHAM_CURSOR_RECT_W(g_plane_b) == 0,
+              "off the screen: nothing of it on the frame (black)");
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 1000, 0, 200, 100, 0, 0, 200, 100);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ENOSPC, "a source past the framebuffer: ENOSPC");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 100, 100, INT32_MAX - 10, 0, 100, 100);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ERANGE, "a target that would overflow: ERANGE");
+        drmModeAtomicFree(req);
+        msgs = g_plane_msgs;
+        presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 1080, 1800, 0, 0, 1080, 1800);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs && !g_present_placed && g_presents == presents + 1,
+              "the whole screen again: a plain frame");
+        /* An app that doesn't show such frames keeps what it shows. */
+        g_send_flags = CHAM_CONFIG_CURSOR;
+        usleep(150000);
+        msgs = g_plane_msgs;
+        presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 400, 300, 100, 200, 400, 300);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs && g_presents == presents,
+              "an older app: not shown (its flip still completes), no message it doesn't know");
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 1080, 1800, 0, 0, 1080, 1800);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_presents == presents + 1, "...and a whole frame again is");
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+#undef PLANE
+#undef RECT_IS
     }
 
     printf("second producer takes over\n");

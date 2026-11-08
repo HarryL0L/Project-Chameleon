@@ -123,6 +123,10 @@ static struct link_cursor g_cursor = {.fence = -1};
 static int g_cursor_sent;
 static uint64_t g_cursor_gen;
 static int g_cfg_cursor;            /* this app shows it (CHAM_CONFIG_CURSOR) */
+/* The primary plane's place, and whether this app shows one that isn't the
+ * whole screen (CHAM_CONFIG_PLANE). */
+static struct link_plane g_plane = {.plain = 1};
+static int g_cfg_plane;
 static void send_cursor_locked(int new_image, int fence);
 
 static void timespec_at(struct timespec *ts, uint64_t ns)
@@ -525,6 +529,11 @@ int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame)
     int slot = bo ? slot_locked(bo) : (int)CHAM_PRESENT_UNCHANGED;
     if (bo && slot < 0)
         return 0;
+    if (bo && !g_plane.plain && g_cfg_plane &&
+        send_msg_locked(CHAM_PLANE, g_plane.crtc_w | g_plane.crtc_h << 16,
+                        CHAM_CURSOR_RECT(g_plane.src_x, g_plane.src_y, g_plane.src_w, g_plane.src_h),
+                        CHAM_CURSOR_RECT(g_plane.dst_x, g_plane.dst_y, g_plane.dst_w, g_plane.dst_h), -1) < 0)
+        return 0;
     int ok = send_msg_locked(CHAM_PRESENT, (uint32_t)slot, frame, now_ns(), in_fence) == 0;
     g_stats.presented += ok;
     return ok;
@@ -584,6 +593,16 @@ void link_cursor_locked(const struct link_cursor *c)
     send_cursor_locked(new_image, c->fence);
 }
 
+void link_plane_locked(const struct link_plane *p)
+{
+    g_plane = *p;
+}
+
+int link_shows_planes_locked(void)
+{
+    return g_cfg_plane;
+}
+
 void link_screen_off_locked(int off)
 {
     send_msg_locked(CHAM_SCREEN, 0, off ? 1 : 0, 0, -1);
@@ -623,6 +642,7 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
         g_back_pressure = !!(m->id & CHAM_CONFIG_BACK_PRESSURE);
         g_cfg_cursor = !!(m->id & CHAM_CONFIG_CURSOR);
+        g_cfg_plane = !!(m->id & CHAM_CONFIG_PLANE);
         if (g_cfg_w && g_cfg_h && !g_cfg_seen) {
             g_cfg_seen = 1;
             g_first_w = g_cfg_w;

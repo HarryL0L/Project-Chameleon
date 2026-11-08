@@ -981,6 +981,56 @@ static int list_u32(const struct commit_lists *l, const uint32_t *whole, uint64_
     return copy_from_user(v, ptr + i * sizeof *v, sizeof *v);
 }
 
+/* drm_atomic_plane_check's limits for a plane with a framebuffer: 0,
+ * -ERANGE (it would overflow) or -ENOSPC (the source isn't all in the
+ * framebuffer). */
+static int plane_bounds(const struct plane_state *p)
+{
+    if (!p->fb)
+        return 0;
+    const struct fb *fb = fb_find(p->fb);
+    uint64_t fw = (uint64_t)fb->width << 16, fh = (uint64_t)fb->height << 16;
+    if ((int64_t)p->crtc_x + p->crtc_w > INT32_MAX || (int64_t)p->crtc_y + p->crtc_h > INT32_MAX)
+        return -ERANGE;
+    if (p->src_w > fw || p->src_x > fw - p->src_w || p->src_h > fh || p->src_y > fh - p->src_h)
+        return -ENOSPC;
+    return 0;
+}
+
+/* Where the primary plane's framebuffer goes on the mode's screen (lp):
+ * plain if the whole buffer is the whole screen, else the part shown and
+ * where, clipped to the screen. Returns 1 if part of the screen is left
+ * uncovered. */
+static int plane_geometry(const struct plane_state *p, const struct fb *fb, const struct drm_mode_modeinfo *m,
+                          struct link_plane *lp)
+{
+    int64_t w = m->hdisplay, h = m->vdisplay;
+    int64_t x0 = p->crtc_x, y0 = p->crtc_y, x1 = x0 + p->crtc_w, y1 = y0 + p->crtc_h;
+    int partial = x0 > 0 || y0 > 0 || x1 < w || y1 < h;
+    *lp = (struct link_plane){.plain = 1, .crtc_w = (uint32_t)w, .crtc_h = (uint32_t)h};
+    if (!partial && x0 == 0 && y0 == 0 && x1 == w && y1 == h && fb->width == w && fb->height == h && !p->src_x &&
+        !p->src_y && p->src_w == (uint64_t)fb->width << 16 && p->src_h == (uint64_t)fb->height << 16)
+        return 0;
+    lp->plain = 0;
+    int64_t cx0 = x0 > 0 ? x0 : 0, cy0 = y0 > 0 ? y0 : 0, cx1 = x1 < w ? x1 : w, cy1 = y1 < h ? y1 : h;
+    if (cx0 >= cx1 || cy0 >= cy1)
+        return partial; /* all off the screen: nothing */
+    /* The source (16.16) clipped along with the target, at the plane's scale. */
+#define CLIP(src, srcw, d, crtcw) ((src) + (uint64_t)((unsigned __int128)(uint64_t)(d) * (srcw) / (crtcw)))
+    uint64_t sx0 = CLIP(p->src_x, p->src_w, cx0 - x0, p->crtc_w), sx1 = CLIP(p->src_x, p->src_w, cx1 - x0, p->crtc_w);
+    uint64_t sy0 = CLIP(p->src_y, p->src_h, cy0 - y0, p->crtc_h), sy1 = CLIP(p->src_y, p->src_h, cy1 - y0, p->crtc_h);
+#undef CLIP
+    lp->src_x = (uint32_t)(sx0 >> 16);
+    lp->src_y = (uint32_t)(sy0 >> 16);
+    lp->src_w = (uint32_t)((sx1 + 0x8000) >> 16) - lp->src_x;
+    lp->src_h = (uint32_t)((sy1 + 0x8000) >> 16) - lp->src_y;
+    lp->dst_x = (uint32_t)cx0;
+    lp->dst_y = (uint32_t)cy0;
+    lp->dst_w = (uint32_t)(cx1 - cx0);
+    lp->dst_h = (uint32_t)(cy1 - cy0);
+    return partial;
+}
+
 static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     if (!f->atomic)
@@ -1051,35 +1101,30 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
                   (mode && old_mode && memcmp(mode, old_mode, sizeof *mode));
     if (modeset && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
         REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
-    /* A plane bigger than the CRTC is clipped, as with real drivers: KWin's
-     * first commit after a mode change can still carry the previous frame's
-     * size. A smaller one is only the compositor putting its cursor alone on
-     * an empty screen (nothing else ever reaches this plane: client buffers
-     * can't be scanned out); it is accepted but not shown, since the app
-     * shows whole buffers - the previous frame stays until a full one comes. */
-    int partial = 0;
+    /* The primary plane may go anywhere, as vkms's (can_position): bigger
+     * than the CRTC (KWin's first commit after a mode change can still carry
+     * the previous frame's size) it is clipped; smaller (KWin scanning out
+     * a window, or something alone on an empty screen) the rest is black.
+     * It may be scaled, as on displays that scale. */
     const struct plane_state *pp = &s.primary, *cp = &s.cursor;
     if ((pp->fb && !pp->crtc) || (cp->fb && !cp->crtc))
         REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
     if ((pp->crtc && !pp->fb) || (cp->crtc && !cp->fb))
         REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
-    /* A plane on a CRTC that is off or has no mode stays attached, unseen. */
-    if (pp->fb && on)
-        partial = pp->crtc_x > 0 || pp->crtc_y > 0 || (int64_t)pp->crtc_x + pp->crtc_w < mode->hdisplay ||
-                  (int64_t)pp->crtc_y + pp->crtc_h < mode->vdisplay;
-    /* The cursor plane, as vkms's: any size and position (off the screen
-     * too), part of its framebuffer, no scaling (drm_atomic_plane_check,
-     * then the helper's check with DRM_PLANE_NO_SCALING). */
-    if (cp->fb) {
-        const struct fb *cfb = fb_find(cp->fb);
-        uint64_t fw = (uint64_t)cfb->width << 16, fh = (uint64_t)cfb->height << 16;
-        if ((int64_t)cp->crtc_x + cp->crtc_w > INT32_MAX || (int64_t)cp->crtc_y + cp->crtc_h > INT32_MAX)
-            REFUSE(-ERANGE, "cursor at %d,%d size %ux%u", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h);
-        if (cp->src_w > fw || cp->src_x > fw - cp->src_w || cp->src_h > fh || cp->src_y > fh - cp->src_h)
-            REFUSE(-ENOSPC, "cursor source outside its framebuffer");
-        if (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16)
-            REFUSE(-ERANGE, "cursor scaled");
-    }
+    /* Both planes, as drm_atomic_plane_check: no overflow, the source inside
+     * the framebuffer. The cursor plane, as vkms's: any size and position
+     * (off the screen too), part of its framebuffer, no scaling (the helper's
+     * check with DRM_PLANE_NO_SCALING). */
+    int bad = plane_bounds(pp);
+    if (bad)
+        REFUSE(bad, "primary plane at %d,%d size %ux%u: %s", pp->crtc_x, pp->crtc_y, pp->crtc_w, pp->crtc_h,
+               bad == -ERANGE ? "too big" : "source outside its framebuffer");
+    bad = plane_bounds(cp);
+    if (bad)
+        REFUSE(bad, "cursor at %d,%d size %ux%u: %s", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h,
+               bad == -ERANGE ? "too big" : "source outside its framebuffer");
+    if (cp->fb && (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16))
+        REFUSE(-ERANGE, "cursor scaled");
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
         if (!s.active && !g_state.active) /* an event for turning it off is fine */
             REFUSE(-EINVAL, "page-flip event with the CRTC off");
@@ -1131,7 +1176,12 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
 
     uint64_t frame = ++g_frame;
     int presented = 0;
-    g_plane_shown = bo && on && s.dpms == 0 && !partial;
+    /* An app that can't show a plane covering part of the screen keeps the
+     * frame it shows until a whole one comes. */
+    struct link_plane lp = {.plain = 1};
+    int partial = bo && on && plane_geometry(pp, fb, mode, &lp);
+    link_plane_locked(&lp);
+    g_plane_shown = bo && on && s.dpms == 0 && (!partial || link_shows_planes_locked());
     if (g_has_cursor) {
         /* The app shows it over the frame, from the next present on. */
         struct link_cursor c = {.fence = -1};
