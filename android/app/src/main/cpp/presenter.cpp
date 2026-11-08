@@ -113,8 +113,9 @@ int32_t g_frame_width = 0, g_frame_height = 0;  // the producer's last frame, fo
 // The producer's cursor plane (CHAM_CURSOR): a layer of its own over the
 // frame, so the pointer moves without a new frame. Its image is copied into
 // a small pool of ours, as frames are (the producer reuses its buffer after
-// the next page flip), and only when it changes.
-constexpr int kCursorPoolSize = 3;  // shown + one being released + the new copy
+// the next page flip), and only when it changes. A buffer stays held while
+// it is shown or queued in Android, so the pool has room beyond those.
+constexpr int kCursorPoolSize = 6; // as kPoolSize: shown + up to two waiting in Android + being released + new
 ASurfaceControl *g_cursor_sc = nullptr;
 struct CursorState {
     uint32_t id = CHAM_CURSOR_HIDE;
@@ -122,7 +123,7 @@ struct CursorState {
     uint64_t rect = 0;
     int fence = -1;
 };
-CursorState g_cursor;           // as the producer last said
+CursorState g_cursor;           // as the producer last said; CHAM_CURSOR_NEW kept until copied
 bool g_cursor_dirty = false;    // ...and not shown yet
 PoolBuf g_cursor_pool[kCursorPoolSize];
 int64_t g_cursor_shown = -1;    // pool index on g_cursor_sc
@@ -551,21 +552,20 @@ void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
     Placement pl = place(g_frame_width, g_frame_height, g_width, g_height);
     int64_t x0 = std::max<int64_t>(c.x, pl.src.left), y0 = std::max<int64_t>(c.y, pl.src.top);
     int64_t x1 = std::min<int64_t>((int64_t)c.x + w, pl.src.right), y1 = std::min<int64_t>((int64_t)c.y + h, pl.src.bottom);
-    if (!buf || x0 >= x1 || y0 >= y1 || pl.src.right <= pl.src.left || pl.src.bottom <= pl.src.top) {
+    bool need_copy = (c.id & CHAM_CURSOR_NEW) || g_cursor_shown < 0;
+    if (c.id == CHAM_CURSOR_HIDE || (need_copy && !buf && g_cursor_shown < 0) || x0 >= x1 || y0 >= y1 ||
+        pl.src.right <= pl.src.left || pl.src.bottom <= pl.src.top) {
         if (fence >= 0)
             close(fence);
         ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
         return;
     }
-    if ((c.id & CHAM_CURSOR_NEW) || g_cursor_shown < 0) {
-        int pi = pool_acquire_in(g_cursor_pool, kCursorPoolSize, buf->width, buf->height,
-                                 AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM);
-        if (pi < 0 || (!buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))) {
-            if (fence >= 0)
-                close(fence);
-            ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
-            return;
-        }
+    int pi = need_copy && buf ? pool_acquire_in(g_cursor_pool, kCursorPoolSize, buf->width, buf->height,
+                                                AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM)
+                              : -1;
+    if (pi >= 0 && !buf->fbo && !wrap_ahb(buf->ahb, &buf->image, &buf->tex, &buf->fbo))
+        pi = -1;
+    if (pi >= 0) {
         PoolBuf &p = g_cursor_pool[pi];
         gpu_wait(p.release_fence);  // SurfaceFlinger is done with it
         p.release_fence = -1;
@@ -581,6 +581,17 @@ void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
         ctx->cursor_serial = g_cursor_shown >= 0 ? g_cursor_pool[g_cursor_shown].serial : 0;
         p.held = true;
         g_cursor_shown = pi;
+        c.id &= ~CHAM_CURSOR_NEW;
+    } else if (need_copy) {
+        // No buffer to copy into yet (all held by Android) or the copy
+        // failed: the image shown so far stays, at the new place, and the new
+        // one is copied with a later present.
+        c.fence = fence;
+        g_cursor_dirty = true;
+        if (g_cursor_shown < 0) { /* none shown yet */
+            ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+            return;
+        }
     } else if (fence >= 0) {
         close(fence);
     }
@@ -595,6 +606,12 @@ void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
     int32_t by = (int32_t)CHAM_CURSOR_RECT_Y(c.rect) + (int32_t)(y0 - c.y);
     ARect src{bx, by, bx + (int32_t)(x1 - x0), by + (int32_t)(y1 - y0)};
     ARect dst{sx(x0), sy(y0), sx(x1), sy(y1)};
+    const PoolBuf &shown = g_cursor_pool[g_cursor_shown];
+    if (src.right > shown.width || src.bottom > shown.height) {
+        // an older image, smaller than the producer's new one
+        ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
+        return;
+    }
     ASurfaceTransaction_setGeometry(txn, g_cursor_sc, src, dst, ANATIVEWINDOW_TRANSFORM_IDENTITY);
     ASurfaceTransaction_setBufferTransparency(txn, g_cursor_sc, ASURFACE_TRANSACTION_TRANSPARENCY_TRANSLUCENT);
     ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_SHOW);
@@ -932,11 +949,22 @@ void serve(int client, int arrivals)
             break;
         case CHAM_CURSOR: {
             std::lock_guard<std::mutex> lock(g_lock);
+            // A new image not copied yet stays new (with the fence it came
+            // with) when only the position changes after it.
+            uint32_t id = msg.id;
+            int fence = fd;
+            fd = -1;
+            if ((g_cursor.id & CHAM_CURSOR_NEW) && g_cursor.id != CHAM_CURSOR_HIDE && id != CHAM_CURSOR_HIDE) {
+                id |= CHAM_CURSOR_NEW;
+                if (fence < 0) {
+                    fence = g_cursor.fence;
+                    g_cursor.fence = -1;
+                }
+            }
             if (g_cursor.fence >= 0)
                 close(g_cursor.fence);
-            g_cursor = CursorState{msg.id, CHAM_INPUT_DX(msg.a), CHAM_INPUT_DY(msg.a), msg.b, fd};
+            g_cursor = CursorState{id, CHAM_INPUT_DX(msg.a), CHAM_INPUT_DY(msg.a), msg.b, fence};
             g_cursor_dirty = true;
-            fd = -1;
             break;
         }
         case CHAM_SCREEN: {
