@@ -59,6 +59,9 @@ static struct {
     int (*bo_export_fd)(struct cham_bo *);
     uint32_t (*bo_handle_open)(struct cham_bo *, int);
     void (*bo_handle_close)(int, uint32_t);
+    /* for Wayland windows' buffers */
+    struct cham_bo *(*bo_wrap)(AHardwareBuffer *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
+                               void (*)(AHardwareBuffer *));
 } core;
 
 static void resolve(void)
@@ -74,6 +77,7 @@ static void resolve(void)
     *(void **)&core.bo_export_fd = dlsym(RTLD_DEFAULT, "cham_bo_export_fd");
     *(void **)&core.bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
     *(void **)&core.bo_handle_close = dlsym(RTLD_DEFAULT, "cham_bo_handle_close");
+    *(void **)&core.bo_wrap = dlsym(RTLD_DEFAULT, "cham_bo_wrap");
     if (!core.bo_create || !core.bo_unref || !core.bo_export_fd || !core.bo_handle_open || !core.bo_handle_close)
         core.bo_create = NULL; /* no texture export (cham_bo_create() answers NULL) */
     if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.buffer_ahb_acquire || !core.buffer_ahb_release)
@@ -152,7 +156,18 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     return cham_core_present() && core.bo_create ? core.bo_create(width, height, format, usage) : NULL;
 }
 
-/* The rest only for buffers cham_bo_create() made. */
+int cham_bo_sharing(void)
+{
+    return cham_core_present() && core.bo_wrap && core.bo_unref && core.bo_handle_open && core.bo_handle_close;
+}
+
+struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width, uint32_t height,
+                             uint32_t stride, uint32_t format, void (*release)(AHardwareBuffer *))
+{
+    return cham_bo_sharing() ? core.bo_wrap(ahb, native_handle, width, height, stride, format, release) : NULL;
+}
+
+/* The rest only for buffers cham_bo_create() or cham_bo_wrap() made. */
 void cham_bo_unref(struct cham_bo *bo)
 {
     core.bo_unref(bo);

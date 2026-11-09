@@ -10,8 +10,9 @@
  * (buffer age, damage, fences). After every eglSwapBuffers the frame is taken
  * out of the reader as an AHardwareBuffer and shown on the app's wl_surface:
  *
- *   1. registered with chameleon-kernel (clients.c), once per buffer,
- *      because the compositor can't turn a bare dmabuf back into an AHB;
+ *   1. shared with the session as a GEM handle on this process's render
+ *      node, once per buffer, because the compositor can't turn a bare
+ *      dmabuf back into an AHB (chameleon-kernel hands it the AHB);
  *   2. wrapped in a zwp_linux_dmabuf_v1 wl_buffer (its gralloc dmabuf);
  *   3. attached, damaged and committed on the app's wl_surface.
  *
@@ -22,10 +23,10 @@
  * The surfaces the app sees are ours (struct surface); egl.c swaps in the
  * Android surface wherever one is passed to the driver.
  *
- * Only offered in a Chameleon session (chameleon-kernel's
- * "$XDG_RUNTIME_DIR/chameleon-buffers" answers), whatever socket the app
- * reaches the compositor through (a proxy passes the dmabufs on unchanged);
- * elsewhere glvnd moves on to Mesa.
+ * Only offered in a Chameleon session (libchameleon.so is there and the
+ * render node opens), whatever socket the app reaches the compositor
+ * through (a proxy passes the dmabufs on unchanged); elsewhere glvnd moves
+ * on to Mesa.
  */
 #define _GNU_SOURCE
 #include <EGL/egl.h>
@@ -38,14 +39,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/un.h>
 #include <unistd.h>
 
 #include <drm_fourcc.h>
 
-#include "../../common/cham_io.h"
 #include "../core/cham_shim.h"
 #include "vendor.h"
 
@@ -75,7 +73,8 @@ typedef struct ANativeWindow ANativeWindow;
 static struct {
     void (*describe)(const AHardwareBuffer *, ahb_desc *);
     const native_handle *(*get_native_handle)(const AHardwareBuffer *);
-    int (*send_handle)(const AHardwareBuffer *, int);
+    void (*acquire)(AHardwareBuffer *);
+    void (*release)(AHardwareBuffer *);
     int (*set_geometry)(ANativeWindow *, int32_t, int32_t, int32_t);
     int (*reader_new)(int32_t, int32_t, int32_t, uint64_t, int32_t, AImageReader **);
     int (*reader_get_window)(AImageReader *, ANativeWindow **);
@@ -106,7 +105,8 @@ static int load_android(void)
 #define A(lib, field, name) (*(void **)&android.field = lib ? dlsym(lib, name) : NULL)
     A(nw, describe, "AHardwareBuffer_describe");
     A(nw, get_native_handle, "AHardwareBuffer_getNativeHandle");
-    A(nw, send_handle, "AHardwareBuffer_sendHandleToUnixSocket");
+    A(nw, acquire, "AHardwareBuffer_acquire");
+    A(nw, release, "AHardwareBuffer_release");
     A(nw, set_geometry, "ANativeWindow_setBuffersGeometry");
     A(media, reader_new, "AImageReader_newWithUsage");
     A(media, reader_get_window, "AImageReader_getWindow");
@@ -115,7 +115,8 @@ static int load_android(void)
     A(media, image_get_ahb, "AImage_getHardwareBuffer");
     A(media, image_delete, "AImage_delete");
 #undef A
-    loaded = android.describe && android.get_native_handle && android.send_handle && android.set_geometry &&
+    loaded = android.describe && android.get_native_handle && android.acquire && android.release &&
+             android.set_geometry &&
              android.reader_new &&
              android.reader_get_window && android.reader_acquire_next && android.reader_delete &&
              android.image_get_ahb && android.image_delete;
@@ -268,9 +269,6 @@ struct display {
     struct wl_display *wl;
     struct wl_event_queue *queue;
     struct wl_proxy *dmabuf;
-    int registry_sock; /* to clients.c in chameleon-kernel */
-    uint32_t next_buffer_id;
-    pthread_mutex_t lock;
     struct display *next;
 };
 
@@ -278,40 +276,14 @@ static pthread_mutex_t g_displays_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct display *g_displays;
 static int g_wayland_used;
 
-/* chameleon-kernel's buffer socket for this session. */
-static int registry_path(char *out, size_t size)
-{
-    const char *dir = getenv("XDG_RUNTIME_DIR");
-    if (!dir || !*dir)
-        return 0;
-    return snprintf(out, size, "%s/%s", dir, CHAM_CLIENT_SOCKET_NAME) < (int)size;
-}
-
+/* A Chameleon session: windows' buffers are shared through its render node. */
 int cham_wl_platform_available(void)
 {
     static int available = -1;
     if (available >= 0)
         return available;
-    char path[108];
-    struct stat st;
-    available = registry_path(path, sizeof path) && stat(path, &st) == 0 && S_ISSOCK(st.st_mode) &&
-                load_android() && load_wayland();
+    available = cham_bo_sharing() && cham_egl_render_fd() >= 0 && load_android() && load_wayland();
     return available;
-}
-
-static int connect_registry(void)
-{
-    char path[108];
-    if (!registry_path(path, sizeof path))
-        return -1;
-    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    struct sockaddr_un addr = {.sun_family = AF_UNIX};
-    snprintf(addr.sun_path, sizeof addr.sun_path, "%s", path);
-    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof addr) == 0)
-        return s;
-    if (s >= 0)
-        close(s);
-    return -1;
 }
 
 static void registry_global(void *data, struct wl_proxy *registry, uint32_t name, const char *iface,
@@ -381,9 +353,6 @@ EGLDisplay cham_wl_get_display(void *native)
     if (!d) {
         d = calloc(1, sizeof *d);
         d->wl = wd;
-        d->registry_sock = -1;
-        d->next_buffer_id = 1;
-        pthread_mutex_init(&d->lock, NULL);
         d->queue = wl.create_queue(wd);
         struct wl_proxy *wrapper = wl.create_wrapper(wd);
         wl.set_queue(wrapper, d->queue);
@@ -393,14 +362,8 @@ EGLDisplay cham_wl_get_display(void *native)
         wl.add_listener(registry, k_registry_listener, d);
         wl.roundtrip_queue(wd, d->queue);
         wl.proxy_destroy(registry);
-        d->registry_sock = connect_registry();
-        if (!d->dmabuf || d->registry_sock < 0) {
-            cham_log("wayland: the compositor offers no %s; Wayland windows left to other vendors",
-                     d->dmabuf ? "Chameleon buffer socket" : "zwp_linux_dmabuf_v1");
-            if (d->dmabuf)
-                wl.proxy_destroy(d->dmabuf);
-            if (d->registry_sock >= 0)
-                close(d->registry_sock);
+        if (!d->dmabuf) {
+            cham_log("wayland: the compositor offers no zwp_linux_dmabuf_v1; Wayland windows left to other vendors");
             wl.queue_destroy(d->queue);
             free(d);
             pthread_mutex_unlock(&g_displays_lock);
@@ -414,38 +377,28 @@ EGLDisplay cham_wl_get_display(void *native)
     return cham_egl_android_display();
 }
 
-/* Registers an AHardwareBuffer with chameleon-kernel; returns its id, 0 on
- * failure. */
-static uint32_t register_buffer(struct display *d, const AHardwareBuffer *ahb)
+/* Shares an AHardwareBuffer (the reader's) with the session: a GEM handle on
+ * this process's render node file, so the compositor's dmabuf import finds
+ * it, as a driver's buffers are kernel objects. chameleon-kernel keeps it
+ * while the handle or its dmabuf is held anywhere. NULL on failure. */
+static struct cham_bo *share_buffer(AHardwareBuffer *ahb, const native_handle *nh, const ahb_desc *desc,
+                                    uint32_t format, uint32_t *handle)
 {
-    pthread_mutex_lock(&d->lock);
-    uint32_t id = d->next_buffer_id++;
-    struct cham_msg m = {CHAM_CLIENT_BUFFER_ADD, id, 0, 0};
-    int ok = cham_send(d->registry_sock, &m, -1) == 0 && android.send_handle(ahb, d->registry_sock) == 0;
-    while (ok) {
-        struct cham_msg ack;
-        int fd = -1;
-        if (cham_recv(d->registry_sock, &ack, &fd) <= 0) {
-            ok = 0;
-            break;
-        }
-        if (fd >= 0)
-            close(fd);
-        if (ack.type == CHAM_CLIENT_BUFFER_ACK && ack.id == id) {
-            ok = ack.a == 1;
-            break;
-        }
+    int fd = cham_egl_render_fd();
+    if (fd < 0)
+        return NULL;
+    android.acquire(ahb); /* the bo's reference */
+    struct cham_bo *bo = cham_bo_wrap(ahb, nh, desc->width, desc->height, desc->stride * 4, format, android.release);
+    if (!bo) {
+        android.release(ahb);
+        return NULL;
     }
-    pthread_mutex_unlock(&d->lock);
-    return ok ? id : 0;
-}
-
-static void unregister_buffer(struct display *d, uint32_t id)
-{
-    pthread_mutex_lock(&d->lock);
-    struct cham_msg m = {CHAM_CLIENT_BUFFER_REMOVE, id, 0, 0};
-    cham_send(d->registry_sock, &m, -1);
-    pthread_mutex_unlock(&d->lock);
+    *handle = cham_bo_handle_open(bo, fd);
+    if (!*handle) {
+        cham_bo_unref(bo);
+        return NULL;
+    }
+    return bo;
 }
 
 /* ---- window surfaces ---- */
@@ -460,7 +413,8 @@ struct buffer {
     int width, height;
     unsigned size_serial; /* the surface's size when it was seen first */
     struct wl_proxy *wl_buffer;
-    uint32_t id;          /* registration with chameleon-kernel */
+    struct cham_bo *bo;   /* shared with the session... */
+    uint32_t handle;      /* ...as this GEM handle on the render node */
     AImage *image;        /* held while the compositor uses the buffer */
 };
 
@@ -568,12 +522,14 @@ static int reader_open(struct surface *s, int width, int height)
     return 0;
 }
 
-static void buffer_free(struct surface *s, struct buffer *b)
+static void buffer_free(struct buffer *b)
 {
     if (b->wl_buffer)
         wl.marshal_flags(b->wl_buffer, 0 /* destroy */, NULL, wl.get_version(b->wl_buffer), WL_MARSHAL_FLAG_DESTROY);
-    if (b->id)
-        unregister_buffer(s->d, b->id);
+    if (b->bo) {
+        cham_bo_handle_close(cham_egl_render_fd(), b->handle);
+        cham_bo_unref(b->bo);
+    }
     if (b->image)
         android.image_delete(b->image);
     memset(b, 0, sizeof *b);
@@ -585,7 +541,7 @@ static void reader_close(struct surface *s)
 {
     for (int i = 0; i < MAX_BUFFERS; i++)
         if (s->buffers[i].ahb)
-            buffer_free(s, &s->buffers[i]);
+            buffer_free(&s->buffers[i]);
     if (s->android != EGL_NO_SURFACE)
         real_destroy_surface(s->dpy, s->android);
     if (s->reader)
@@ -806,9 +762,10 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
         cham_log("wayland: more than %d buffers in use", MAX_BUFFERS);
         return NULL;
     }
-    uint32_t id = register_buffer(s->d, ahb);
-    if (!id) {
-        cham_log("wayland: the compositor did not take a buffer");
+    uint32_t handle = 0;
+    struct cham_bo *bo = share_buffer(ahb, nh, &desc, s->drm_format, &handle);
+    if (!bo) {
+        cham_log("wayland: cannot share a buffer with the session");
         return NULL;
     }
     int width = (int)desc.width, height = (int)desc.height;
@@ -830,7 +787,8 @@ static struct buffer *buffer_for(struct surface *s, AHardwareBuffer *ahb)
     b->width = width;
     b->height = height;
     b->size_serial = s->size_serial;
-    b->id = id;
+    b->bo = bo;
+    b->handle = handle;
     b->wl_buffer = wl_buffer;
     wl.add_listener(wl_buffer, k_buffer_listener, b);
     return b;
@@ -843,7 +801,7 @@ static void reap_old_sizes(struct surface *s)
     for (int i = 0; i < MAX_BUFFERS; i++) {
         struct buffer *b = &s->buffers[i];
         if (b->ahb && !b->image && b->size_serial != s->size_serial)
-            buffer_free(s, b);
+            buffer_free(b);
     }
 }
 

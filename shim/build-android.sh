@@ -13,7 +13,7 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 # itself, input, the app link and apps' buffers in chameleon-kernel.
 LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
-    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/clients.c shim/core/ahb.c shim/core/wlpath.c"
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" $LIB_SRC -ldl -Wl,-soname,libchameleon.so
 "$CC" $CFLAGS -fPIE -pie -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so

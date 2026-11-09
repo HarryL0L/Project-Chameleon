@@ -6,7 +6,7 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 | file | replaces | does |
 |---|---|---|
 | `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event; the input devices, the link to the app and the input thread |
-| `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (registered with `chameleon-kernel`, `core/clients.c`); crash reporter where Android's driver renders |
+| `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/wayland.c`); crash reporter where Android's driver renders |
 | `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, primary node only) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
 
@@ -120,8 +120,8 @@ screen keeps its first size instead of following the app's window).
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL
   (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
-  their buffers are registered with `chameleon-kernel` over
-  `$XDG_RUNTIME_DIR/chameleon-buffers` (`core/clients.c`), where the
+  their buffers are shared with `chameleon-kernel` as GEM handles on the
+  app's render node, as a driver's buffers are kernel objects, where the
   compositor's dmabuf import and PRIME on the card's nodes (wlroots'
   test import) find them, also for apps behind a Wayland
   proxy (Firefox's `wayland-proxy-N`). A second compositor nested inside the

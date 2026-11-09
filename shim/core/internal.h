@@ -21,7 +21,7 @@ void bo_unref_locked(struct cham_bo *bo);
 /* Takes every pending presenter release fence (up to max) for the caller
  * to wait on and close. */
 int bo_take_release_fences_locked(int *fences, int max);
-/* An AHardwareBuffer sent by another process (clients.c, card.c). */
+/* An AHardwareBuffer sent by another process (card.c). */
 AHardwareBuffer *ahb_recv(int sock);
 /* The bo for a buffer another process sent (card.c), one per buffer however
  * often it arrives (matched by dmabuf). Takes over `b`'s reference; returns
@@ -100,12 +100,6 @@ void input_note_socket(pid_t pid, const char *path);
 /* The compositor's socket ($CHAMELEON_WAYLAND_SOCKET, or the one bound by
  * the DRM master's process or an ancestor); "" if none yet. */
 void input_socket_path(char *out, size_t size);
-
-/* ---- clients.c: Wayland apps' GPU buffers (in chameleon-kernel) ---- */
-void clients_start(void);
-/* The registered app buffer whose dmabuf `fd` is, as a bo (ahb_import),
- * with a reference for the caller, or NULL. */
-struct cham_bo *clients_bo_for_fd(int fd);
 
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);

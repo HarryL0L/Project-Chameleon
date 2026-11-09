@@ -260,7 +260,7 @@ static int find_dmabuf_fd(const native_handle *nh)
     return nh->numFds > 0 ? nh->data[0] : -1;
 }
 
-/* ---- buffers from other processes (clients.c) ---- */
+/* ---- buffers from other processes (card.c) ---- */
 
 int ahb_send(const AHardwareBuffer *b, int sock)
 {

@@ -709,11 +709,18 @@ struct export_image {
 };
 static pthread_mutex_t g_export_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct export_image *g_exports;
-static int g_render_fd = -1; /* this process's render node file for its exported buffers */
+static int g_render_fd = -1; /* this process's render node file for the buffers it shares */
 
 static void open_render_node(void)
 {
     g_render_fd = open(CHAM_RENDER_PATH, O_RDWR | O_CLOEXEC);
+}
+
+int cham_egl_render_fd(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, open_render_node);
+    return g_render_fd;
 }
 
 static struct {
@@ -825,9 +832,7 @@ static EGLImageKHR texture_image(EGLDisplay dpy, EGLContext ctx, GLuint tex, con
     uint32_t handle = 0;
     EGLImageKHR image = EGL_NO_IMAGE_KHR;
     if (gl.GetError() == GL_NO_ERROR && !immutable && width > 0 && height > 0 && level1 == 0 && format) {
-        static pthread_once_t render_once = PTHREAD_ONCE_INIT;
-        pthread_once(&render_once, open_render_node);
-        bo = g_render_fd >= 0 ? cham_bo_create((uint32_t)width, (uint32_t)height, format, CHAM_USE_RENDERING) : NULL;
+        bo = cham_egl_render_fd() >= 0 ? cham_bo_create((uint32_t)width, (uint32_t)height, format, CHAM_USE_RENDERING) : NULL;
         handle = bo ? cham_bo_handle_open(bo, g_render_fd) : 0;
         image = handle ? ahb_image(dpy, cham_bo_ahb(bo)) : EGL_NO_IMAGE_KHR;
     }

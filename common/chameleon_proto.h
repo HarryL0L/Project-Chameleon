@@ -179,21 +179,6 @@ struct cham_msg {
 #define CHAM_CONFIG_WIDTH(m) ((uint32_t)((m)->a & 0xffffffffu))
 #define CHAM_CONFIG_HEIGHT(m) ((uint32_t)((m)->a >> 32))
 
-/* ---- client buffers: Wayland apps -> chameleon-kernel ----
- *
- * An app rendering through the Chameleon EGL vendor hands the compositor its
- * buffers as zwp_linux_dmabuf_v1 wl_buffers. A dmabuf fd alone can't be
- * turned back into an AHardwareBuffer on Android, so the app first registers
- * each buffer with chameleon-kernel over "$XDG_RUNTIME_DIR/chameleon-buffers"
- * (SOCK_SEQPACKET), one per session like the card, and the compositor's EGL
- * import then finds the AHardwareBuffer by the dmabuf's inode. */
-enum cham_client_msg_type {
-    CHAM_CLIENT_BUFFER_ADD = 200,    /* id = app's buffer id; next packet is the AHardwareBuffer */
-    CHAM_CLIENT_BUFFER_ACK = 201,    /* id, a = 1 registered / 0 failed */
-    CHAM_CLIENT_BUFFER_REMOVE = 202, /* id */
-};
-#define CHAM_CLIENT_SOCKET_NAME "chameleon-buffers"
-
 /* Filesystem socket the broker listens on for the presenter app; override
  * with $CHAMELEON_SOCKET. */
 #define CHAM_SOCKET_PATH "/data/data/com.termux/files/usr/tmp/chameleon-0"

@@ -253,8 +253,7 @@ static int answer(struct caller *c, int64_t ret, int fd)
 
 struct cham_bo *card_session_buffer(int fd)
 {
-    struct cham_bo *bo = ahb_bo_for_fd(fd);
-    return bo ? bo : clients_bo_for_fd(fd);
+    return ahb_bo_for_fd(fd);
 }
 
 static void handle(struct caller *c, const struct cham_msg *m, int fd)

@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Host test of GPU rendering for Wayland apps (vendor/wayland.c + the
- * buffer registry in core/clients.c, inside chameleon-kernel), end to end:
+ * Host test of GPU rendering for Wayland apps (vendor/wayland.c, whose
+ * buffers reach chameleon-kernel as GEM handles on the render node), end to
+ * end:
  *
  *  - a compositor thread (real libwayland-server) with wl_compositor and a
  *    zwp_linux_dmabuf_v1 that, like KWin's EGL import, only accepts a dmabuf
- *    that chameleon-kernel knows as a registered app buffer (asked through
+ *    that chameleon-kernel knows as a session buffer (asked through
  *    libchameleon.so, which also tells it the socket from our bind()), and
  *    that imports each one on the render node too, as wlroots does;
  *  - the app: real libwayland-client + libwayland-egl, EGL through the
@@ -342,14 +343,14 @@ int main(void)
     pthread_create(&thread, NULL, server_main, server);
 
     printf("GPU rendering for Wayland apps\n");
-    char registry[256];
-    snprintf(registry, sizeof registry, "%s/chameleon-buffers", runtime);
+    char old_socket[256];
+    snprintf(old_socket, sizeof old_socket, "%s/chameleon-buffers", runtime);
     struct stat st;
-    CHECK(buffer_ahb_acquire && stat(registry, &st) == 0 && S_ISSOCK(st.st_mode),
-          "chameleon-kernel accepts app buffers at chameleon-buffers");
+    CHECK(buffer_ahb_acquire && stat(old_socket, &st) != 0,
+          "no socket of its own for app buffers: they come through the render node");
 
     /* The app reaches the compositor through another socket, as behind
-     * Firefox's wayland-proxy-N: its buffers are registered all the same. */
+     * Firefox's wayland-proxy-N: its buffers are shared all the same. */
     setenv("WAYLAND_DISPLAY", "wayland-proxy-cwl", 1);
     socket_name = "wayland-proxy-cwl";
 
@@ -408,7 +409,7 @@ int main(void)
     CHECK(ok && srv.commits == 6, "6 swaps -> %d commits", srv.commits);
     CHECK(srv.buffers_created >= 2 && srv.buffers_created <= 3 && srv.buffers_unknown == 0 &&
               srv.buffers_known_to_kwin == srv.buffers_created,
-          "%d zero-copy buffers, all registered with KWin (%d unknown)", srv.buffers_created, srv.buffers_unknown);
+          "%d zero-copy buffers, all known to KWin (%d unknown)", srv.buffers_created, srv.buffers_unknown);
     CHECK(srv.buffers_prime == srv.buffers_created, "...and each imports on the render node by PRIME (%d of %d)",
           srv.buffers_prime, srv.buffers_created);
     CHECK(srv.last_width == 64 && srv.last_height == 32 && srv.last_stride == 256 &&
