@@ -35,8 +35,9 @@ final class ImeView extends View {
     @Override
     public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
         // A plain text field: the keyboard composes, suggests and offers emoji
-        // (the shim handles composing text); Enter stays a key.
-        outAttrs.inputType = InputType.TYPE_CLASS_TEXT;
+        // (the shim handles composing text); Enter stays a key. Multi-line, so
+        // keyboards keep the line breaks of pasted text.
+        outAttrs.inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE;
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN | EditorInfo.IME_FLAG_NO_EXTRACT_UI
                 | EditorInfo.IME_ACTION_NONE | EditorInfo.IME_FLAG_NO_ENTER_ACTION;
         return new BaseInputConnection(this, false) {

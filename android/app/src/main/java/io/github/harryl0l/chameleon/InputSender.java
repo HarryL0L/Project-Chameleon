@@ -24,6 +24,8 @@ final class InputSender {
     static final int TEXT_COMMIT = 22;
     static final int TEXT_PREEDIT = 23;
     static final int TEXT_DELETE = 24;
+    /* Code points chameleon-kernel keeps per COMMIT / PREEDIT (core/text.c MAX_TEXT). */
+    private static final int TEXT_MAX = 256;
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
@@ -100,15 +102,24 @@ final class InputSender {
 
     /**
      * Text from the Android keyboard: committed, or the word being composed
-     * (shown as such where the desktop app's text field takes text).
+     * (shown as such where the desktop app's text field takes text). Long
+     * committed text (a paste) goes as several commits of TEXT_MAX code points;
+     * a CR LF line break goes as one.
      */
     static void text(CharSequence text, boolean commit) {
         time(0);
         String s = text.toString();
+        int n = 0;
         for (int i = 0; i < s.length(); ) {
             int cp = s.codePointAt(i);
             i += Character.charCount(cp);
+            if (cp == '\r' && i < s.length() && s.charAt(i) == '\n')
+                continue;
             nativeSendInput(TEXT_CHAR, cp, 0);
+            if (commit && ++n == TEXT_MAX && i < s.length()) {
+                nativeSendInput(TEXT_COMMIT, 0, 0);
+                n = 0;
+            }
         }
         nativeSendInput(commit ? TEXT_COMMIT : TEXT_PREEDIT, 0, 0);
     }
