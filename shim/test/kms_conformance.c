@@ -138,6 +138,9 @@ static void cursor_checks(int fd)
                         (uint64_t)(sx) << 16, 0, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16},          \
            0)
     const uint32_t t = DRM_MODE_ATOMIC_TEST_ONLY, flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+    /* The plane is on no CRTC yet: a commit of it alone has none for an event. */
+    result("PAGE_FLIP_EVENT, only a plane on no CRTC",
+           commit(fd, flip, 1, &cursor, (uint32_t[]){1}, &props[2], (uint64_t[]){5}, 0));
     result("cursor 64x64 at 100,100", CURSOR(0, fb64, 100, 100, 64, 64, 0, 64, 64));
     result("cursor alone, NONBLOCK | PAGE_FLIP_EVENT", CURSOR(flip, fb64, 120, 110, 64, 64, 0, 64, 64));
     result("...again while it is pending", CURSOR(flip, fb64, 130, 110, 64, 64, 0, 64, 64));
@@ -347,6 +350,18 @@ int main(void)
     result("ACTIVE = 2", commit(fd, t, 1, &g_crtc, &one, &p_active, &v2, 0));
     result("NULL objects pointer, 1 object", commit(fd, t, 1, NULL, &one, &p_fb, &v_fb, 0));
     result("nothing (0 objects)", commit(fd, t, 0, NULL, NULL, NULL, NULL, 0));
+    /* An event is some CRTC's: a commit without one can't have it. */
+    result("PAGE_FLIP_EVENT, nothing (0 objects)", commit(fd, DRM_MODE_PAGE_FLIP_EVENT, 0, NULL, NULL, NULL, NULL, 0));
+    /* IN_FENCE_FD: -1 or a sync file, once per plane. */
+    uint32_t p_fence = prop(fd, g_plane, DRM_MODE_OBJECT_PLANE, "IN_FENCE_FD", NULL);
+    uint32_t fence_props[2] = {p_fence, p_fence}, two = 2;
+    uint64_t no_fences[2] = {(uint64_t)-1, (uint64_t)-1}, v_minus2 = (uint64_t)-2, v_closed = 9999;
+    uint64_t v_null = (uint64_t)open("/dev/null", O_RDONLY | O_CLOEXEC);
+    result("IN_FENCE_FD -1 twice", commit(fd, t, 1, &g_plane, &two, fence_props, no_fences, 0));
+    result("IN_FENCE_FD -2", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_minus2, 0));
+    result("IN_FENCE_FD not an open file", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_closed, 0));
+    result("IN_FENCE_FD a file that is no fence", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_null, 0));
+    close((int)v_null);
     /* Which error a bad pointer gives depends on what was read before it. */
     const void *bad = (const void *)8;
     result("unknown object, bad other pointers", commit(fd, t, 1, &unknown, bad, bad, bad, 0));

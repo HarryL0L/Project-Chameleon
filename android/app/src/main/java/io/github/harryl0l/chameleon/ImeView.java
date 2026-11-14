@@ -4,6 +4,7 @@ package io.github.harryl0l.chameleon;
 import android.content.Context;
 import android.icu.text.BreakIterator;
 import android.text.InputType;
+import android.view.KeyEvent;
 import android.view.View;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -87,6 +88,20 @@ final class ImeView extends View {
                 return true;
             }
 
+            /* The keyboard's Backspace as a key (the desktop gets it from
+             * the activity): one character less before the cursor here too. */
+            @Override
+            public boolean sendKeyEvent(KeyEvent event) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN && event.getKeyCode() == KeyEvent.KEYCODE_DEL
+                        && mBefore.length() > 0) {
+                    BreakIterator it = BreakIterator.getCharacterInstance();
+                    it.setText(mBefore.toString());
+                    int start = it.preceding(mBefore.length());
+                    mBefore.setLength(start == BreakIterator.DONE ? 0 : start);
+                }
+                return super.sendKeyEvent(event);
+            }
+
             /* Lengths in UTF-16 units; the text after the cursor is unknown, one character per unit. */
             @Override
             public boolean deleteSurroundingText(int beforeLength, int afterLength) {
@@ -98,10 +113,13 @@ final class ImeView extends View {
             public boolean deleteSurroundingTextInCodePoints(int beforeLength, int afterLength) {
                 int units = 0;
                 for (int i = mBefore.length(); beforeLength > 0; beforeLength--) {
-                    int cp = i > 0 ? mBefore.codePointBefore(i) : 'x';
-                    int n = Character.charCount(cp);
+                    if (i == 0) { /* text it wasn't given: one unit each */
+                        units = (int) Math.min((long) units + beforeLength, Integer.MAX_VALUE);
+                        break;
+                    }
+                    int n = Character.charCount(mBefore.codePointBefore(i));
                     units += n;
-                    i -= Math.min(n, i);
+                    i -= n;
                 }
                 InputSender.deleteText(charactersBefore(units), Math.max(afterLength, 0));
                 return true;

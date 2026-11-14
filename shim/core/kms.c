@@ -151,7 +151,8 @@ struct blob {
 
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
-static int g_plane_shown;           /* ...and it fills the active CRTC */
+static int g_plane_shown;           /* ...and it is on the screen (the active CRTC, an app that can show it) */
+static int g_plane_on, g_plane_partial; /* ...on the active CRTC; covering part of it */
 static struct cham_bo *g_cursor_bo; /* the cursor plane's buffer; holds a ref */
 static int g_has_cursor;            /* the card has a cursor plane */
 static int g_screen_off;            /* The compositor turned its screen off (idle, DPMS) */
@@ -590,7 +591,8 @@ static int create_blob(struct fake_fd *f, struct drm_mode_create_blob *c)
     if (!c->length || c->length > INT32_MAX - 64)
         return -EINVAL;
     struct blob *b = calloc(1, sizeof *b);
-    b->data = b ? malloc(c->length) : NULL;
+    if (b)
+        b->data = malloc(c->length);
     if (!b || !b->data) {
         free(b);
         return -ENOMEM;
@@ -701,6 +703,8 @@ static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
     if (c->width > bo->width || c->height > bo->height)
         return -EINVAL;
     struct fb *fb = calloc(1, sizeof *fb);
+    if (!fb)
+        return -ENOMEM;
     fb->id = g_next_object_id++;
     fb->width = c->width;
     fb->height = c->height;
@@ -750,7 +754,7 @@ static void plane_drop_fb(uint32_t id)
     if (g_plane_bo)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = NULL;
-    g_plane_shown = 0;
+    g_plane_shown = g_plane_on = 0;
 }
 
 /* The file lets go of its framebuffer. RMFB also takes it off the plane;
@@ -814,18 +818,41 @@ static int g_cursor_fence = -1; /* ...the cursor plane's */
 
 /* ---- atomic ---- */
 
-/* Sets a property in `s`; *touched gets the planes it changes (1 primary,
- * 2 cursor). */
+/* sync_file_get_fence() takes sync files only. The host tests' fences are
+ * pipes, sockets and eventfds, which become readable. */
+static int is_sync_file(int fd)
+{
+#ifdef CHAM_HOST_TEST
+    struct stat st;
+    return fstat(fd, &st) == 0 && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISCHR(st.st_mode) &&
+           !S_ISBLK(st.st_mode);
+#else
+    /* by its name, which every kernel has (4.4's are "sync_fence" and lack
+     * today's ioctls); a file whose name can't be read is let through */
+    char path[32], name[32];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(path, name, sizeof name - 1);
+    if (n <= 0)
+        return 1;
+    name[n] = 0;
+    return strncmp(name, "anon_inode:sync_", 16) == 0;
+#endif
+}
+
+/* Sets a property in `s`; *touched gets the objects it changes (1 primary
+ * plane, 2 cursor plane, 4 CRTC, 8 connector). */
 static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v, int *touched)
 {
     switch (obj) {
     case ID_CONNECTOR:
+        *touched |= 8;
         if (prop == P_CONN_CRTC_ID && (v == 0 || v == ID_CRTC)) {
             s->conn_crtc = (uint32_t)v;
             return 0;
         }
         return -EINVAL; /* DPMS too: the kernel takes it only through the legacy SETPROPERTY */
     case ID_CRTC:
+        *touched |= 4;
         if (prop == P_CRTC_ACTIVE && v <= 1) {
             s->active = v;
             return 0;
@@ -861,12 +888,22 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         case P_CRTC_W: p->crtc_w = (uint32_t)v; return 0;
         case P_CRTC_H: p->crtc_h = (uint32_t)v; return 0;
         case P_IN_FENCE_FD: {
+            /* As drm_atomic_plane_set_property: one fence per plane and
+             * commit, -1 for none, else a sync file. */
             int *fence = cursor ? &g_cursor_fence : &g_in_fence;
             if (*fence >= 0)
+                return -EINVAL;
+            if (v == (uint64_t)-1)
+                return 0;
+            if (v > INT32_MAX)
+                return -EINVAL;
+            *fence = card_fd_get((int)v);
+            if (*fence >= 0 && !is_sync_file(*fence)) {
                 close(*fence);
-            *fence = (int64_t)v >= 0 ? card_fd_get((int)v) : -1;
-            if (*fence < 0 && (int64_t)v >= 0)
-                return -EINVAL; /* not an open file */
+                *fence = -1;
+            }
+            if (*fence < 0)
+                return -EINVAL; /* not an open file, or not a fence */
             if (!cursor)
                 s->in_fence = *fence;
             return 0;
@@ -933,6 +970,8 @@ void kms_mode_size(uint32_t *width, uint32_t *height)
 
 struct cham_bo *kms_screen_bo_locked(void)
 {
+    /* for the app connected now: it may show a partial plane the last one couldn't */
+    g_plane_shown = g_plane_on && (!g_plane_partial || link_shows_planes_locked());
     return g_plane_shown ? g_plane_bo : NULL;
 }
 
@@ -1090,6 +1129,15 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
         }
     }
 
+    /* As prepare_signaling: an event is some CRTC's, and a commit has the
+     * CRTC when it sets a property of it or of a plane or connector that is
+     * or was on it. */
+    int has_crtc = (touched & 4) || ((touched & 8) && (s.conn_crtc || g_state.conn_crtc)) ||
+                   ((touched & 1) && (s.primary.crtc || g_state.primary.crtc)) ||
+                   ((touched & 2) && (s.cursor.crtc || g_state.cursor.crtc));
+    if ((a->flags & DRM_MODE_PAGE_FLIP_EVENT) && !has_crtc)
+        REFUSE(-EINVAL, "page-flip event without a CRTC in the commit");
+
     const struct drm_mode_modeinfo *mode = state_mode(&s);
     const struct drm_mode_modeinfo *old_mode = state_mode(&g_state);
     int on = s.active && mode;
@@ -1155,12 +1203,13 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     if (g_cursor_bo)
         bo_unref_locked(g_cursor_bo);
     g_cursor_bo = cbo;
+    int new_size = modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
+                                       mode->vdisplay != old_mode->vdisplay);
     g_state = s;
-    free_destroyed_blobs();
+    free_destroyed_blobs(); /* the old mode's too, if the compositor destroyed it */
     free_unused_fbs(); /* a closed framebuffer the plane just let go of */
 
-    if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
-                            mode->vdisplay != old_mode->vdisplay))
+    if (new_size)
         cham_log("the compositor set mode %ux%u", mode->hdisplay, mode->vdisplay);
     /* Off after having been on: the compositor's DPMS off (CRTC inactive, mode
      * cleared) or the DPMS property; e.g. Plasma's power management after a
@@ -1181,7 +1230,9 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     struct link_plane lp = {.plain = 1};
     int partial = bo && on && plane_geometry(pp, fb, mode, &lp);
     link_plane_locked(&lp);
-    g_plane_shown = bo && on && s.dpms == 0 && (!partial || link_shows_planes_locked());
+    g_plane_on = bo && on && s.dpms == 0;
+    g_plane_partial = partial;
+    g_plane_shown = g_plane_on && (!partial || link_shows_planes_locked());
     if (g_has_cursor) {
         /* The app shows it over the frame, from the next present on. */
         struct link_cursor c = {.fence = -1};
@@ -1351,7 +1402,7 @@ static int set_master(struct fake_fd *f)
     if (g_master)
         return -EBUSY;
     g_master = f;
-    f->master = f->was_master = 1;
+    f->master = f->was_master = f->authenticated = 1; /* drm_new_set_master */
     return 0;
 }
 

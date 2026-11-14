@@ -70,12 +70,13 @@ static volatile int g_stop_presenter;
  * cleared), the app is frozen (presents get no answer), the app's connection
  * drops, the app sends a CONFIG with these flags (-1: none). */
 static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
+static volatile int g_no_surface; /* ...that CONFIG is 0x0: the app's surface is gone */
 static volatile int g_slow_copy_ms; /* the "blit" fence of a RELEASE signals this late */
 static volatile int g_no_latch; /* FRAME_DONE says -1: Android latched nothing (nothing changed) */
 /* A display with its own vsync (VSYNC_PERIOD from g_vsync0): Android latches
  * a frame VSYNC_LATCH before a vsync, late by up to 3 ms (its load), shows it
  * on that vsync and sends its present fence (CHAM_PRESENTED). */
-#define VSYNC_PERIOD 8340000ull /* the display's real rate: a little off the mode's 120.00 Hz */
+#define VSYNC_PERIOD 8400000ull /* the display's real rate: nearly 1% off the mode's 120.00 Hz */
 #define VSYNC_LATCH 3000000ull
 static volatile uint64_t g_vsync0;
 /* The cursor plane as the app last heard it (CHAM_CURSOR), and how often. */
@@ -215,6 +216,8 @@ static void *presenter_main(void *arg)
         if (g_send_flags >= 0) {
             struct cham_msg flags = cfg;
             flags.id = (uint32_t)g_send_flags;
+            if (g_no_surface)
+                flags.a = 0;
             cham_send(c, &flags, -1);
             g_send_flags = -1;
         }
@@ -419,6 +422,18 @@ static int fds_anywhere(dev_t dev, ino_t ino)
     if (procs)
         closedir(procs);
     return n;
+}
+
+/* A commit as the ioctl takes it (libdrm drops an empty one and a property set twice). */
+static int raw_commit(int fd, uint32_t flags, uint32_t obj, uint32_t nprops, const uint32_t *props, const uint64_t *values)
+{
+    struct drm_mode_atomic a = {.flags = flags,
+                                .count_objs = obj ? 1 : 0,
+                                .objs_ptr = (uintptr_t)&obj,
+                                .count_props_ptr = (uintptr_t)&nprops,
+                                .props_ptr = (uintptr_t)props,
+                                .prop_values_ptr = (uintptr_t)values};
+    return drmIoctl(fd, DRM_IOCTL_MODE_ATOMIC, &a);
 }
 
 static void flip_to(int fd, uint32_t plane_id, uint32_t p_fb, uint32_t fb)
@@ -1096,12 +1111,90 @@ int main(int argc, char **argv)
         errno = 0;
         CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == EINVAL, "a framebuffer without a CRTC: EINVAL");
         drmModeAtomicFree(req);
+        /* A fence for each plane, as KWin's commits have while the pointer
+         * is on the cursor plane; one plane takes one. */
+        uint32_t cp_fence = prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "IN_FENCE_FD", NULL);
+        int fa[2], fb2[2];
+        if (pipe(fa) != 0 || pipe(fb2) != 0)
+            return 1;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[1]);
+        drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)fa[0]);
+        drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)-21);
+        drmModeAtomicAddProperty(req, cursor_id, cp_fence, (uint64_t)fb2[0]);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        CHECK(ok && fcntl(fa[0], F_GETFD) >= 0 && fcntl(fb2[0], F_GETFD) >= 0,
+              "a commit with a fence for each plane; both stay the caller's");
+        uint32_t twice[2] = {p_fence, p_fence};
+        uint64_t two_fences[2] = {(uint64_t)fa[0], (uint64_t)fb2[0]};
+        errno = 0;
+        CHECK(raw_commit(fd, test, plane_id, 2, twice, two_fences) != 0 && errno == EINVAL, "two fences for one plane: EINVAL");
+        close(fa[0]), close(fa[1]), close(fb2[0]), close(fb2[1]);
+        errno = 0;
+        CHECK(raw_commit(fd, flip, 0, 0, NULL, NULL) != 0 && errno == EINVAL,
+              "a page-flip event for a commit of nothing: EINVAL (no CRTC in it)");
+        /* The app without a surface (in the background, maybe frozen) gets
+         * no cursor messages; it gets the cursor when its surface is back. */
+        g_no_surface = 1;
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+        msgs = g_cursor_msgs;
+        ok = 1;
+        for (int i = 0; i < 5 && ok; i++) {
+            req = drmModeAtomicAlloc();
+            drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)(30 + i));
+            ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 500);
+            drmModeAtomicFree(req);
+        }
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs, "no surface: the cursor's moves aren't sent (%d messages)", g_cursor_msgs - msgs);
+        g_no_surface = 0;
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+        CHECK(g_cursor_msgs > msgs && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE &&
+                  CHAM_INPUT_DX(g_cursor_a) == 34,
+              "the surface is back: the cursor where it is now, its image again");
+        ok = 1;
+        for (int i = 0; i < 3 && ok; i++) {
+            flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+            ok = wait_flip(fd, 200);
+        }
+        CHECK(ok, "...and flips complete by the app again");
+        unchanged = g_unchanged_presents;
         req = drmModeAtomicAlloc();
         CURSOR(req, 0, 0, 0, 0, 0, 0, 0);
         ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
         drmModeAtomicFree(req);
         usleep(20000);
         CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "cursor off: the app hides it");
+        /* A framebuffer closed while it is on the plane, its buffer destroyed,
+         * lives until the plane lets go; the app must still hear that the
+         * cursor is off. */
+        {
+            struct gbm_bo *cbo2 = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR | GBM_BO_USE_RENDERING);
+            uint32_t ch2 = 0, cfb2 = 0;
+            int dmabuf2 = cbo2 ? gbm_bo_get_fd(cbo2) : -1;
+            drmPrimeFDToHandle(fd, dmabuf2, &ch2);
+            close(dmabuf2);
+            uint32_t h2[4] = {ch2}, pitches2[4] = {cbo2 ? gbm_bo_get_stride(cbo2) : 0};
+            ok = drmModeAddFB2(fd, 64, 64, DRM_FORMAT_ARGB8888, h2, pitches2, offsets, &cfb2, 0) == 0;
+            drmCloseBufferHandle(fd, ch2);
+            req = drmModeAtomicAlloc();
+            CURSOR(req, cfb2, 7, 7, 64, 64, 64, 64);
+            ok = ok && drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+            drmModeAtomicFree(req);
+            usleep(20000);
+            ok = ok && g_cursor_id != CHAM_CURSOR_HIDE && drmModeCloseFB(fd, cfb2) == 0;
+            if (cbo2)
+                gbm_bo_destroy(cbo2);
+            req = drmModeAtomicAlloc();
+            CURSOR(req, 0, 0, 0, 0, 0, 0, 0);
+            ok = ok && drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+            drmModeAtomicFree(req);
+            usleep(20000);
+            CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "a closed framebuffer's cursor off: the app hides it too");
+        }
         req = drmModeAtomicAlloc();
         CURSOR(req, cfb, 5, 5, 64, 64, 64, 64);
         ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);

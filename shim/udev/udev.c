@@ -636,7 +636,8 @@ EXPORT int udev_enumerate_add_syspath(struct udev_enumerate *e, const char *sysp
 {
     if (!e)
         return -EINVAL;
-    if (index_of_syspath(syspath) < 0 && !(syspath && strcmp(syspath, CARD_SYSPATH) == 0))
+    if (index_of_syspath(syspath) < 0 &&
+        !(syspath && (strcmp(syspath, CARD_SYSPATH) == 0 || strcmp(syspath, RENDER_SYSPATH) == 0)))
         return e->real ? REAL(udev_enumerate_add_syspath, syspath) : -EINVAL;
     if (e->n >= MAX_LISTED)
         return -EINVAL;

@@ -372,31 +372,33 @@ static int read_own(void *to, uint64_t from, size_t n)
     return n == 0 || process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)n ? 0 : -1;
 }
 
-/* The fd a commit gives as IN_FENCE_FD, or -1: none, more than one, or
- * anything unreadable (the service then asks, as for any other fd). */
-static int commit_fence(int fd, const void *arg)
+/* The fds a commit gives as IN_FENCE_FD (one per plane: the primary's and
+ * the cursor's), into found[2]; how many: none for more, or for anything
+ * unreadable (the service then asks, as for any other fd). */
+static int commit_fences(int fd, const void *arg, int found[2])
 {
     struct drm_mode_atomic a;
     uint32_t counts[16], props[128];
     uint64_t values[128];
     if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a) || a.count_objs > 16 ||
         read_own(counts, a.count_props_ptr, a.count_objs * sizeof counts[0]))
-        return -1;
+        return 0;
     uint32_t total = 0;
     for (uint32_t i = 0; i < a.count_objs; i++)
         total += counts[i] < 128 ? counts[i] : 128;
     if (total > 128 || read_own(props, a.props_ptr, total * sizeof props[0]) ||
         read_own(values, a.prop_values_ptr, total * sizeof values[0]))
-        return -1;
-    int found = -1;
+        return 0;
+    int n = 0;
     for (uint32_t k = 0; k < total; k++) {
         if ((int64_t)values[k] < 0 || values[k] > INT32_MAX || !is_fence_prop(fd, props[k]))
             continue;
-        if (found >= 0)
-            return -1;
-        found = (int)values[k];
+        if (n == 2 || fcntl((int)values[k], F_GETFD) < 0)
+            return 0;
+        if (n == 0 || found[0] != (int)values[k])
+            found[n++] = (int)values[k];
     }
-    return found >= 0 && fcntl(found, F_GETFD) >= 0 ? found : -1;
+    return n;
 }
 
 void cham_bo_handle_close(int fd, uint32_t handle)
@@ -563,11 +565,18 @@ int ioctl(int fd, int request, ...)
         }
         if (id) {
             struct cham_msg req = {CARD_IOCTL, id, (unsigned int)request, (uint64_t)(uintptr_t)arg};
-            int fence = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fence(fd, arg) : -1;
-            if (fence >= 0)
-                req.a |= (uint64_t)(fence + 1) << 32; /* which of our fds it is */
+            int fences[2] = {-1, -1};
+            int n = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fences(fd, arg, fences) : 0;
+            if (n)
+                req.a |= (uint64_t)(fences[0] + 1) << 32; /* which of our fds it is */
             lock_conn();
-            int64_t ret = call_locked(req, fence, NULL, NULL);
+            if (n == 2) { /* the second one ahead of the request */
+                struct cham_msg ahead = {CARD_SEND_FD, 0, (uint64_t)fences[1], 0};
+                int s = connect_locked();
+                if (s >= 0)
+                    cham_send(s, &ahead, fences[1]);
+            }
+            int64_t ret = call_locked(req, fences[0], NULL, NULL);
             unlock_conn();
             if (ret < 0) {
                 errno = (int)-ret;

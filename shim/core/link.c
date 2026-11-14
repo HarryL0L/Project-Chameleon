@@ -197,10 +197,14 @@ static void vsync_seen_locked(uint64_t t)
     if (!g_vsync_ref_ns || t - g_vsync_ref_ns > 4000000000ull)
         g_vsync_ref_ns = t; /* a fresh start: the mode may have changed meanwhile */
     else if (t - g_vsync_ref_ns >= 200000000ull) {
-        uint64_t n = (t - g_vsync_ref_ns + p / 2) / p, est = (t - g_vsync_ref_ns) / n;
+        /* The refreshes since the reference, counted with the period
+         * measured so far: a panel a little off its mode's rate is whole
+         * refreshes off the mode's count after a few seconds. */
+        uint64_t q = g_vsync_period ? g_vsync_period : p;
+        uint64_t n = (t - g_vsync_ref_ns + q / 2) / q, est = n ? (t - g_vsync_ref_ns) / n : 0;
         if (est > p - p / 20 && est < p + p / 20)
             g_vsync_period = est;
-        else
+        else if (n)
             g_vsync_ref_ns = t, g_vsync_period = 0; /* the display runs at another rate */
     }
     if (!g_vsync_ns)
@@ -255,9 +259,12 @@ static uint64_t phase_of(uint64_t t, uint64_t base, uint64_t p)
 static int grid_locked(uint64_t now, uint64_t *anchor, uint64_t *period)
 {
     uint64_t p = g_mode_period, v = g_vsync_period;
-    if (v > p - p / 20 && v < p + p / 20)
-        p = v; /* measured, and still the mode's rate */
-    if (p && g_vsync_ns && (now > g_vsync_ns ? now - g_vsync_ns : 0) < GRID_MAX_AGE_NS) {
+    int measured = v > p - p / 20 && v < p + p / 20; /* ...and still the mode's rate */
+    if (measured)
+        p = v;
+    /* Only with the display's measured period: the mode's is a little off
+     * it, which puts the latches of earlier refreshes in the wrong place. */
+    if (p && measured && g_vsync_ns && (now > g_vsync_ns ? now - g_vsync_ns : 0) < GRID_MAX_AGE_NS) {
         /* where in the refresh the recent latches fall: they come late by
          * varying amounts, never early, so the stretch they cover starts
          * after the widest gap between them */
@@ -556,7 +563,10 @@ static void send_cursor_locked(int new_image, int fence)
 {
     struct cham_msg m = {CHAM_CURSOR, CHAM_CURSOR_HIDE, 0, 0};
     g_cursor_sent = 0;
-    if (!g_cfg_cursor) { /* an app without it (CHAMELEON_CURSOR_PLANE=1) doesn't know the message */
+    /* An app without it (CHAMELEON_CURSOR_PLANE=1) doesn't know the message;
+     * one without a surface shows nothing, and may not be reading (Android
+     * freezes apps in the background): it gets the cursor with its surface. */
+    if (!g_cfg_cursor || !g_cfg_w || !g_cfg_h) {
         if (fence >= 0)
             close(fence);
         return;
@@ -582,7 +592,7 @@ void link_cursor_locked(const struct link_cursor *c)
     int same = c->bo == o->bo && !c->new_image &&
                (!c->bo || (c->x == o->x && c->y == o->y && c->src_x == o->src_x && c->src_y == o->src_y &&
                            c->w == o->w && c->h == o->h));
-    int new_image = c->new_image || c->bo != o->bo;
+    int new_image = c->new_image || c->bo != o->bo || !g_cursor_sent; /* unsent: its image too */
     g_cursor = *c;
     g_cursor.fence = -1;
     if (same && g_cursor_sent && g_cursor_gen == g_gen) {
@@ -610,8 +620,10 @@ void link_screen_off_locked(int off)
 
 void link_forget_bo_locked(struct cham_bo *bo)
 {
-    if (g_cursor.bo == bo)
-        g_cursor.bo = NULL; /* the plane let go of it already */
+    if (g_cursor.bo == bo) {
+        g_cursor.bo = NULL; /* the plane let go of it already; */
+        g_cursor_sent = 0;  /* the app, which shows its copy, hears of it with the next state */
+    }
     if (bo->slot >= 0 && bo->slot_gen == g_gen) {
         g_slots[bo->slot] = NULL;
         send_msg_locked(CHAM_BUFFER_REMOVE, (uint32_t)bo->slot, 0, 0, -1);
@@ -679,8 +691,8 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
     case CHAM_FRAME_DONE: {
         /* b: when Android latched it; 0 if skipped. A transaction that changed
          * nothing on screen latches nothing, and Android reports -1 for it: a
-         * time that isn't in the past is no latch time. */
-        uint64_t now = now_ns(), latch = m->b <= now ? m->b : 0;
+         * time that isn't in the recent past is no latch time. */
+        uint64_t now = now_ns(), latch = m->b <= now && now - m->b < 1000000000ull ? m->b : 0;
         if (latch) {
             g_latch_ns = latch;
             g_latches[g_latch_next++ % LATCHES] = latch;

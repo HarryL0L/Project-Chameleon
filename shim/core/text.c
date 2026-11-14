@@ -99,8 +99,9 @@ static size_t utf8(uint32_t cp, char *out)
     return 4;
 }
 
-/* COMMIT / PREEDIT with text[0..len), or KEYSYM tapped count times. */
-static void ime_send(uint32_t kind, const uint32_t *text, size_t len, uint32_t keysym, uint32_t count)
+/* COMMIT / PREEDIT with text[0..len), or KEYSYM tapped count times; whether
+ * the input method has it. */
+static int ime_send(uint32_t kind, const uint32_t *text, size_t len, uint32_t keysym, uint32_t count)
 {
     struct {
         struct cham_evdev_record h;
@@ -114,10 +115,15 @@ static void ime_send(uint32_t kind, const uint32_t *text, size_t len, uint32_t k
     size_t size = sizeof r.h + r.h.size;
     if (g_ime >= 0 && send(g_ime, &r, size, MSG_DONTWAIT | MSG_NOSIGNAL) != (ssize_t)size)
         ime_closed(); /* gone or stuck: its socket holds far more than one message */
+    return g_ime >= 0;
 }
 
+static void tap(uint32_t keysym);
+static uint32_t keysym_for(uint32_t cp);
+
 /* Committed text to the text field, each newline in it as Return; the first
- * part even when empty, as it replaces the text being composed. */
+ * part even when empty, as it replaces the text being composed. If the
+ * input method goes away on the way, the rest is typed as keys. */
 static void ime_commit(void)
 {
     size_t start = 0;
@@ -125,12 +131,15 @@ static void ime_commit(void)
         int newline = i < g_text_len && (g_text[i] == '\n' || g_text[i] == '\r');
         if (i < g_text_len && !newline)
             continue;
-        if (i > start || start == 0)
-            ime_send(CHAM_IME_COMMIT, g_text + start, i - start, 0, 0);
-        if (newline)
-            ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_RETURN, 1);
+        if ((i > start || start == 0) && !ime_send(CHAM_IME_COMMIT, g_text + start, i - start, 0, 0))
+            break;
+        start = i; /* sent up to here */
+        if (newline && !ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_RETURN, 1))
+            break;
         start = i + 1;
     }
+    for (size_t i = start; g_ime < 0 && i < g_text_len; i++)
+        tap(keysym_for(g_text[i]));
 }
 
 /* ---- as keys ---- */

@@ -1,14 +1,14 @@
 # Chameleon for Termux (the shim)
 
-Runs the Termux `kwin_wayland` (6.7.5, no Chameleon-specific patches) and a Plasma session on
+Runs the Termux `kwin_wayland` (6.8, no Chameleon-specific patches) and a Plasma session on
 the Chameleon app's screen, rendering with Android's GPU driver.
 
 | file | replaces | does |
 |---|---|---|
-| `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, one primary plane, atomic commits → PRESENT, FRAME_DONE → page-flip event; the input devices, the link to the app and the input thread |
+| `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, a primary and a cursor plane, atomic commits → PRESENT, FRAME_DONE → page-flip event on the display's vsync; the render node `renderD128`; the input devices, the link to the app and the input thread |
 | `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/wayland.c`); crash reporter where Android's driver renders |
 | `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
-| `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, primary node only) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
+| `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, `EGL_EXT_device_drm_render_node`) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
 
 ## Run
 
@@ -41,8 +41,8 @@ backend by themselves, so plasma-workspace needs no change either. The
 compositor's Wayland socket is learnt from whichever program binds it
 (`kwin_wayland_wrapper` for KWin); `CHAMELEON_WAYLAND_SOCKET` names it for a
 compositor given its socket from outside the session. Xwayland keeps
-rendering on the CPU (`XWAYLAND_NO_GLAMOR=1`) until the compositor can
-import its GPU buffers.
+rendering on the CPU (`XWAYLAND_NO_GLAMOR=1`): its GPU path (glamor) isn't
+supported yet.
 
 The compositor loads the EGL vendor through Termux's own glvnd
 (`libEGL.so.1`, `libGLESv2.so.2`): `chameleon` sets

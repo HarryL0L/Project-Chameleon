@@ -43,7 +43,8 @@ struct caller {
     pid_t pid;
     uid_t uid;
     int broken; /* a callback went unanswered: the connection is out of step */
-    int sent_fd, sent_num; /* an fd that came with the request, and its number in the caller */
+    int sent_fd[2], sent_num[2]; /* fds that came with the request (the second ahead of it,
+                                  * CARD_SEND_FD), and their numbers in the caller */
 };
 /* The caller of the call running on a thread. A pthread key, not __thread:
  * bionic refuses executables whose TLS segment is aligned below 64 bytes,
@@ -104,8 +105,9 @@ static int callback_answer(struct caller *c, struct cham_msg *m, int *fd_out)
 int card_fd_get(int n)
 {
     struct caller *c = current();
-    if (c && c->sent_fd >= 0 && n == c->sent_num)
-        return fcntl(c->sent_fd, F_DUPFD_CLOEXEC, 0); /* came with the request */
+    for (int i = 0; c && i < 2; i++)
+        if (c->sent_fd[i] >= 0 && n == c->sent_num[i])
+            return fcntl(c->sent_fd[i], F_DUPFD_CLOEXEC, 0); /* came with the request */
     struct cham_msg m = {CARD_GET_FD, 0, (uint64_t)(int64_t)n, 0};
     int fd = -1;
     if (!c || c->broken || cham_send(c->sock, &m, -1) != 0 || callback_answer(c, &m, &fd) != 0 ||
@@ -122,11 +124,10 @@ int card_fd_install(int fd, int cloexec)
     struct caller *c = current();
     struct cham_msg m = {CARD_PUT_FD, 0, (uint64_t)(cloexec != 0), 0};
     int unused = -1;
-    if (!c || c->broken || cham_send(c->sock, &m, fd) != 0 || callback_answer(c, &m, &unused) != 0)
-        return -EMFILE;
+    int failed = !c || c->broken || cham_send(c->sock, &m, fd) != 0 || callback_answer(c, &m, &unused) != 0;
     if (unused >= 0)
         close(unused);
-    return (int)(int64_t)m.a;
+    return failed ? -EMFILE : (int)(int64_t)m.a;
 }
 
 /* ---- files ---- */
@@ -274,10 +275,10 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         struct fake_fd *f = file_get(m->id);
         int ret = -EBADF;
         if (f) {
-            c->sent_fd = fd; /* an fd of the caller's this call names (IN_FENCE_FD) */
-            c->sent_num = (int)(m->a >> 32) - 1;
+            c->sent_fd[0] = fd; /* an fd of the caller's this call names (IN_FENCE_FD) */
+            c->sent_num[0] = (int)(m->a >> 32) - 1;
             ret = kms_ioctl(f, (unsigned int)m->a, (void *)(uintptr_t)m->b);
-            c->sent_fd = -1;
+            c->sent_fd[0] = -1;
             file_put(f);
         }
         answer(c, ret, -1);
@@ -315,14 +316,23 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
             input_note_socket(c->pid, path);
         break;
     }
+    case CARD_SEND_FD:
+        if (c->sent_fd[1] >= 0)
+            close(c->sent_fd[1]);
+        c->sent_fd[1] = fd >= 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : -1;
+        c->sent_num[1] = (int)(int64_t)m->a;
+        return; /* for the next request */
     default:
         c->broken = 1;
     }
+    if (c->sent_fd[1] >= 0)
+        close(c->sent_fd[1]);
+    c->sent_fd[1] = -1;
 }
 
 static void *conn_main(void *arg)
 {
-    struct caller c = {.sock = (int)(intptr_t)arg, .sent_fd = -1};
+    struct caller c = {.sock = (int)(intptr_t)arg, .sent_fd = {-1, -1}};
     struct ucred cred;
     socklen_t len = sizeof cred;
     if (getsockopt(c.sock, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
@@ -338,6 +348,8 @@ static void *conn_main(void *arg)
                 close(fd);
         }
     }
+    if (c.sent_fd[1] >= 0)
+        close(c.sent_fd[1]);
     close(c.sock);
     return NULL;
 }

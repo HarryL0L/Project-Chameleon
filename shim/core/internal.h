@@ -200,6 +200,8 @@ enum {
     CARD_BUFFER_AHB, /* + a dmabuf fd: -> a = 1 and then the AHardwareBuffer of the
                       * session's buffer behind it (any process's gbm buffer, an
                       * app's registered one), or -ENOENT */
+    CARD_SEND_FD,  /* + an fd, a = its number in the caller: a second fd the next
+                    * CARD_IOCTL names (a commit's other fence); no answer */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */

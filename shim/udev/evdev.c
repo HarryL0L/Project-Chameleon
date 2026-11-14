@@ -260,6 +260,15 @@ static void handle_record(struct client *c, const struct cham_evdev_record *h, c
             break;
         memcpy(&c->state, p, sizeof c->state);
         queue_dropped(c);
+        /* The frames it stands for are gone, their SYN_REPORTs with them,
+         * and the device may send nothing more for now (a key's release
+         * was among them): one, so the program reads the drop now, as the
+         * kernel's follows within the frame that overflowed. */
+        {
+            struct input_event syn = c->buf[(c->head - 1) & (c->size - 1)]; /* at its time */
+            syn.code = SYN_REPORT;
+            pass_event(c, &syn);
+        }
         break;
     case CHAM_EVDEV_FRAME:
     case CHAM_EVDEV_FRAME_GRABBED:

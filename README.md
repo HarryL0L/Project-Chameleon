@@ -153,15 +153,19 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
   caps, GEM handles), released when the file's last copy closes, even in a
   process that died.
 - It offers one connector (with an EDID: "Chameleon", the phone's physical
-  size, the app's size and refresh rate as its preferred mode), one CRTC
-  and one primary plane, with atomic
+  size, the app's size and refresh rate as its preferred mode), one CRTC,
+  a primary plane and a cursor plane (the pointer is its own Android
+  layer, so moving it redraws nothing), with atomic
   modesetting, `TEST_ONLY` commits, `EBUSY` while a flip is pending, and
-  page-flip events written to the pipe.
+  page-flip events written to the pipe, timed on the display's vsync.
+- `/dev/dri/renderD128` is the card's render node, for programs that only
+  render: every GPU buffer of the session can be shared through the card's
+  nodes by PRIME, as on a real GPU.
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's
   `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
   vblank keeps KWin running.
-- It also runs the input devices, the input thread and the registry of
-  apps' GPU buffers, so a KWin that dies takes none of them along.
+- It also runs the input devices, the input thread and the table of the
+  session's GPU buffers, so a KWin that dies takes none of them along.
   `libchameleon.so` keeps a crash reporter in programs that render with
   Android's driver, which logs the last GL/EGL calls and a symbolised
   backtrace.

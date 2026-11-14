@@ -198,7 +198,9 @@ void send_config_locked()
     uint64_t size = (uint64_t)(uint32_t)g_width | ((uint64_t)(uint32_t)g_height << 32);
     if (!g_sc)
         size = 0;
-    uint32_t flags = (set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0) | CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+    // The cursor plane only with a layer to show it on.
+    uint32_t flags = (set_back_pressure() ? CHAM_CONFIG_BACK_PRESSURE : 0) | (g_cursor_sc ? CHAM_CONFIG_CURSOR : 0) |
+                     CHAM_CONFIG_PLANE;
     if (size && g_window_width > 0 && g_window_height > 0)
         send_locked(CHAM_WINDOW, 0,
                     (uint64_t)(uint32_t)g_window_width | ((uint64_t)(uint32_t)g_window_height << 32), 0);
@@ -616,8 +618,10 @@ void apply_cursor_locked(ASurfaceTransaction *txn, FrameCtx *ctx)
     ARect src{bx, by, bx + (int32_t)(x1 - x0), by + (int32_t)(y1 - y0)};
     ARect dst{sx(x0), sy(y0), sx(x1), sy(y1)};
     const PoolBuf &shown = g_cursor_pool[g_cursor_shown];
-    if (src.right > shown.width || src.bottom > shown.height) {
-        // an older image, smaller than the producer's new one
+    if (src.right > shown.width || src.bottom > shown.height || dst.right <= dst.left || dst.bottom <= dst.top) {
+        // an older image, smaller than the producer's new one; or nothing
+        // left of it on a frame shown smaller (an empty destination would
+        // mean "unscaled" to Android)
         ASurfaceTransaction_setVisibility(txn, g_cursor_sc, ASURFACE_TRANSACTION_VISIBILITY_HIDE);
         return;
     }
@@ -637,8 +641,11 @@ void present_copy_locked(uint32_t id, uint64_t frame, int fence, Buffer *buf, co
     PoolBuf &p = g_pool[pi];
     g_stats.shown++;
     g_stats.copied++;
-    g_frame_width = pg ? pg->frame_w : buf->width;
-    g_frame_height = pg ? pg->frame_h : buf->height;
+    int frame_width = pg ? pg->frame_w : buf->width, frame_height = pg ? pg->frame_h : buf->height;
+    if (frame_width != g_frame_width || frame_height != g_frame_height)
+        g_cursor_dirty = true;  // placed and clipped against the frame: again for this one
+    g_frame_width = frame_width;
+    g_frame_height = frame_height;
     gpu_wait(p.release_fence);  // SurfaceFlinger finished scanning it out
     p.release_fence = -1;
     gpu_wait(fence);            // the producer finished rendering
@@ -1159,6 +1166,8 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSurfaceChanged(JNIEnv 
                                                                           jint refresh_mhz)
 {
     std::lock_guard<std::mutex> lock(g_lock);
+    if (width != g_width || height != g_height)
+        g_cursor_dirty = true;  // placed against the surface: again with the next frame
     g_width = width;
     g_height = height;
     g_window_width = window_width;
