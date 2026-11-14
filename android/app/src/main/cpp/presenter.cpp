@@ -889,6 +889,16 @@ bool connection_waiting()
 
 void set_mismatch(const std::string &text);
 
+// Is the producer there? nativeStatus() asks (CHAM_PING) every couple of
+// seconds while the activity is in front; these say how that stands. All in
+// CLOCK_MONOTONIC ns, 0 = not set.
+std::atomic<uint64_t> g_ping_sent{0};     // the last PING
+std::atomic<uint64_t> g_ping_waiting{0};  // the oldest PING without a PONG yet
+std::atomic<bool> g_pong_seen{false};     // this producer answers PINGs (older ones don't)
+std::atomic<uint64_t> g_compositor_ms{0}; // the last PONG: how long its compositor hasn't answered it
+std::atomic<uint64_t> g_lost{0};          // when the last producer's connection ended
+std::atomic<uint64_t> g_status_asked{0};  // the last nativeStatus()
+
 // Serves one producer until it leaves or a newer connection arrives.
 void serve(int client, int arrivals)
 {
@@ -901,6 +911,11 @@ void serve(int client, int arrivals)
         }
         g_displayed = -1;
         g_copy_mode = false;
+        g_ping_sent = 0;
+        g_ping_waiting = 0;
+        g_pong_seen = false;
+        g_compositor_ms = 0;
+        g_lost = 0;
         send_config_locked();
     }
     LOGI("producer connected");
@@ -1026,6 +1041,11 @@ void serve(int client, int arrivals)
             }
             break;
         }
+        case CHAM_PONG:
+            g_pong_seen = true;
+            g_ping_waiting = 0;
+            g_compositor_ms = msg.b;
+            break;
         default:
             LOGE("unknown message %u", msg.type);
             break;
@@ -1034,6 +1054,7 @@ void serve(int client, int arrivals)
             close(fd);
     }
 done:
+    g_lost = (uint64_t)mono_ns();
     {
         std::lock_guard<std::mutex> lock(g_lock);
         {
@@ -1218,6 +1239,9 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeScreenOff(JNIEnv *, jc
     return g_client >= 0 && g_screen_off;
 }
 
+// Called twice a second while the activity is in front. Also asks the
+// producer whether it is there, and says so when it or its compositor hasn't
+// answered for 3 s: a frozen desktop then explains itself.
 JNIEXPORT jstring JNICALL
 Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStatus(JNIEnv *env, jclass)
 {
@@ -1226,12 +1250,51 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStatus(JNIEnv *env, jc
         std::lock_guard<std::mutex> lock(g_status_lock);
         status = g_status;
     }
+    bool connected;
     {
         std::lock_guard<std::mutex> lock(g_lock);
-        if (g_client >= 0 && (g_displayed >= 0 || g_pool_displayed >= 0))
+        connected = g_client >= 0;
+        if (connected && (g_displayed >= 0 || g_pool_displayed >= 0))
             status = "showing frames";
     }
+    const uint64_t now = (uint64_t)mono_ns(), kSecond = 1000000000ull;
+    if (now - g_status_asked.exchange(now) > 2 * kSecond) {
+        // Back in front (nobody asked meanwhile, and the app may have been
+        // frozen): what was pending says nothing about now.
+        g_ping_sent = 0;
+        g_ping_waiting = 0;
+        g_compositor_ms = 0;
+    }
+    if (connected) {
+        if (now - g_ping_sent >= 2 * kSecond) {
+            uint64_t none = 0;
+            g_ping_waiting.compare_exchange_strong(none, now);
+            g_ping_sent = now;
+            send_msg(CHAM_PING, 0, now, 0);
+        }
+        uint64_t waiting = g_ping_waiting, compositor_ms = g_compositor_ms;
+        char text[128];
+        if (g_pong_seen && waiting && now - waiting >= 3 * kSecond) {
+            snprintf(text, sizeof text, "the desktop's service (chameleon-kernel) hasn't answered for %llu s",
+                     (unsigned long long)((now - waiting) / kSecond));
+            status = text;
+        } else if (compositor_ms >= 3000) {
+            snprintf(text, sizeof text, "the desktop hasn't responded for %llu s (its compositor is busy or stuck)",
+                     (unsigned long long)(compositor_ms / 1000));
+            status = text;
+        }
+    }
     return env->NewStringUTF(status.c_str());
+}
+
+// A producer was connected, and none has been for 3 s. If the session still
+// runs (the broker says), its service is gone.
+JNIEXPORT jboolean JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeLostProducer(JNIEnv *, jclass)
+{
+    uint64_t lost = g_lost;
+    std::lock_guard<std::mutex> lock(g_lock);
+    return g_client < 0 && lost && (uint64_t)mono_ns() - lost >= 3000000000ull;
 }
 
 JNIEXPORT void JNICALL

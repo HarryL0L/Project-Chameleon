@@ -177,6 +177,25 @@ static int connect_locked(void)
     return s;
 }
 
+/* The service answered here before and no longer does: it was stopped or
+ * killed (by Android, in the background) or crashed. Said once per program,
+ * as nothing else tells why the card went quiet. */
+static int g_served;
+
+static void service_lost_locked(void)
+{
+    static int said;
+    disconnect_locked();
+    if (!g_served || said++)
+        return;
+#ifdef __ANDROID__
+    const char *prog = getprogname();
+#else
+    const char *prog = program_invocation_short_name;
+#endif
+    cham_log("%s: chameleon-kernel is gone (stopped, killed or crashed): the card no longer works here", prog);
+}
+
 /* Sends a request (with fd, or followed by a bo's AHardwareBuffer) and answers
  * the service's questions until its CARD_DONE; returns that result, and its
  * fd in *fd_out. -ENODEV when there is no service. */
@@ -186,17 +205,18 @@ static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo
         *fd_out = -1;
     int s = connect_locked();
     if (s < 0 || cham_send(s, &req, fd) != 0 || (bo && bo_send(bo, s) != 0)) {
-        disconnect_locked();
+        service_lost_locked();
         return -ENODEV;
     }
     for (;;) {
         struct cham_msg m;
         int got = -1;
         if (cham_recv(s, &m, &got) != 1) {
-            disconnect_locked();
+            service_lost_locked();
             return -ENODEV;
         }
         if (m.type == CARD_DONE) {
+            g_served = 1;
             if (fd_out)
                 *fd_out = got;
             else if (got >= 0)
@@ -218,7 +238,7 @@ static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo
         if (got >= 0)
             close(got);
         if (cham_send(s, &reply, send_fd) != 0) {
-            disconnect_locked();
+            service_lost_locked();
             return -ENODEV;
         }
     }

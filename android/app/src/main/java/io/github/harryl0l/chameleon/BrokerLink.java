@@ -24,6 +24,7 @@ public final class BrokerLink extends BroadcastReceiver {
 
     private static IBinder sBroker;          // the latest broker announced
     private static IBinder sRegistered;      // the broker we registered with
+    private static boolean sConnected;       // it has passed us a connection
     private static PackageManager sPackages;
 
     /** Receives the shim's connections; only Termux's user may send them. */
@@ -38,8 +39,12 @@ public final class BrokerLink extends BroadcastReceiver {
                 return true;
             }
             ParcelFileDescriptor fd = data.readFileDescriptor();
-            if (fd != null)
+            if (fd != null) {
+                synchronized (BrokerLink.class) {
+                    sConnected = true;
+                }
                 PresenterActivity.nativeConnection(fd.detachFd());
+            }
             return true;
         }
     };
@@ -84,6 +89,7 @@ public final class BrokerLink extends BroadcastReceiver {
             data.writeStrongBinder(sConnections);
             sBroker.transact(Broker.REGISTER, data, null, IBinder.FLAG_ONEWAY);
             sRegistered = sBroker;
+            sConnected = false;
             Log.i(TAG, "registered with the Termux broker");
         } catch (Exception e) {
             Log.w(TAG, "cannot register with the Termux broker: " + e);
@@ -91,6 +97,18 @@ public final class BrokerLink extends BroadcastReceiver {
         } finally {
             data.recycle();
         }
+    }
+
+    /**
+     * The session whose service connected to us is still there: its broker
+     * lives exactly as long as it does (and answers; this asks it).
+     */
+    static boolean sessionRuns() {
+        IBinder broker;
+        synchronized (BrokerLink.class) {
+            broker = sConnected ? sRegistered : null;
+        }
+        return broker != null && broker.pingBinder();
     }
 
     private static boolean isTermux(int uid) {

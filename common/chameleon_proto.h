@@ -50,6 +50,10 @@ enum cham_msg_type {
                                goes in the frame, clipped to it (w or h 0: nothing), both in
                                CHAM_CURSOR_RECT's packing, scaled from a to b; the rest of the frame
                                is black. A PRESENT without it shows its whole buffer as the frame. */
+    CHAM_PONG = 10,         /* answers a PING, once the producer has taken the lock its card
+                               requests take (a stuck producer doesn't answer): a = the PING's a,
+                               b = how long the compositor has left the producer's own question
+                               to it unanswered, in ms (0: it answers, or isn't asked) */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),
@@ -73,6 +77,9 @@ enum cham_msg_type {
                                that showed it. It signals as the display starts showing the
                                frame, so its signal time is a vsync; the producer's vblank
                                ticks follow these (older producers ignore it, closing the fd). */
+    CHAM_PING = 109,        /* is the producer there? Sent every few seconds while the app is in
+                               front; a comes back in PONG. Older producers ignore it, so the
+                               presenter expects answers only once one has come. */
 };
 
 /* Input events, presenter -> producer (chameleon-kernel serves them as evdev

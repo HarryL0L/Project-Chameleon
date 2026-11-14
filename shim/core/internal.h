@@ -93,6 +93,9 @@ struct cham_msg;
 /* CHAM_INPUT, CHAM_CONFIG (the connector's mode) and CHAM_CLIPBOARD_OFFER
  * for clipboard.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
+/* How long the compositor has left the input thread's question (a
+ * wl_display.sync per CHAM_PING) unanswered, in ms; 0: it answers. Any thread. */
+uint32_t input_compositor_wait_ms(void);
 
 /* ---- wlpath.c: the compositor's Wayland socket ---- */
 /* A process bound a Wayland socket (card.c). */

@@ -77,6 +77,7 @@ public class PresenterActivity extends Activity
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    private static native boolean nativeLostProducer();
     /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
     static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
@@ -115,6 +116,8 @@ public class PresenterActivity extends Activity
         @Override
         public void run() {
             String status = nativeStatus();
+            if ("waiting for Termux".equals(status) && nativeLostProducer() && BrokerLink.sessionRuns())
+                status = "the desktop's session still runs, but its service (chameleon-kernel) is gone";
             boolean off = nativeScreenOff();
             boolean showing = off || "showing frames".equals(status);
             mStatus.setVisibility(showing ? View.GONE : View.VISIBLE);
@@ -164,6 +167,7 @@ public class PresenterActivity extends Activity
         view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
         mStatus.setTextColor(Color.LTGRAY);
+        mStatus.setBackgroundColor(0xC0000000); // readable over a frozen frame too
         mStatus.setTextSize(12);
         mStatus.setPadding(32, 96, 32, 32);
         // KWin turned its screen off (idle): a tap wakes it. The tap is ours,

@@ -94,10 +94,75 @@ static void (*k_registry_listener[])(void) = {
     (void (*)(void))registry_global_remove,
 };
 
+/* ---- is the compositor there? ---- */
+
+/* One wl_display.sync at a time, put per CHAM_PING: a compositor whose main
+ * loop runs answers at once. How long the pending one has waited is what
+ * the app is told (link.c) and, from 3 s on, what the log says. */
+static uint64_t g_asked_ns; /* when; 0: none pending. Written here, read by any thread */
+static struct wl_proxy *g_ask;
+static int g_ask_logged, g_ask_late;
+
+uint32_t input_compositor_wait_ms(void)
+{
+    uint64_t asked = __atomic_load_n(&g_asked_ns, __ATOMIC_RELAXED), now = now_ns();
+    return asked && now > asked ? (uint32_t)((now - asked) / 1000000) : 0;
+}
+
+static void ask_forget(void)
+{
+    g_ask = NULL;
+    g_ask_logged = g_ask_late = 0;
+    __atomic_store_n(&g_asked_ns, 0, __ATOMIC_RELAXED);
+}
+
+static void ask_done(void *data, struct wl_proxy *callback, uint32_t serial)
+{
+    (void)data;
+    (void)serial;
+    uint32_t ms = input_compositor_wait_ms();
+    if (g_ask_late)
+        cham_log("the compositor answers again, after %u s", ms / 1000);
+    else if (g_ask_logged)
+        cham_log("the compositor answered in %u ms", ms);
+    wl.proxy_destroy(callback);
+    ask_forget();
+}
+
+static void (*k_ask_listener[])(void) = {(void (*)(void))ask_done};
+
+/* logged: the app's window just came back, so the log gets the answer's time. */
+static void ask_compositor(int logged)
+{
+    if (!g_display || !wl.callback_iface)
+        return;
+    if (g_ask) {
+        uint32_t ms = input_compositor_wait_ms();
+        if (ms >= 3000 && !g_ask_late) {
+            struct ucred peer = {0};
+            socklen_t len = sizeof peer;
+            getsockopt(wl.get_fd(g_display), SOL_SOCKET, SO_PEERCRED, &peer, &len);
+            cham_log("the compositor (pid %d) hasn't answered for %u s", (int)peer.pid, ms / 1000);
+            g_ask_late = 1;
+        }
+        return;
+    }
+    g_ask = wl.marshal_flags((struct wl_proxy *)g_display, 0 /* sync */, wl.callback_iface,
+                             wl.get_version((struct wl_proxy *)g_display), 0, NULL);
+    if (!g_ask)
+        return;
+    wl.add_listener(g_ask, k_ask_listener, NULL);
+    g_ask_logged = logged;
+    __atomic_store_n(&g_asked_ns, now_ns(), __ATOMIC_RELAXED);
+}
+
 /* ---- connection ---- */
 
 static void disconnect_wayland(void)
 {
+    if (g_ask)
+        wl.proxy_destroy(g_ask);
+    ask_forget();
     clipboard_disconnected();
     keymap_disconnected();
     if (g_display)
@@ -211,6 +276,8 @@ static void *input_main(void *arg)
                 config(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
             } else if (m->type == CHAM_WINDOW) {
                 evdev_window(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m));
+            } else if (m->type == CHAM_PING) {
+                ask_compositor(m->id != 0);
             } else if (m->type == IME_CONNECTED) {
                 text_ime_attach((int)m->a);
             } else if (m->type == CHAM_INPUT && m->id == CHAM_INPUT_KEYSYM) {
@@ -246,8 +313,8 @@ void input_ime_connected(int fd)
     input_post(&m);
 }
 
-/* CHAM_INPUT, CHAM_CONFIG, CHAM_WINDOW and CHAM_CLIPBOARD_OFFER messages, from the
- * presenter link's thread. */
+/* CHAM_INPUT, CHAM_CONFIG, CHAM_WINDOW, CHAM_PING and CHAM_CLIPBOARD_OFFER messages,
+ * from the presenter link's thread. */
 void input_post(const struct cham_msg *m)
 {
     pthread_once(&g_once, start);

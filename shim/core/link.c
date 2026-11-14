@@ -38,6 +38,8 @@ static uint64_t g_gen;              /* bumped per presenter connection */
 static struct cham_bo *g_slots[MAX_SLOTS];
 static uint32_t g_cfg_w, g_cfg_h;
 static int g_cfg_seen;              /* a non-zero CONFIG ever arrived */
+static uint64_t g_surface_gone_ns;  /* when the app's surface went away (0: it has one, or never had) */
+static int g_returned;              /* it is back: the next PING's answer from the compositor is logged */
 static uint32_t g_first_w, g_first_h, g_first_mhz, g_first_flags; /* ...and what it said */
 static uint32_t g_win_w, g_win_h, g_first_win_w, g_first_win_h; /* the app's whole window (CHAM_WINDOW) */
 static pthread_cond_t g_cond;
@@ -645,6 +647,24 @@ static int connect_presenter(void)
     return -1;
 }
 
+/* The app's surface went away or came back (in the background, the screen
+ * off, the app restarted): the log says how long it was gone, for reports of
+ * what happened meanwhile. */
+static void surface_changed_locked(int had_surface)
+{
+    int has_surface = g_cfg_w && g_cfg_h;
+    if (had_surface && !has_surface) {
+        g_surface_gone_ns = now_ns();
+    } else if (!had_surface && has_surface && g_surface_gone_ns) {
+        uint64_t s = (now_ns() - g_surface_gone_ns) / 1000000000ull;
+        g_surface_gone_ns = 0;
+        if (s >= 2) {
+            cham_log("the app's window is back after %llu s", (unsigned long long)s);
+            g_returned = 1;
+        }
+    }
+}
+
 static void handle_msg_locked(const struct cham_msg *m, int *fd)
 {
     switch (m->type) {
@@ -652,6 +672,7 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
         int had_surface = g_cfg_w && g_cfg_h;
         g_cfg_w = CHAM_CONFIG_WIDTH(m);
         g_cfg_h = CHAM_CONFIG_HEIGHT(m);
+        surface_changed_locked(had_surface);
         g_back_pressure = !!(m->id & CHAM_CONFIG_BACK_PRESSURE);
         g_cfg_cursor = !!(m->id & CHAM_CONFIG_CURSOR);
         g_cfg_plane = !!(m->id & CHAM_CONFIG_PLANE);
@@ -733,6 +754,17 @@ static void handle_msg_locked(const struct cham_msg *m, int *fd)
             *fd = -1;
         }
         break;
+    case CHAM_PING: {
+        /* Answered under the lock every card request takes, so a stuck
+         * service doesn't answer; the input thread asks the compositor the
+         * same in turn (input.c), and the answer says how that stands. */
+        send_msg_locked(CHAM_PONG, 0, m->a, input_compositor_wait_ms(), -1);
+        struct cham_msg ask = *m;
+        ask.id = (uint32_t)g_returned;
+        g_returned = 0;
+        input_post(&ask);
+        break;
+    }
     }
 }
 
@@ -783,7 +815,9 @@ static void *reader_main(void *arg)
 
         pthread_mutex_lock(&g_lock);
         g_sock = -1;
+        int had_surface = g_cfg_w && g_cfg_h;
         g_cfg_w = g_cfg_h = 0;
+        surface_changed_locked(had_surface);
         close_present_fences_locked();
         memset(g_slots, 0, sizeof g_slots);
         if (g_flip.active && !g_flip.simulated) {
