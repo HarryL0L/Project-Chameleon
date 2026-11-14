@@ -11,7 +11,7 @@
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
 # chameleon-kernel serves the card, the input devices and the link to the app
-# for the whole session, as the kernel would. Every program in the session
+# for the whole session, as the kernel would, below chameleon-init. Every program in the session
 # gets the same device layer: libchameleon.so (the card node, gbm's buffers),
 # libchameleon_udev.so (udev and the evdev nodes) and this directory's libgbm.
 set -e
@@ -28,6 +28,14 @@ case "$1" in
     exit 0
     ;;
 esac
+
+# The session's init (shim/init/init.c), above everything else: programs that
+# detach from their parent - the bus's services, chameleon-kernel, a sound
+# server - stay the session's, as under systemd on a Linux desktop, instead
+# of becoming orphans of Android's init, which some phones kill.
+if ! kill -0 "${CHAMELEON_INIT:-}" 2>/dev/null; then
+    exec "$SHIM_DIR/chameleon-init" "$0" "$@"
+fi
 
 for lib in libchameleon.so libchameleon_udev.so libgbm.so libEGL_chameleon.so; do
     if [ ! -f "$SHIM_DIR/$lib" ]; then

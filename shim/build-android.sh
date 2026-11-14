@@ -25,6 +25,8 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
 # Chameleon's input method, started by the compositor (packaging/kwinrc).
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
+# The session's init: adopts and reaps the programs that detach in it.
+"$CC" $CFLAGS -o "$OUT/chameleon-init" shim/init/init.c
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a

@@ -53,6 +53,10 @@ cc -O1 -g -Wall -Wextra -o "$OUT/evdev_test" shim/test/evdev_test.c -lpthread $(
 start_kernel "$OUT/runtime-ev" "$OUT/presenter-evdev"
 CHAMELEON_DRM_PATH="$OUT/card7" CHAMELEON_SOCKET="$OUT/presenter-evdev" XDG_RUNTIME_DIR="$OUT/runtime-ev" \
     LD_PRELOAD="$OUT/libchameleon.so:$OUT/libchameleon_udev.so" "$OUT/evdev_test"
+# The session's init adopts and reaps what detaches below it.
+cc -O1 -g -Wall -Wextra -o "$OUT/chameleon-init" shim/init/init.c
+cc -O1 -g -Wall -Wextra -o "$OUT/init_test" shim/test/init_test.c
+"$OUT/init_test" "$OUT/chameleon-init"
 # A forked child doesn't need the dynamic linker for overridden calls.
 cc -O1 -g -Wall -Wextra -o "$OUT/fork_test" shim/test/fork_test.c
 mkdir -p "$OUT/ld-debug"

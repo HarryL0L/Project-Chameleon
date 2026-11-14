@@ -459,6 +459,7 @@ AHardwareBuffer and AImageReader support.
 | [`common/`](common/) | Socket protocol shared by both sides |
 | [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard, apps' GPU buffers; `libchameleon.so`: the card node, crash reporter |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
+| [`shim/init/`](shim/init/) | `chameleon-init`: the session's init, adopts and reaps the programs that detach in it |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |

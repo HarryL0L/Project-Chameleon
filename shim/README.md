@@ -6,6 +6,7 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 | file | replaces | does |
 |---|---|---|
 | `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, a primary and a cursor plane, atomic commits → PRESENT, FRAME_DONE → page-flip event on the display's vsync; the render node `renderD128`; the input devices, the link to the app and the input thread |
+| `chameleon-init` (the session's first process) | init / `systemd --user` | adopts every program of the session whose parent exits (the bus's services, `chameleon-kernel`, a sound server) and reaps it, so none becomes an orphan of Android's init, which some phones' process cleaners kill; passes SIGTERM/SIGHUP and the exit status through |
 | `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/wayland.c`); crash reporter where Android's driver renders |
 | `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, `EGL_EXT_device_drm_render_node`) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
@@ -30,7 +31,7 @@ chameleon startplasma-wayland        # a Plasma session
 `chameleon` preloads `libchameleon.so` and `libchameleon_udev.so` into the
 whole session and puts its own directory first in `LD_LIBRARY_PATH` (our
 `libgbm.so`), so every program sees the same device layer, as a device node
-is there for every program. It clears `DISPLAY` / `WAYLAND_DISPLAY`, starts
+is there for every program. It runs below `chameleon-init`, clears `DISPLAY` / `WAYLAND_DISPLAY`, starts
 the app's broker (which hands `chameleon-kernel`'s connection to the app;
 log in `$XDG_RUNTIME_DIR/chameleon-broker.log`) and `chameleon-kernel` (the
 card, input devices, app link and apps' GPU buffers for the whole session;
@@ -154,6 +155,8 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
 - the fake device driven by the real libdrm the way KWin does: enumeration,
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one;
+- `chameleon-init` adopting and reaping a program that detached, signals and
+  the exit status passing through (`init_test`);
 - typed text and `chameleon-ime` against a real libwayland-server with stub
   `wl_seat` and input-method globals (`input_test`);
 - the evdev touchscreen, keyboard, mouse and touchpad seen by the system's
