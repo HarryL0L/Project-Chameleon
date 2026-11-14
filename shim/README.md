@@ -10,6 +10,7 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 | `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/wayland.c`); crash reporter where Android's driver renders |
 | `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, `EGL_EXT_device_drm_render_node`) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
+| `libvulkan_chameleon.so` (a driver for the Vulkan loader) | Mesa's Vulkan driver | Vulkan on `/system/lib64/libvulkan.so` (→ vendor driver), up to the version and with the extensions `vulkan/vk_forward.h` has the functions of; names the card's nodes (`VK_EXT_physical_device_drm`). No windows yet: off-screen rendering and compute |
 
 ## Run
 
@@ -64,7 +65,8 @@ with the probe: `CHAMELEON_PROBE_GLVND=1 CHAMELEON_EGL_DEFAULT=1 ./ahb_probe`.
 Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 `CHAMELEON_MODE=1080x2400@120` (mode if the app isn't open), `CHAMELEON_DPI`
 (default 400; decides KWin's default scale), `CHAMELEON_RESIZE=0` (KWin's
-screen keeps its first size instead of following the app's window).
+screen keeps its first size instead of following the app's window),
+`CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver).
 
 ## Status / limits
 
@@ -146,11 +148,26 @@ screen keeps its first size instead of following the app's window).
 - KWin frames are copied once on the GPU by the app (copy mode) because KWin
   reuses a buffer as soon as the next one is latched, while SurfaceFlinger
   still scans it out for one more vsync.
+- Vulkan: `libvulkan_chameleon.so` is listed to the session's Vulkan loader
+  (`VK_ADD_DRIVER_FILES`) and runs programs on Android's Vulkan driver, at
+  that driver's Vulkan version. The loader and Android's `libvulkan.so` both
+  write into the first word of instances, physical devices, devices, queues
+  and command buffers, so programs hold wrappers of those and every call
+  swaps them for the driver's own (`vulkan/vulkan.c`; the forwarders are
+  generated from the NDK's header by `vulkan/gen_vk.py`, which also finds
+  each function that carries such an object in an array or a structure and
+  stops if one isn't written by hand). Left out for now: window surfaces
+  and swapchains, dma-buf import and export, the debug extensions (the
+  loader and the validation layer provide those). Android's library has
+  the file name `libvulkan.so`: a program that loads Vulkan by that exact
+  name a second time, after its first use, gets Android's instead of the
+  loader (by `libvulkan.so.1`, as usual on Linux, it doesn't).
 
 ## Test on a desktop
 
 `shim/test/run-host-test.sh` (needs `libdrm-dev libwayland-dev libegl-dev
-libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardwareBuffer`:
+libgles-dev libudev-dev libinput-dev libvulkan-dev mesa-vulkan-drivers
+vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardwareBuffer`:
 
 - the fake device driven by the real libdrm the way KWin does: enumeration,
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
@@ -173,6 +190,11 @@ libgles-dev libudev-dev libinput-dev`) runs, with memfd stand-ins for `AHardware
   subsystems passing through, with the system's real libudev and libinput
   (`udev_test`);
 - the GLSL fix-ups (`glsl_fix_test`);
+- the Vulkan driver under the system's Vulkan loader, with Mesa's lavapipe
+  in Android's place: its lists, every kind of wrapped object reaching the
+  driver as the driver's own, frames drawn through it, the card's nodes in a
+  session; once more with the Khronos validation layer checking each call,
+  and `vulkaninfo` (`vulkan_test`);
 
 `shim/test/run-conformance.sh` compares Chameleon's evdev devices with the
 real kernel's: `evdev_conformance.c` runs the same reader-side checks on

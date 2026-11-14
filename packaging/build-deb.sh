@@ -5,7 +5,7 @@
 #   packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
-#   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, the launch
+#   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, libvulkan_chameleon.so, the launch
 #                           scripts, chameleon-kernel, chameleon-ime, chameleon-init - and the fake libgbm.so,
 #                           which must stay out of $PREFIX/lib where it would replace Mesa's
 #                           outside Chameleon sessions too
@@ -31,7 +31,8 @@ LIB="$ROOT$PREFIX/lib/chameleon"
 mkdir -p "$LIB" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT$PREFIX/share/applications" \
     "$ROOT$PREFIX/etc/xdg" "$ROOT/DEBIAN"
 
-install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" "$LIB/"
+install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" \
+    "$SHIM/libvulkan_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$SHIM/chameleon-kernel" "$SHIM/chameleon-ime" \
     "$SHIM/chameleon-init" "$LIB/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"

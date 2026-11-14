@@ -4,7 +4,8 @@
 # (memfd instead of AHardwareBuffer) and runs kms_test.c against the fake
 # device with the system's real libdrm, and the input and output paths
 # against a real Wayland server.
-# Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev, libudev-dev, libinput-dev.
+# Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev, libudev-dev, libinput-dev,
+# libvulkan-dev, mesa-vulkan-drivers (lavapipe), vulkan-validationlayers, vulkan-tools.
 set -e
 cd "$(dirname "$0")/../.."
 if [ -z "$OUT" ]; then
@@ -103,3 +104,39 @@ wayland_test "$OUT/runtime-wl" ""
 # with CHAMELEON_EGL_QT=mesa).
 wayland_test "$OUT/runtime-wl2" ":$OUT/fake_qtgui.so" EXPECT_DESKTOP_GL_QT=1
 wayland_test "$OUT/runtime-wl3" ":$OUT/fake_qtgui.so" EXPECT_DESKTOP_GL_QT=1 CHAMELEON_EGL_QT=mesa
+# The card's Vulkan driver, under the system's Vulkan loader, with Mesa's
+# lavapipe standing in for Android's driver: alone, with the Khronos
+# validation layer checking every call made through it, and in a session,
+# where it names the card's nodes. Then a real program: vulkaninfo asks it
+# everything there is to ask.
+cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -shared \
+    -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c -ldl -lpthread
+cc -O1 -g -Wall -Wextra -fPIC -shared -o "$OUT/fake_android_vulkan.so" shim/test/fake_android_vulkan.c -ldl
+cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/vulkan_test" shim/test/vulkan_test.c -lvulkan -ldl
+printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.3.0"}}\n' \
+    "$OUT/libvulkan_chameleon.so" > "$OUT/chameleon-vulkan.json"
+# vulkan [VAR=value...] PROGRAM...: only this driver, on the stand-in.
+vulkan() {
+    env VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" CHAMELEON_ANDROID_VULKAN="$OUT/fake_android_vulkan.so" \
+        VULKAN_TEST_ICD="$OUT/libvulkan_chameleon.so" "$@"
+}
+vulkan "$OUT/vulkan_test"
+if ! vulkan VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation "$OUT/vulkan_test" > "$OUT/vulkan-validation.log" 2>&1 ||
+    grep -q "Validation Error\|VUID-" "$OUT/vulkan-validation.log"; then
+    cat "$OUT/vulkan-validation.log"
+    echo "vulkan_test under the validation layer: FAILED"
+    exit 1
+fi
+grep "VK_LAYER_KHRONOS_validation\|vulkan_test:" "$OUT/vulkan-validation.log"
+start_kernel "$OUT/runtime-vk" "$OUT/presenter-none" 0
+vulkan_session() {
+    vulkan XDG_RUNTIME_DIR="$OUT/runtime-vk" CHAMELEON_DRM_PATH="$OUT/card4" CHAMELEON_SOCKET="$OUT/presenter-none" \
+        LD_PRELOAD="$OUT/libchameleon.so" "$@"
+}
+vulkan_session VULKAN_TEST_CARD=1 "$OUT/vulkan_test"
+vulkan_session vulkaninfo > "$OUT/vulkaninfo.txt"
+if ! grep -q "renderMajor *= 226" "$OUT/vulkaninfo.txt" || ! grep -q "renderMinor *= 128" "$OUT/vulkaninfo.txt"; then
+    echo "vulkaninfo doesn't show the card's render node: FAILED"
+    exit 1
+fi
+echo "  ok    vulkaninfo: $(grep -c . "$OUT/vulkaninfo.txt") lines, the card's render node 226:128 among them"

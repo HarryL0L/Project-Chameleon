@@ -462,8 +462,9 @@ AHardwareBuffer and AImageReader support.
 | [`shim/init/`](shim/init/) | `chameleon-init`: the session's init, adopts and reaps the programs that detach in it |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
+| [`shim/vulkan/`](shim/vulkan/) | `libvulkan_chameleon.so`, the card's Vulkan driver on Android's |
 | [`shim/bin/`](shim/bin/), [`shim/chameleon`](shim/chameleon) | Launchers |
-| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd |
+| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd, Vulkan with the real loader on lavapipe |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |

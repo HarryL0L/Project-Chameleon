@@ -82,8 +82,11 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install libdrm, libwayland, glvnd
-        run: sudo apt-get update -q && sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev
+      - name: Install libdrm, libwayland, glvnd, Vulkan
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev \
+            libvulkan-dev mesa-vulkan-drivers vulkan-validationlayers vulkan-tools
       - name: Fake KMS device against the real libdrm
         run: shim/test/run-host-test.sh
 

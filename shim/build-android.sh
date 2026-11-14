@@ -23,6 +23,9 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
+# The card's Vulkan driver for the Vulkan loader, on Android's (vk_forward.h
+# is generated: shim/vulkan/gen_vk.py).
+"$CC" $CFLAGS -shared -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c -ldl -Wl,-soname,libvulkan_chameleon.so
 # Chameleon's input method, started by the compositor (packaging/kwinrc).
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 # The session's init: adopts and reaps the programs that detach in it.
@@ -40,6 +43,14 @@ if [ "$(cat "$OUT/.exports")" != "__egl_Main" ]; then
 fi
 if "$NM" -D --undefined-only "$OUT/libEGL_chameleon.so" | grep -q 'cham_'; then
     echo "build-android.sh: libEGL_chameleon.so must not depend on libchameleon.so" >&2
+    exit 1
+fi
+# The Vulkan driver is loaded next to the Vulkan loader: a Vulkan function's
+# name among its exports would take the loader's place for other libraries.
+"$NM" -D --defined-only "$OUT/libvulkan_chameleon.so" | awk '{print $3}' | grep -v '^__' | sort | tr '\n' ' ' > "$OUT/.exports"
+if [ "$(cat "$OUT/.exports")" != "vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion " ]; then
+    echo "build-android.sh: libvulkan_chameleon.so must export only the loader's three entry points, not:" >&2
+    cat "$OUT/.exports" >&2
     exit 1
 fi
 "$NM" -D --defined-only "$OUT/libgbm.so" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"
