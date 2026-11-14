@@ -1,0 +1,672 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * A Wayland window fed by Android's GPU driver, for the EGL vendor's Wayland
+ * platform (wayland.c) and the Vulkan driver's windows (vulkan/wsi.c).
+ *
+ * Android's drivers only render into ANativeWindows, and an AImageReader is
+ * one a process can create for itself. So a window is an AImageReader whose
+ * ANativeWindow the driver draws on (an EGL window surface, a Vulkan
+ * swapchain). Each finished frame is taken out of the reader as an
+ * AHardwareBuffer and shown on the app's wl_surface:
+ *
+ *   1. shared with the session as a GEM handle on this process's render
+ *      node, once per buffer, because the compositor can't turn a bare
+ *      dmabuf back into an AHB (chameleon-kernel hands it the AHB);
+ *   2. wrapped in a zwp_linux_dmabuf_v1 wl_buffer (its gralloc dmabuf);
+ *   3. attached, damaged and committed on the app's wl_surface.
+ *
+ * wl_buffer.release gives the image back to the reader, and frame callbacks
+ * pace the frames of a caller that asks for them. All Wayland objects of
+ * ours live on a private event queue, so the app's own event handling is
+ * not disturbed. A window isn't locked here: its caller serializes.
+ */
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <errno.h>
+#include <poll.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+#include <drm_fourcc.h>
+
+#include "../core/cham_shim.h"
+#include "vendor.h"
+#include "window.h"
+
+/* ---- Android: AHardwareBuffer + AImageReader (dlopen) ---- */
+
+typedef struct {
+    uint32_t width, height, layers, format;
+    uint64_t usage;
+    uint32_t stride, rfu0;
+    uint64_t rfu1;
+} ahb_desc;
+typedef struct {
+    int version, numFds, numInts;
+    int data[];
+} native_handle;
+typedef struct AImageReader AImageReader;
+typedef struct AImage AImage;
+typedef struct ANativeWindow ANativeWindow;
+
+#define AHB_FORMAT_R8G8B8A8 1
+#define AHB_FORMAT_R8G8B8X8 2
+#define AHB_USAGE_GPU_SAMPLED_IMAGE (1ULL << 8)
+#define AMEDIA_OK 0
+#define AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE (-30001)
+#define AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED (-30002)
+
+static struct {
+    void (*describe)(const AHardwareBuffer *, ahb_desc *);
+    const native_handle *(*get_native_handle)(const AHardwareBuffer *);
+    void (*acquire)(AHardwareBuffer *);
+    void (*release)(AHardwareBuffer *);
+    int (*set_geometry)(ANativeWindow *, int32_t, int32_t, int32_t);
+    int (*reader_new)(int32_t, int32_t, int32_t, uint64_t, int32_t, AImageReader **);
+    int (*reader_get_window)(AImageReader *, ANativeWindow **);
+    int (*reader_acquire_next)(AImageReader *, AImage **, int *);
+    void (*reader_delete)(AImageReader *);
+    int (*image_get_ahb)(const AImage *, AHardwareBuffer **);
+    void (*image_delete)(AImage *);
+} android;
+
+static void *open_system_lib(const char *env, const char *name)
+{
+    const char *path = getenv(env); /* stand-ins for the host tests */
+    char buf[128];
+    if (!path) {
+        snprintf(buf, sizeof buf, "%s/%s", sizeof(void *) == 8 ? "/system/lib64" : "/system/lib", name);
+        path = buf;
+    }
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static int load_android(void)
+{
+    static int loaded = -1;
+    if (loaded >= 0)
+        return loaded;
+    void *nw = open_system_lib("CHAMELEON_ANDROID_NATIVEWINDOW", "libnativewindow.so");
+    void *media = open_system_lib("CHAMELEON_ANDROID_MEDIANDK", "libmediandk.so");
+#define A(lib, field, name) (*(void **)&android.field = lib ? dlsym(lib, name) : NULL)
+    A(nw, describe, "AHardwareBuffer_describe");
+    A(nw, get_native_handle, "AHardwareBuffer_getNativeHandle");
+    A(nw, acquire, "AHardwareBuffer_acquire");
+    A(nw, release, "AHardwareBuffer_release");
+    A(nw, set_geometry, "ANativeWindow_setBuffersGeometry");
+    A(media, reader_new, "AImageReader_newWithUsage");
+    A(media, reader_get_window, "AImageReader_getWindow");
+    A(media, reader_acquire_next, "AImageReader_acquireNextImageAsync");
+    A(media, reader_delete, "AImageReader_delete");
+    A(media, image_get_ahb, "AImage_getHardwareBuffer");
+    A(media, image_delete, "AImage_delete");
+#undef A
+    loaded = android.describe && android.get_native_handle && android.acquire && android.release &&
+             android.set_geometry &&
+             android.reader_new &&
+             android.reader_get_window && android.reader_acquire_next && android.reader_delete &&
+             android.image_get_ahb && android.image_delete;
+    if (!loaded)
+        cham_log("wayland: AImageReader/AHardwareBuffer unavailable; Wayland windows left to other vendors");
+    return loaded;
+}
+
+/* ---- libwayland-client (dlopen) and the protocol bits we use ---- */
+
+struct wl_message {
+    const char *name;
+    const char *signature;
+    const struct wl_interface **types;
+};
+struct wl_interface {
+    const char *name;
+    int version;
+    int method_count;
+    const struct wl_message *methods;
+    int event_count;
+    const struct wl_message *events;
+};
+struct wl_proxy;
+struct wl_display;
+struct wl_event_queue;
+
+#define WL_MARSHAL_FLAG_DESTROY 1
+
+static struct {
+    struct wl_proxy *(*marshal_flags)(struct wl_proxy *, uint32_t, const struct wl_interface *, uint32_t, uint32_t,
+                                      ...);
+    int (*add_listener)(struct wl_proxy *, void (**)(void), void *);
+    uint32_t (*get_version)(struct wl_proxy *);
+    void *(*create_wrapper)(void *);
+    void (*wrapper_destroy)(void *);
+    struct wl_display *(*proxy_get_display)(struct wl_proxy *); /* 1.23+, optional */
+    void (*set_queue)(struct wl_proxy *, struct wl_event_queue *);
+    void (*proxy_destroy)(struct wl_proxy *);
+    struct wl_event_queue *(*create_queue)(struct wl_display *);
+    void (*queue_destroy)(struct wl_event_queue *);
+    int (*roundtrip_queue)(struct wl_display *, struct wl_event_queue *);
+    int (*dispatch_queue)(struct wl_display *, struct wl_event_queue *);
+    int (*flush)(struct wl_display *);
+    int (*get_error)(struct wl_display *);
+    const struct wl_interface *registry_iface, *buffer_iface, *callback_iface;
+} wl;
+
+static int load_wayland(void)
+{
+    static int loaded = -1;
+    if (loaded >= 0)
+        return loaded;
+    /* Usually loaded by the app already; any copy of the same library will
+     * do. A program that loads it only once it knows it has a Wayland window
+     * (vkcube) asks for the window extensions first: then by its path, which
+     * Termux's own programs find by their RUNPATH and this library has none. */
+    void *lib = dlopen("libwayland-client.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib)
+        lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_NOLOAD);
+    if (!lib) {
+        char path[512];
+        const char *prefix = getenv("PREFIX");
+        snprintf(path, sizeof path, "%s/lib/libwayland-client.so",
+                 prefix && *prefix ? prefix : "/data/data/com.termux/files/usr");
+        lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    }
+    if (!lib)
+        lib = dlopen("libwayland-client.so.0", RTLD_NOW | RTLD_LOCAL);
+#define W(field, name) (*(void **)&wl.field = lib ? dlsym(lib, name) : NULL)
+    W(marshal_flags, "wl_proxy_marshal_flags");
+    W(add_listener, "wl_proxy_add_listener");
+    W(get_version, "wl_proxy_get_version");
+    W(create_wrapper, "wl_proxy_create_wrapper");
+    W(wrapper_destroy, "wl_proxy_wrapper_destroy");
+    W(proxy_get_display, "wl_proxy_get_display");
+    W(set_queue, "wl_proxy_set_queue");
+    W(proxy_destroy, "wl_proxy_destroy");
+    W(create_queue, "wl_display_create_queue");
+    W(queue_destroy, "wl_event_queue_destroy");
+    W(roundtrip_queue, "wl_display_roundtrip_queue");
+    W(dispatch_queue, "wl_display_dispatch_queue");
+    W(flush, "wl_display_flush");
+    W(get_error, "wl_display_get_error");
+    W(registry_iface, "wl_registry_interface");
+    W(buffer_iface, "wl_buffer_interface");
+    W(callback_iface, "wl_callback_interface");
+#undef W
+    loaded = wl.marshal_flags && wl.add_listener && wl.get_version && wl.create_wrapper && wl.wrapper_destroy &&
+             wl.set_queue && wl.proxy_destroy && wl.create_queue && wl.queue_destroy && wl.roundtrip_queue &&
+             wl.dispatch_queue && wl.flush && wl.get_error && wl.registry_iface && wl.buffer_iface &&
+             wl.callback_iface;
+    if (!loaded)
+        cham_log("wayland: libwayland-client 1.20+ not found");
+    return loaded;
+}
+
+static const struct wl_interface *k_null[8];
+
+/* zwp_linux_dmabuf_v1 (bound at version 3) / zwp_linux_buffer_params_v1 */
+static const struct wl_interface k_params_iface;
+static const struct wl_interface *k_create_params_types[] = {&k_params_iface};
+static const struct wl_message k_dmabuf_requests[] = {
+    {"destroy", "", k_null},
+    {"create_params", "n", k_create_params_types},
+};
+static const struct wl_message k_dmabuf_events[] = {
+    {"format", "u", k_null},
+    {"modifier", "3uuu", k_null},
+};
+static const struct wl_interface k_dmabuf_iface = {
+    "zwp_linux_dmabuf_v1", 3, 2, k_dmabuf_requests, 2, k_dmabuf_events,
+};
+static const struct wl_interface *k_create_immed_types[] = {NULL /* wl_buffer */, NULL, NULL, NULL, NULL};
+static const struct wl_interface *k_created_types[] = {NULL /* wl_buffer */};
+static const struct wl_message k_params_requests[] = {
+    {"destroy", "", k_null},
+    {"add", "huuuuu", k_null},
+    {"create", "iiuu", k_null},
+    {"create_immed", "2niiuu", k_create_immed_types},
+};
+static const struct wl_message k_params_events[] = {
+    {"created", "n", k_created_types},
+    {"failed", "", k_null},
+};
+static const struct wl_interface k_params_iface = {
+    "zwp_linux_buffer_params_v1", 3, 4, k_params_requests, 2, k_params_events,
+};
+
+enum { PARAMS_DESTROY = 0, PARAMS_ADD = 1, PARAMS_CREATE_IMMED = 3 };
+enum {
+    SURFACE_ATTACH = 1,
+    SURFACE_DAMAGE = 2,
+    SURFACE_FRAME = 3,
+    SURFACE_COMMIT = 6,
+    SURFACE_DAMAGE_BUFFER = 9,
+    SURFACE_OFFSET = 10,
+};
+
+/* ---- the connection to the compositor ---- */
+
+struct display {
+    struct wl_display *wl;
+    struct wl_event_queue *queue;
+    struct wl_proxy *dmabuf;
+    struct display *next;
+};
+
+static pthread_mutex_t g_displays_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct display *g_displays;
+
+int cham_window_available(void)
+{
+    static int available = -1;
+    if (available >= 0)
+        return available;
+    available = cham_bo_sharing() && cham_render_fd() >= 0 && load_android() && load_wayland();
+    return available;
+}
+
+static void registry_global(void *data, struct wl_proxy *registry, uint32_t name, const char *iface,
+                            uint32_t version)
+{
+    struct display *d = data;
+    if (strcmp(iface, "zwp_linux_dmabuf_v1") == 0 && !d->dmabuf && version >= 2) {
+        uint32_t v = version < 3 ? version : 3;
+        d->dmabuf = wl.marshal_flags(registry, 0 /* bind */, &k_dmabuf_iface, v, 0, name, iface, v, NULL);
+    }
+}
+
+static void registry_global_remove(void *data, struct wl_proxy *registry, uint32_t name)
+{
+    (void)data, (void)registry, (void)name;
+}
+
+static void (*k_registry_listener[])(void) = {
+    (void (*)(void))registry_global,
+    (void (*)(void))registry_global_remove,
+};
+
+/* The connection's entry, made the first time it is seen: a queue of ours
+ * and the compositor's zwp_linux_dmabuf_v1. NULL (said once) without one. */
+static struct display *display_for(struct wl_display *wd)
+{
+    pthread_mutex_lock(&g_displays_lock);
+    struct display *d = g_displays;
+    while (d && d->wl != wd)
+        d = d->next;
+    if (!d) {
+        d = calloc(1, sizeof *d);
+        d->wl = wd;
+        d->queue = wl.create_queue(wd);
+        struct wl_proxy *wrapper = wl.create_wrapper(wd);
+        wl.set_queue(wrapper, d->queue);
+        struct wl_proxy *registry =
+            wl.marshal_flags(wrapper, 1 /* get_registry */, wl.registry_iface, wl.get_version(wrapper), 0, NULL);
+        wl.wrapper_destroy(wrapper);
+        wl.add_listener(registry, k_registry_listener, d);
+        wl.roundtrip_queue(wd, d->queue);
+        wl.proxy_destroy(registry);
+        if (!d->dmabuf) {
+            cham_log("wayland: the compositor offers no zwp_linux_dmabuf_v1; Wayland windows left to other drivers");
+            wl.queue_destroy(d->queue);
+            free(d);
+            d = NULL;
+        } else {
+            d->next = g_displays;
+            g_displays = d;
+        }
+    }
+    pthread_mutex_unlock(&g_displays_lock);
+    return d;
+}
+
+int cham_window_connect(void *wl_display)
+{
+    return wl_display && cham_window_available() && display_for(wl_display) ? 0 : -1;
+}
+
+/* Shares an AHardwareBuffer (the reader's) with the session: a GEM handle on
+ * this process's render node file, so the compositor's dmabuf import finds
+ * it, as a driver's buffers are kernel objects. chameleon-kernel keeps it
+ * while the handle or its dmabuf is held anywhere. NULL on failure. */
+static struct cham_bo *share_buffer(AHardwareBuffer *ahb, const native_handle *nh, const ahb_desc *desc,
+                                    uint32_t format, uint32_t *handle)
+{
+    int fd = cham_render_fd();
+    if (fd < 0)
+        return NULL;
+    android.acquire(ahb); /* the bo's reference */
+    struct cham_bo *bo = cham_bo_wrap(ahb, nh, desc->width, desc->height, desc->stride * 4, format, android.release);
+    if (!bo) {
+        android.release(ahb);
+        return NULL;
+    }
+    *handle = cham_bo_handle_open(bo, fd);
+    if (!*handle) {
+        cham_bo_unref(bo);
+        return NULL;
+    }
+    return bo;
+}
+
+/* ---- windows ---- */
+
+#define READER_IMAGES 3
+/* All the slots of an Android buffer queue (a Vulkan swapchain may ask for
+ * as many images), and an older set's buffers still at the compositor. */
+#define MAX_BUFFERS (64 + READER_IMAGES)
+
+struct buffer {
+    AHardwareBuffer *ahb; /* the reader owns it */
+    dev_t dev;
+    ino_t ino;            /* its dmabuf: what tells buffers apart */
+    int width, height;
+    unsigned serial;      /* the window's buffer set when it was seen last */
+    uint32_t drm_format;  /* what the compositor was told */
+    struct wl_proxy *wl_buffer;
+    struct cham_bo *bo;   /* shared with the session... */
+    uint32_t handle;      /* ...as this GEM handle on the render node */
+    AImage *image;        /* held while the compositor uses the buffer */
+};
+
+struct cham_window {
+    struct display *d;
+    struct wl_event_queue *queue; /* this window's events only */
+    struct wl_proxy *dmabuf;      /* wrapper on `queue`: its wl_buffers land there */
+    struct wl_proxy *wl_surface;  /* wrapper on our queue */
+    uint32_t surface_version;
+    uint32_t drm_format;
+    /* One AImageReader for the window's life, as a SurfaceView's window: a
+     * new size asks its window for buffers of that size, and the driver's
+     * surface follows from its next buffer. */
+    AImageReader *reader;
+    ANativeWindow *native;
+    unsigned serial; /* counts the buffer sets: sizes, swapchains */
+    struct buffer buffers[MAX_BUFFERS];
+    struct wl_proxy *frame_callback;
+};
+
+static void buffer_free(struct buffer *b)
+{
+    if (b->wl_buffer)
+        wl.marshal_flags(b->wl_buffer, 0 /* destroy */, NULL, wl.get_version(b->wl_buffer), WL_MARSHAL_FLAG_DESTROY);
+    if (b->bo) {
+        cham_bo_handle_close(cham_render_fd(), b->handle);
+        cham_bo_unref(b->bo);
+    }
+    if (b->image)
+        android.image_delete(b->image);
+    memset(b, 0, sizeof *b);
+}
+
+static void buffer_release(void *data, struct wl_proxy *wl_buffer)
+{
+    (void)wl_buffer;
+    struct buffer *b = data;
+    if (b->image) {
+        android.image_delete(b->image);
+        b->image = NULL;
+    }
+}
+
+static void (*k_buffer_listener[])(void) = {(void (*)(void))buffer_release};
+
+static void frame_done(void *data, struct wl_proxy *callback, uint32_t time)
+{
+    (void)time;
+    struct cham_window *s = data;
+    if (s->frame_callback == callback)
+        s->frame_callback = NULL;
+    wl.proxy_destroy(callback);
+}
+
+static void (*k_frame_listener[])(void) = {(void (*)(void))frame_done};
+
+struct cham_window *cham_window_create(void *wl_display, void *wl_surface, int width, int height, int opaque)
+{
+    if (!cham_window_available() || !wl_surface)
+        return NULL;
+    /* The connection the wl_surface belongs to. Without one named and
+     * without wl_proxy_get_display (libwayland < 1.23), the last one seen. */
+    struct display *d = NULL;
+    if (wl_display || wl.proxy_get_display) {
+        d = display_for(wl_display ? wl_display : wl.proxy_get_display(wl_surface));
+    } else {
+        pthread_mutex_lock(&g_displays_lock);
+        d = g_displays;
+        pthread_mutex_unlock(&g_displays_lock);
+    }
+    struct cham_window *s = d ? calloc(1, sizeof *s) : NULL;
+    if (!s)
+        return NULL;
+    s->d = d;
+    s->drm_format = opaque ? DRM_FORMAT_XBGR8888 : DRM_FORMAT_ABGR8888;
+    if (android.reader_new(width > 0 ? width : 1, height > 0 ? height : 1,
+                           opaque ? AHB_FORMAT_R8G8B8X8 : AHB_FORMAT_R8G8B8A8, AHB_USAGE_GPU_SAMPLED_IMAGE,
+                           READER_IMAGES, &s->reader) != AMEDIA_OK ||
+        android.reader_get_window(s->reader, &s->native) != AMEDIA_OK || !s->native) {
+        cham_log("wayland: AImageReader %dx%d failed", width, height);
+        if (s->reader)
+            android.reader_delete(s->reader);
+        free(s);
+        return NULL;
+    }
+    s->surface_version = wl.get_version(wl_surface);
+    s->queue = wl.create_queue(d->wl);
+    s->wl_surface = wl.create_wrapper(wl_surface);
+    wl.set_queue(s->wl_surface, s->queue);
+    s->dmabuf = wl.create_wrapper(d->dmabuf);
+    wl.set_queue(s->dmabuf, s->queue);
+    return s;
+}
+
+void *cham_window_native(struct cham_window *s)
+{
+    return s->native;
+}
+
+int cham_window_resize(struct cham_window *s, int width, int height)
+{
+    if (android.set_geometry(s->native, width, height, 0) != 0) {
+        cham_log("wayland: cannot resize the window to %dx%d", width, height);
+        return -1;
+    }
+    s->serial++;
+    return 0;
+}
+
+void cham_window_renew(struct cham_window *s, int opaque)
+{
+    s->drm_format = opaque ? DRM_FORMAT_XBGR8888 : DRM_FORMAT_ABGR8888;
+    s->serial++;
+}
+
+/* The buffer of a frame: known (by its dmabuf), or registered now. */
+static struct buffer *buffer_for(struct cham_window *s, AHardwareBuffer *ahb)
+{
+    ahb_desc desc;
+    android.describe(ahb, &desc);
+    const native_handle *nh = android.get_native_handle(ahb);
+    int dmabuf = -1;
+    for (int i = 0; nh && i < nh->numFds && dmabuf < 0; i++) {
+        char path[64], link[128];
+        snprintf(path, sizeof path, "/proc/self/fd/%d", nh->data[i]);
+        ssize_t n = readlink(path, link, sizeof link - 1);
+        if (n > 0) {
+            link[n] = 0;
+            if (strstr(link, "dmabuf"))
+                dmabuf = nh->data[i];
+        }
+    }
+    if (dmabuf < 0 && nh && nh->numFds > 0)
+        dmabuf = nh->data[0];
+    struct stat st;
+    if (dmabuf < 0 || fstat(dmabuf, &st) != 0)
+        return NULL;
+    struct buffer *free_slot = NULL;
+    for (int i = 0; i < MAX_BUFFERS; i++) {
+        struct buffer *b = &s->buffers[i];
+        if (b->ahb && b->dev == st.st_dev && b->ino == st.st_ino) {
+            if (b->drm_format == s->drm_format) {
+                b->serial = s->serial; /* one of the set in use */
+                return b;
+            }
+            buffer_free(b); /* the compositor must hear of it anew */
+        }
+        if (!b->ahb && !free_slot)
+            free_slot = b;
+    }
+    if (!free_slot) {
+        cham_log("wayland: more than %d buffers in use", MAX_BUFFERS);
+        return NULL;
+    }
+    uint32_t handle = 0;
+    struct cham_bo *bo = share_buffer(ahb, nh, &desc, s->drm_format, &handle);
+    if (!bo) {
+        cham_log("wayland: cannot share a buffer with the session");
+        return NULL;
+    }
+    int width = (int)desc.width, height = (int)desc.height;
+
+    struct wl_proxy *params =
+        wl.marshal_flags(s->dmabuf, 1 /* create_params */, &k_params_iface, wl.get_version(s->dmabuf), 0, NULL);
+    /* implicit layout: DRM_FORMAT_MOD_INVALID */
+    wl.marshal_flags(params, PARAMS_ADD, NULL, wl.get_version(params), 0, dmabuf, 0u, 0u, desc.stride * 4,
+                     (uint32_t)(DRM_FORMAT_MOD_INVALID >> 32), (uint32_t)(DRM_FORMAT_MOD_INVALID & 0xffffffff));
+    struct wl_proxy *wl_buffer = wl.marshal_flags(params, PARAMS_CREATE_IMMED, wl.buffer_iface,
+                                                  wl.get_version(params), 0, NULL, (int32_t)width,
+                                                  (int32_t)height, s->drm_format, 0u);
+    wl.marshal_flags(params, PARAMS_DESTROY, NULL, wl.get_version(params), WL_MARSHAL_FLAG_DESTROY);
+
+    struct buffer *b = free_slot;
+    b->ahb = ahb;
+    b->dev = st.st_dev;
+    b->ino = st.st_ino;
+    b->width = width;
+    b->height = height;
+    b->serial = s->serial;
+    b->drm_format = s->drm_format;
+    b->bo = bo;
+    b->handle = handle;
+    b->wl_buffer = wl_buffer;
+    wl.add_listener(wl_buffer, k_buffer_listener, b);
+    return b;
+}
+
+/* Forgets buffers of earlier sets the compositor has released: the window
+ * replaces them with buffers of the new one. */
+static void reap_old_sets(struct cham_window *s)
+{
+    for (int i = 0; i < MAX_BUFFERS; i++) {
+        struct buffer *b = &s->buffers[i];
+        if (b->ahb && !b->image && b->serial != s->serial)
+            buffer_free(b);
+    }
+}
+
+static int dispatch(struct cham_window *s)
+{
+    if (wl.dispatch_queue(s->d->wl, s->queue) < 0) {
+        cham_log("wayland: lost the connection (error %d)", wl.get_error(s->d->wl));
+        return -1;
+    }
+    return 0;
+}
+
+int cham_window_wait_frame(struct cham_window *s)
+{
+    while (s->frame_callback)
+        if (dispatch(s) < 0)
+            return -1;
+    return 0;
+}
+
+int cham_window_commit(struct cham_window *s, int callback, int dx, int dy, const int *rects, int n,
+                       int bottom_left, int *width, int *height)
+{
+    AImage *image = NULL;
+    int fence = -1;
+    for (int tries = 0;; tries++) {
+        int r = android.reader_acquire_next(s->reader, &image, &fence);
+        if (r == AMEDIA_OK && image)
+            break;
+        if (r == AMEDIA_IMGREADER_MAX_IMAGES_ACQUIRED && dispatch(s) == 0)
+            continue; /* The compositor still holds them all: wait for a release */
+        if (r == AMEDIA_IMGREADER_NO_BUFFER_AVAILABLE && tries < 100) {
+            usleep(1000);
+            continue;
+        }
+        cham_log("wayland: no frame from the AImageReader (%d)", r);
+        return -1;
+    }
+    AHardwareBuffer *ahb = NULL;
+    android.image_get_ahb(image, &ahb);
+    struct buffer *b = ahb ? buffer_for(s, ahb) : NULL;
+    if (!b) {
+        if (fence >= 0)
+            close(fence);
+        android.image_delete(image);
+        return -1;
+    }
+    if (b->image) /* can't happen: the reader hands out a buffer once */
+        android.image_delete(b->image);
+    b->image = image;
+    /* The compositor samples the buffer with no fence of ours: wait for the
+     * GPU here. */
+    if (fence >= 0) {
+        struct pollfd p = {.fd = fence, .events = POLLIN};
+        while (poll(&p, 1, -1) < 0 && errno == EINTR)
+            ;
+        close(fence);
+    }
+
+    if (callback) {
+        s->frame_callback = wl.marshal_flags(s->wl_surface, SURFACE_FRAME, wl.callback_iface,
+                                             s->surface_version, 0, NULL);
+        wl.add_listener(s->frame_callback, k_frame_listener, s);
+    }
+    if (s->surface_version >= 5) {
+        wl.marshal_flags(s->wl_surface, SURFACE_ATTACH, NULL, s->surface_version, 0, b->wl_buffer, 0, 0);
+        if (dx || dy)
+            wl.marshal_flags(s->wl_surface, SURFACE_OFFSET, NULL, s->surface_version, 0, dx, dy);
+    } else {
+        wl.marshal_flags(s->wl_surface, SURFACE_ATTACH, NULL, s->surface_version, 0, b->wl_buffer, dx, dy);
+    }
+    int damage_op = s->surface_version >= 4 ? SURFACE_DAMAGE_BUFFER : SURFACE_DAMAGE;
+    if (rects && n > 0) {
+        for (int i = 0; i < n; i++) {
+            const int *r = &rects[i * 4];
+            wl.marshal_flags(s->wl_surface, damage_op, NULL, s->surface_version, 0, r[0],
+                             bottom_left ? b->height - r[1] - r[3] : r[1], r[2], r[3]);
+        }
+    } else {
+        wl.marshal_flags(s->wl_surface, damage_op, NULL, s->surface_version, 0, 0, 0, INT32_MAX, INT32_MAX);
+    }
+    wl.marshal_flags(s->wl_surface, SURFACE_COMMIT, NULL, s->surface_version, 0);
+    wl.flush(s->d->wl);
+    if (width)
+        *width = b->width;
+    if (height)
+        *height = b->height;
+    reap_old_sets(s);
+    return 0;
+}
+
+/* Our side of the window. The compositor keeps what it shows through its
+ * own references. The driver's surface on it must be gone already. */
+void cham_window_destroy(struct cham_window *s)
+{
+    if (s->frame_callback)
+        wl.proxy_destroy(s->frame_callback);
+    for (int i = 0; i < MAX_BUFFERS; i++)
+        if (s->buffers[i].ahb)
+            buffer_free(&s->buffers[i]);
+    android.reader_delete(s->reader);
+    wl.wrapper_destroy(s->wl_surface);
+    wl.wrapper_destroy(s->dmabuf);
+    wl.flush(s->d->wl);
+    wl.queue_destroy(s->queue);
+    free(s);
+}

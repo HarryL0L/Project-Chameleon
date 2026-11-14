@@ -13,91 +13,28 @@
  * if one isn't written.
  *
  * Offered are the driver's extensions that vk_forward.h knows, minus what
- * gen_vk.py leaves out (windows, for now), and Vulkan up to the header's
- * version. VK_EXT_physical_device_drm names the card's nodes, which is how
+ * gen_vk.py leaves out, and Vulkan up to the header's version. Windows are
+ * wsi.c's. VK_EXT_physical_device_drm names the card's nodes, which is how
  * a compositor matches this driver to the card it shows on.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <pthread.h>
-#include <stdarg.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
-#include <vulkan/vulkan_core.h>
+
+#define CHAM_VK_FORWARDERS /* vk_forward.h's forwarders and name table are here */
+#include "vulkan.h"
 
 #include "../../common/chameleon_drm.h"
+#include "../core/cham_shim.h"
 
 #define COUNT(a) (sizeof(a) / sizeof(*(a)))
 #define ICD_EXPORT __attribute__((visibility("default"))) VKAPI_ATTR
 #define ICD_LOADER_MAGIC 0x01CDC0DE /* the loader's vk_icd.h: a new object's first word */
-
-/* What a program holds for Android's object `real`. The loader owns the
- * first word. */
-struct instance_table;
-struct device_table;
-struct inst_obj { /* an instance or a physical device */
-    uintptr_t loader;
-    void *real;
-    const struct instance_table *t;
-};
-struct dev_obj { /* a device, a queue or a command buffer */
-    uintptr_t loader;
-    void *real;
-    const struct device_table *t;
-};
-
-#include "vk_forward.h"
-
-#define INST_FN(obj, name) ((PFN_##name)(obj)->t->fn[I_##name])
-#define DEV_FN(obj, name) ((PFN_##name)(obj)->t->fn[D_##name])
-
-struct instance {
-    struct inst_obj o;
-    struct instance_table table;
-    PFN_vkGetDeviceProcAddr device_proc;
-    pthread_mutex_t lock; /* guards the list */
-    struct physical **physical;
-    uint32_t physical_count;
-};
-
-struct physical {
-    struct inst_obj o;
-    struct instance *instance;
-};
-
-struct queue {
-    struct dev_obj o;
-    struct queue *next;
-};
-
-struct cmd {
-    struct dev_obj o;
-    VkCommandPool pool;
-    struct cmd *prev, *next;
-};
-
-struct device {
-    struct dev_obj o;
-    struct device_table table;
-    pthread_mutex_t lock; /* guards the lists */
-    struct queue *queues;
-    struct cmd *cmds; /* every command buffer: a pool's go with the pool */
-};
-
-static void say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-static void say(const char *fmt, ...)
-{
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    vsnprintf(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-    fprintf(stderr, "chameleon: vulkan: %s\n", buf);
-}
 
 /* ---- Android's driver ---- */
 
@@ -111,7 +48,7 @@ static void load(void)
         path = sizeof(void *) == 8 ? "/system/lib64/libvulkan.so" : "/system/lib/libvulkan.so";
     void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
     if (!lib) {
-        say("cannot load Android's libvulkan: %s", dlerror());
+        cham_log("vulkan: cannot load Android's libvulkan: %s", dlerror());
         return;
     }
     *(void **)&g_android = dlsym(lib, "vkGetInstanceProcAddr");
@@ -185,21 +122,28 @@ static int card_present(void)
 
 /* ---- extension lists ---- */
 
+#define EXTRA_EXTENSIONS 2 /* the room each list has for this driver's own */
+
+static int listed(const VkExtensionProperties *all, uint32_t n, const char *name)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (strcmp(all[i].extensionName, name) == 0)
+            return 1;
+    return 0;
+}
+
 /* Gives the caller, the way vkEnumerate*ExtensionProperties does, the n
- * extensions of `all` that are known here, plus the card's with with_card
- * (`all` has room for it). Frees `all`. */
-static VkResult give_extensions(VkExtensionProperties *all, uint32_t n, int with_card, uint32_t *count,
-                                VkExtensionProperties *out)
+ * extensions of `all` that are known here, plus this driver's `extra`
+ * (ended by a NULL name; `all` has room for them). Frees `all`. */
+static VkResult give_extensions(VkExtensionProperties *all, uint32_t n, const VkExtensionProperties *extra,
+                                uint32_t *count, VkExtensionProperties *out)
 {
     uint32_t kept = 0;
     for (uint32_t i = 0; i < n; i++)
         if (known_extension(all[i].extensionName))
             all[kept++] = all[i];
-    if (with_card) {
-        memset(&all[kept], 0, sizeof *all);
-        strcpy(all[kept].extensionName, VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME);
-        all[kept++].specVersion = VK_EXT_PHYSICAL_DEVICE_DRM_SPEC_VERSION;
-    }
+    for (; extra->extensionName[0]; extra++)
+        all[kept++] = *extra;
     VkResult result = VK_SUCCESS;
     if (out) {
         if (*count < kept) {
@@ -213,9 +157,9 @@ static VkResult give_extensions(VkExtensionProperties *all, uint32_t n, int with
     return result;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceExtensionProperties(const char *pLayerName,
-                                                                                 uint32_t *pPropertyCount,
-                                                                                 VkExtensionProperties *pProperties)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceExtensionProperties(const char *pLayerName,
+                                                                          uint32_t *pPropertyCount,
+                                                                          VkExtensionProperties *pProperties)
 {
     PFN_vkEnumerateInstanceExtensionProperties real =
         (PFN_vkEnumerateInstanceExtensionProperties)android("vkEnumerateInstanceExtensionProperties");
@@ -225,7 +169,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceExtensionPropertie
     VkResult result = real(NULL, &n, NULL);
     if (result != VK_SUCCESS)
         return result;
-    VkExtensionProperties *all = malloc((n + 1) * sizeof *all);
+    VkExtensionProperties *all = malloc((n + EXTRA_EXTENSIONS) * sizeof *all);
     if (!all)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     result = real(NULL, &n, all);
@@ -233,13 +177,20 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceExtensionPropertie
         free(all);
         return result;
     }
-    return give_extensions(all, n, 0, pPropertyCount, pProperties);
+    /* Windows: Wayland surfaces here, on Android's own kind of surface. */
+    VkExtensionProperties extra[EXTRA_EXTENSIONS + 1] = {{{0}, 0}};
+    if (cham_wsi_available() && listed(all, n, VK_KHR_SURFACE_EXTENSION_NAME) &&
+        listed(all, n, "VK_KHR_android_surface")) {
+        extra[0] = (VkExtensionProperties){VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION};
+        extra[1] = (VkExtensionProperties){VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_SPEC_VERSION};
+    }
+    return give_extensions(all, n, extra, pPropertyCount, pProperties);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
-                                                                               const char *pLayerName,
-                                                                               uint32_t *pPropertyCount,
-                                                                               VkExtensionProperties *pProperties)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceExtensionProperties(VkPhysicalDevice physicalDevice,
+                                                                        const char *pLayerName,
+                                                                        uint32_t *pPropertyCount,
+                                                                        VkExtensionProperties *pProperties)
 {
     struct inst_obj *p = (struct inst_obj *)physicalDevice;
     PFN_vkEnumerateDeviceExtensionProperties real = INST_FN(p, vkEnumerateDeviceExtensionProperties);
@@ -249,7 +200,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceExtensionProperties(
     VkResult result = real(p->real, NULL, &n, NULL);
     if (result != VK_SUCCESS)
         return result;
-    VkExtensionProperties *all = malloc((n + 1) * sizeof *all);
+    VkExtensionProperties *all = malloc((n + EXTRA_EXTENSIONS) * sizeof *all);
     if (!all)
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     result = real(p->real, NULL, &n, all);
@@ -257,21 +208,28 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceExtensionProperties(
         free(all);
         return result;
     }
-    return give_extensions(all, n, card_present(), pPropertyCount, pProperties);
+    VkExtensionProperties extra[EXTRA_EXTENSIONS + 1] = {{{0}, 0}};
+    uint32_t extras = 0;
+    if (card_present())
+        extra[extras++] = (VkExtensionProperties){VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME,
+                                                  VK_EXT_PHYSICAL_DEVICE_DRM_SPEC_VERSION};
+    if (cham_wsi_available() && listed(all, n, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+        extra[extras++] = (VkExtensionProperties){VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_SPEC_VERSION};
+    return give_extensions(all, n, extra, pPropertyCount, pProperties);
 }
 
 /* Layers are the loader's. */
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
-                                                                             VkLayerProperties *pProperties)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceLayerProperties(uint32_t *pPropertyCount,
+                                                                      VkLayerProperties *pProperties)
 {
     (void)pProperties;
     *pPropertyCount = 0;
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice,
-                                                                           uint32_t *pPropertyCount,
-                                                                           VkLayerProperties *pProperties)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceLayerProperties(VkPhysicalDevice physicalDevice,
+                                                                    uint32_t *pPropertyCount,
+                                                                    VkLayerProperties *pProperties)
 {
     (void)physicalDevice;
     (void)pProperties;
@@ -279,7 +237,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceLayerProperties(VkPh
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceVersion(uint32_t *pApiVersion)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceVersion(uint32_t *pApiVersion)
 {
     PFN_vkEnumerateInstanceVersion real = (PFN_vkEnumerateInstanceVersion)android("vkEnumerateInstanceVersion");
     *pApiVersion = VK_API_VERSION_1_0;
@@ -290,9 +248,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceVersion(uint32_t *
 
 /* ---- instances ---- */
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo,
-                                                           const VkAllocationCallbacks *pAllocator,
-                                                           VkInstance *pInstance)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCreateInfo *pCreateInfo,
+                                                    const VkAllocationCallbacks *pAllocator,
+                                                    VkInstance *pInstance)
 {
     PFN_vkCreateInstance real = (PFN_vkCreateInstance)android("vkCreateInstance");
     if (!real)
@@ -302,8 +260,23 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCrea
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     VkInstanceCreateInfo info = *pCreateInfo;
     info.pNext = without_loader_info(info.pNext, VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO);
+    /* A Wayland surface here is Android's kind of surface below. */
+    const char **names = malloc((info.enabledExtensionCount + 1) * sizeof *names);
+    if (!names) {
+        free(inst);
+        return VK_ERROR_OUT_OF_HOST_MEMORY;
+    }
+    for (uint32_t i = 0; i < info.enabledExtensionCount; i++) {
+        names[i] = info.ppEnabledExtensionNames[i];
+        if (strcmp(names[i], VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
+            names[i] = "VK_KHR_android_surface";
+            inst->windows = 1;
+        }
+    }
+    info.ppEnabledExtensionNames = names;
     VkInstance created;
     VkResult result = real(&info, pAllocator, &created);
+    free(names);
     if (result != VK_SUCCESS) {
         free(inst);
         return result;
@@ -312,19 +285,22 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCrea
     inst->o.real = created;
     inst->o.t = &inst->table;
     for (size_t i = 0; i < COUNT(entries); i++)
-        if (entries[i].level == LEVEL_INSTANCE || entries[i].level == LEVEL_PHYSICAL)
+        if (!entries[i].own && (entries[i].level == LEVEL_INSTANCE || entries[i].level == LEVEL_PHYSICAL))
             inst->table.fn[entries[i].slot] = g_android(created, entries[i].name);
     inst->device_proc = (PFN_vkGetDeviceProcAddr)g_android(created, "vkGetDeviceProcAddr");
+    if (inst->windows)
+        inst->android_surface = g_android(created, "vkCreateAndroidSurfaceKHR");
     pthread_mutex_init(&inst->lock, NULL);
     *pInstance = (VkInstance)inst;
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks *pAllocator)
+VKAPI_ATTR void VKAPI_CALL cham_vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks *pAllocator)
 {
     struct instance *inst = (struct instance *)instance;
     if (!inst)
         return;
+    cham_wsi_instance_gone(inst);
     INST_FN(&inst->o, vkDestroyInstance)(inst->o.real, pAllocator);
     for (uint32_t i = 0; i < inst->physical_count; i++)
         free(inst->physical[i]);
@@ -335,7 +311,7 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyInstance(VkInstance instance, co
 
 /* What the loader asks a driver for a function with: an instance's, a
  * device's as the instance reaches it, or (no instance) one that needs none. */
-static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL cham_vkGetInstanceProcAddr(VkInstance instance, const char *pName)
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL cham_vkGetInstanceProcAddr(VkInstance instance, const char *pName)
 {
     struct instance *inst = (struct instance *)instance;
     const struct entry *e = find(pName);
@@ -345,6 +321,8 @@ static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL cham_vkGetInstanceProcAddr(VkIns
         return android("vkCreateInstance") ? e->fn : NULL;
     if (!inst)
         return NULL;
+    if (e->own)
+        return inst->windows ? e->fn : NULL;
     if (e->level == LEVEL_DEVICE)
         return g_android(inst->o.real, pName) ? e->fn : NULL;
     return inst->table.fn[e->slot] ? e->fn : NULL;
@@ -361,7 +339,9 @@ ICD_EXPORT PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInsta
 {
     struct instance *inst = (struct instance *)instance;
     const struct entry *e = find(pName);
-    return e && e->level == LEVEL_PHYSICAL && inst->table.fn[e->slot] ? e->fn : NULL;
+    if (!e || e->level != LEVEL_PHYSICAL)
+        return NULL;
+    return (e->own ? inst->windows : inst->table.fn[e->slot] != NULL) ? e->fn : NULL;
 }
 
 /* Version 5 of the loader's driver interface: these three entry points, the
@@ -369,7 +349,7 @@ ICD_EXPORT PFN_vkVoidFunction VKAPI_CALL vk_icdGetPhysicalDeviceProcAddr(VkInsta
 ICD_EXPORT VkResult VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t *pSupportedVersion)
 {
     if (!android("vkCreateInstance")) {
-        say("Android's Vulkan isn't usable here; leaving Vulkan to the other drivers");
+        cham_log("vulkan: Android's Vulkan isn't usable here; leaving Vulkan to the other drivers");
         return VK_ERROR_INCOMPATIBLE_DRIVER;
     }
     if (*pSupportedVersion > 5)
@@ -401,9 +381,9 @@ static struct physical *physical_for(struct instance *inst, VkPhysicalDevice rea
     return p;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDevices(VkInstance instance,
-                                                                     uint32_t *pPhysicalDeviceCount,
-                                                                     VkPhysicalDevice *pPhysicalDevices)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDevices(VkInstance instance,
+                                                              uint32_t *pPhysicalDeviceCount,
+                                                              VkPhysicalDevice *pPhysicalDevices)
 {
     struct instance *inst = (struct instance *)instance;
     VkResult result =
@@ -449,7 +429,7 @@ static VkResult physical_groups(struct instance *inst, PFN_vkEnumeratePhysicalDe
     return result;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroups(
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroups(
     VkInstance instance, uint32_t *pPhysicalDeviceGroupCount, VkPhysicalDeviceGroupProperties *pPhysicalDeviceGroupProperties)
 {
     struct instance *inst = (struct instance *)instance;
@@ -457,7 +437,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroups(
                            pPhysicalDeviceGroupProperties);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroupsKHR(
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroupsKHR(
     VkInstance instance, uint32_t *pPhysicalDeviceGroupCount, VkPhysicalDeviceGroupProperties *pPhysicalDeviceGroupProperties)
 {
     struct instance *inst = (struct instance *)instance;
@@ -465,8 +445,8 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumeratePhysicalDeviceGroupsKHR(
                            pPhysicalDeviceGroupProperties);
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
-                                                                    VkPhysicalDeviceProperties *pProperties)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties(VkPhysicalDevice physicalDevice,
+                                                             VkPhysicalDeviceProperties *pProperties)
 {
     struct inst_obj *p = (struct inst_obj *)physicalDevice;
     INST_FN(p, vkGetPhysicalDeviceProperties)(p->real, pProperties);
@@ -496,15 +476,15 @@ static void properties2(struct inst_obj *p, PFN_vkGetPhysicalDeviceProperties2 r
     }
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
-                                                                     VkPhysicalDeviceProperties2 *pProperties)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties2(VkPhysicalDevice physicalDevice,
+                                                              VkPhysicalDeviceProperties2 *pProperties)
 {
     struct inst_obj *p = (struct inst_obj *)physicalDevice;
     properties2(p, INST_FN(p, vkGetPhysicalDeviceProperties2), pProperties);
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice physicalDevice,
-                                                                        VkPhysicalDeviceProperties2 *pProperties)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties2KHR(VkPhysicalDevice physicalDevice,
+                                                                 VkPhysicalDeviceProperties2 *pProperties)
 {
     struct inst_obj *p = (struct inst_obj *)physicalDevice;
     properties2(p, INST_FN(p, vkGetPhysicalDeviceProperties2KHR), pProperties);
@@ -512,9 +492,9 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkGetPhysicalDeviceProperties2KHR(VkPhysi
 
 /* ---- devices ---- */
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateDevice(VkPhysicalDevice physicalDevice,
-                                                         const VkDeviceCreateInfo *pCreateInfo,
-                                                         const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateDevice(VkPhysicalDevice physicalDevice,
+                                                  const VkDeviceCreateInfo *pCreateInfo,
+                                                  const VkAllocationCallbacks *pAllocator, VkDevice *pDevice)
 {
     struct physical *p = (struct physical *)physicalDevice;
     VkDeviceCreateInfo info = *pCreateInfo;
@@ -572,19 +552,21 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateDevice(VkPhysicalDevice physi
     dev->o.loader = ICD_LOADER_MAGIC;
     dev->o.real = created;
     dev->o.t = &dev->table;
+    dev->physical = p;
     for (size_t i = 0; i < COUNT(entries); i++)
-        if (entries[i].level == LEVEL_DEVICE)
+        if (!entries[i].own && entries[i].level == LEVEL_DEVICE)
             dev->table.fn[entries[i].slot] = p->instance->device_proc(created, entries[i].name);
     pthread_mutex_init(&dev->lock, NULL);
     *pDevice = (VkDevice)dev;
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
+VKAPI_ATTR void VKAPI_CALL cham_vkDestroyDevice(VkDevice device, const VkAllocationCallbacks *pAllocator)
 {
     struct device *dev = (struct device *)device;
     if (!dev)
         return;
+    cham_wsi_device_gone(dev);
     DEV_FN(&dev->o, vkDestroyDevice)(dev->o.real, pAllocator);
     while (dev->queues) {
         struct queue *q = dev->queues;
@@ -600,7 +582,7 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyDevice(VkDevice device, const Vk
     free(dev);
 }
 
-static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL cham_vkGetDeviceProcAddr(VkDevice device, const char *pName)
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL cham_vkGetDeviceProcAddr(VkDevice device, const char *pName)
 {
     struct device *dev = (struct device *)device;
     const struct entry *e = find(pName);
@@ -622,6 +604,7 @@ static VkQueue queue_for(struct device *dev, VkQueue real)
         q->o.loader = ICD_LOADER_MAGIC;
         q->o.real = real;
         q->o.t = &dev->table;
+        q->device = dev;
         q->next = dev->queues;
         dev->queues = q;
     }
@@ -629,8 +612,8 @@ static VkQueue queue_for(struct device *dev, VkQueue real)
     return (VkQueue)q;
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex,
-                                                       uint32_t queueIndex, VkQueue *pQueue)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex,
+                                                uint32_t queueIndex, VkQueue *pQueue)
 {
     struct device *dev = (struct device *)device;
     VkQueue real = VK_NULL_HANDLE;
@@ -638,8 +621,8 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkGetDeviceQueue(VkDevice device, uint32_
     *pQueue = queue_for(dev, real);
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2 *pQueueInfo,
-                                                        VkQueue *pQueue)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2 *pQueueInfo,
+                                                 VkQueue *pQueue)
 {
     struct device *dev = (struct device *)device;
     VkQueue real = VK_NULL_HANDLE;
@@ -652,8 +635,8 @@ static VkCommandBuffer real_cmd(VkCommandBuffer cmd)
     return cmd ? ((struct dev_obj *)cmd)->real : VK_NULL_HANDLE;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit(VkQueue queue, uint32_t submitCount,
-                                                        const VkSubmitInfo *pSubmits, VkFence fence)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit(VkQueue queue, uint32_t submitCount,
+                                                 const VkSubmitInfo *pSubmits, VkFence fence)
 {
     struct dev_obj *q = (struct dev_obj *)queue;
     VkSubmitInfo few_submits[4], *submits = few_submits;
@@ -710,15 +693,15 @@ static VkResult submit2(struct dev_obj *q, PFN_vkQueueSubmit2 real, uint32_t cou
     return result;
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit2(VkQueue queue, uint32_t submitCount,
-                                                         const VkSubmitInfo2 *pSubmits, VkFence fence)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit2(VkQueue queue, uint32_t submitCount,
+                                                  const VkSubmitInfo2 *pSubmits, VkFence fence)
 {
     struct dev_obj *q = (struct dev_obj *)queue;
     return submit2(q, DEV_FN(q, vkQueueSubmit2), submitCount, pSubmits, fence);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount,
-                                                            const VkSubmitInfo2 *pSubmits, VkFence fence)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueueSubmit2KHR(VkQueue queue, uint32_t submitCount,
+                                                     const VkSubmitInfo2 *pSubmits, VkFence fence)
 {
     struct dev_obj *q = (struct dev_obj *)queue;
     return submit2(q, DEV_FN(q, vkQueueSubmit2KHR), submitCount, pSubmits, fence);
@@ -737,9 +720,9 @@ static void cmd_drop(struct device *dev, struct cmd *c)
     free(c);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkAllocateCommandBuffers(VkDevice device,
-                                                                   const VkCommandBufferAllocateInfo *pAllocateInfo,
-                                                                   VkCommandBuffer *pCommandBuffers)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkAllocateCommandBuffers(VkDevice device,
+                                                            const VkCommandBufferAllocateInfo *pAllocateInfo,
+                                                            VkCommandBuffer *pCommandBuffers)
 {
     struct device *dev = (struct device *)device;
     uint32_t n = pAllocateInfo->commandBufferCount;
@@ -784,9 +767,9 @@ static VKAPI_ATTR VkResult VKAPI_CALL cham_vkAllocateCommandBuffers(VkDevice dev
     return VK_SUCCESS;
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkFreeCommandBuffers(VkDevice device, VkCommandPool commandPool,
-                                                           uint32_t commandBufferCount,
-                                                           const VkCommandBuffer *pCommandBuffers)
+VKAPI_ATTR void VKAPI_CALL cham_vkFreeCommandBuffers(VkDevice device, VkCommandPool commandPool,
+                                                    uint32_t commandBufferCount,
+                                                    const VkCommandBuffer *pCommandBuffers)
 {
     struct device *dev = (struct device *)device;
     VkCommandBuffer real[32];
@@ -805,8 +788,8 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkFreeCommandBuffers(VkDevice device, VkC
 }
 
 /* A pool's command buffers are freed with it. */
-static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool,
-                                                           const VkAllocationCallbacks *pAllocator)
+VKAPI_ATTR void VKAPI_CALL cham_vkDestroyCommandPool(VkDevice device, VkCommandPool commandPool,
+                                                    const VkAllocationCallbacks *pAllocator)
 {
     struct device *dev = (struct device *)device;
     DEV_FN(&dev->o, vkDestroyCommandPool)(dev->o.real, commandPool, pAllocator);
@@ -820,9 +803,9 @@ static VKAPI_ATTR void VKAPI_CALL cham_vkDestroyCommandPool(VkDevice device, VkC
 }
 
 /* Executing a list in pieces is executing it. */
-static VKAPI_ATTR void VKAPI_CALL cham_vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
-                                                           uint32_t commandBufferCount,
-                                                           const VkCommandBuffer *pCommandBuffers)
+VKAPI_ATTR void VKAPI_CALL cham_vkCmdExecuteCommands(VkCommandBuffer commandBuffer,
+                                                    uint32_t commandBufferCount,
+                                                    const VkCommandBuffer *pCommandBuffers)
 {
     struct dev_obj *c = (struct dev_obj *)commandBuffer;
     VkCommandBuffer real[32];
@@ -854,35 +837,35 @@ static uint64_t real_object(VkObjectType type, uint64_t handle)
     }
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkSetPrivateData(VkDevice device, VkObjectType objectType,
-                                                           uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
-                                                           uint64_t data)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkSetPrivateData(VkDevice device, VkObjectType objectType,
+                                                    uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                                                    uint64_t data)
 {
     struct dev_obj *d = (struct dev_obj *)device;
     return DEV_FN(d, vkSetPrivateData)(d->real, objectType, real_object(objectType, objectHandle), privateDataSlot,
                                        data);
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetPrivateData(VkDevice device, VkObjectType objectType,
-                                                       uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
-                                                       uint64_t *pData)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetPrivateData(VkDevice device, VkObjectType objectType,
+                                                uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                                                uint64_t *pData)
 {
     struct dev_obj *d = (struct dev_obj *)device;
     DEV_FN(d, vkGetPrivateData)(d->real, objectType, real_object(objectType, objectHandle), privateDataSlot, pData);
 }
 
-static VKAPI_ATTR VkResult VKAPI_CALL cham_vkSetPrivateDataEXT(VkDevice device, VkObjectType objectType,
-                                                              uint64_t objectHandle,
-                                                              VkPrivateDataSlot privateDataSlot, uint64_t data)
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkSetPrivateDataEXT(VkDevice device, VkObjectType objectType,
+                                                       uint64_t objectHandle,
+                                                       VkPrivateDataSlot privateDataSlot, uint64_t data)
 {
     struct dev_obj *d = (struct dev_obj *)device;
     return DEV_FN(d, vkSetPrivateDataEXT)(d->real, objectType, real_object(objectType, objectHandle),
                                           privateDataSlot, data);
 }
 
-static VKAPI_ATTR void VKAPI_CALL cham_vkGetPrivateDataEXT(VkDevice device, VkObjectType objectType,
-                                                          uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
-                                                          uint64_t *pData)
+VKAPI_ATTR void VKAPI_CALL cham_vkGetPrivateDataEXT(VkDevice device, VkObjectType objectType,
+                                                   uint64_t objectHandle, VkPrivateDataSlot privateDataSlot,
+                                                   uint64_t *pData)
 {
     struct dev_obj *d = (struct dev_obj *)device;
     DEV_FN(d, vkGetPrivateDataEXT)(d->real, objectType, real_object(objectType, objectHandle), privateDataSlot,

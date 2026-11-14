@@ -7,10 +7,10 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 |---|---|---|
 | `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, a primary and a cursor plane, atomic commits → PRESENT, FRAME_DONE → page-flip event on the display's vsync; the render node `renderD128`; the input devices, the link to the app and the input thread |
 | `chameleon-init` (the session's first process) | init / `systemd --user` | adopts every program of the session whose parent exits (the bus's services, `chameleon-kernel`, a sound server) and reaps it, so none becomes an orphan of Android's init, which some phones' process cleaners kill; passes SIGTERM/SIGHUP and the exit status through |
-| `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/wayland.c`); crash reporter where Android's driver renders |
+| `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/window.c`); crash reporter where Android's driver renders |
 | `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, `EGL_EXT_device_drm_render_node`) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
-| `libvulkan_chameleon.so` (a driver for the Vulkan loader) | Mesa's Vulkan driver | Vulkan on `/system/lib64/libvulkan.so` (→ vendor driver), up to the version and with the extensions `vulkan/vk_forward.h` has the functions of; names the card's nodes (`VK_EXT_physical_device_drm`). No windows yet: off-screen rendering and compute |
+| `libvulkan_chameleon.so` (a driver for the Vulkan loader) | Mesa's Vulkan driver | Vulkan on `/system/lib64/libvulkan.so` (→ vendor driver), up to the version and with the extensions `vulkan/vk_forward.h` has the functions of; names the card's nodes (`VK_EXT_physical_device_drm`); Wayland windows (`VK_KHR_wayland_surface`, `VK_KHR_swapchain`) in a Chameleon session |
 
 ## Run
 
@@ -119,7 +119,7 @@ screen keeps its first size instead of following the app's window),
   Android's text copied before the desktop is reachable (session starting,
   compositor restarting) becomes its clipboard once it is, unless the desktop
   copied something since.
-- Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`);
+- Apps using OpenGL ES render on the GPU through the vendor (`vendor/wayland.c`, `vendor/window.c`);
   a Qt built for desktop OpenGL (Termux's default) is steered to OpenGL ES
   through the EGL vendor string, as Qt does for NVIDIA's EGL
   (`CHAMELEON_EGL_QT=mesa` leaves such apps on Mesa instead);
@@ -156,9 +156,18 @@ screen keeps its first size instead of following the app's window),
   swaps them for the driver's own (`vulkan/vulkan.c`; the forwarders are
   generated from the NDK's header by `vulkan/gen_vk.py`, which also finds
   each function that carries such an object in an array or a structure and
-  stops if one isn't written by hand). Left out for now: window surfaces
-  and swapchains, dma-buf import and export, the debug extensions (the
-  loader and the validation layer provide those). Android's library has
+  stops if one isn't written by hand). A Wayland window is an Android
+  swapchain on the same kind of window an EGL surface has (an
+  `AImageReader`, `vendor/window.c`): each presented image goes to the
+  compositor as it is, shared through the render node (`vulkan/wsi.c`).
+  Its formats are 8-bit RGBA, plain or sRGB (no BGRA: Android's buffers
+  have none); FIFO waits for the compositor's frame callback, mailbox
+  doesn't; its size is the swapchain's. Android stores an opaque window's
+  images as RGBA all the same, so the compositor's dmabuf import reads
+  alpha as 1 from a buffer declared XBGR or XRGB, as a driver importing
+  that format does (`egl/egl.c`). Left out for now: X11 windows,
+  dma-buf import and export, the debug extensions (the loader and the
+  validation layer provide those). Android's library has
   the file name `libvulkan.so`: a program that loads Vulkan by that exact
   name a second time, after its first use, gets Android's instead of the
   loader (by `libvulkan.so.1`, as usual on Linux, it doesn't).
@@ -195,6 +204,10 @@ vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardware
   driver as the driver's own, frames drawn through it, the card's nodes in a
   session; once more with the Khronos validation layer checking each call,
   and `vulkaninfo` (`vulkan_test`);
+- a Vulkan program's window against a real libwayland-server: surface,
+  swapchains (FIFO and mailbox, opaque and with alpha), each frame's pixels
+  as the compositor reads them from the shared buffer
+  (`wayland_client_test`, also under the validation layer);
 
 `shim/test/run-conformance.sh` compares Chameleon's evdev devices with the
 real kernel's: `evdev_conformance.c` runs the same reader-side checks on

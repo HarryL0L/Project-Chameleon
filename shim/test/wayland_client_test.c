@@ -11,7 +11,11 @@
  *    that imports each one on the render node too, as wlroots does;
  *  - the app: real libwayland-client + libwayland-egl, EGL through the
  *    system's glvnd -> libEGL_chameleon.so -> fake Android driver whose
- *    window surfaces render into (fake) AImageReaders.
+ *    window surfaces render into (fake) AImageReaders;
+ *  - or, with VULKAN_WINDOW_TEST, a Vulkan app: the system's Vulkan loader
+ *    -> libvulkan_chameleon.so -> fake_android_vulkan.c, whose swapchain
+ *    presents into the same kind of reader. Its frames are drawn by a real
+ *    driver, and the compositor looks at their pixels.
  */
 #define _GNU_SOURCE
 #define EGL_EGLEXT_PROTOTYPES
@@ -36,6 +40,10 @@
 #include <drm.h>
 #include <drm_fourcc.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_wayland.h>
 
 #include "check.h"
 
@@ -74,6 +82,7 @@ static struct {
     int buffers_created, buffers_known_to_kwin, buffers_unknown, buffers_prime;
     int commits, releases, frames_done;
     int last_width, last_height, last_stride;
+    uint8_t shown[4]; /* the first pixel of the buffer on screen */
     uint32_t last_format;
     uint64_t last_modifier;
     volatile int stop;
@@ -85,6 +94,7 @@ static void (*buffer_ahb_release)(void *);
 struct buffer {
     struct wl_resource *resource;
     int width, height;
+    int fd;
 };
 
 struct params {
@@ -101,7 +111,9 @@ static void buffer_destroy(struct wl_client *c, struct wl_resource *r)
 static const struct wl_buffer_interface k_buffer_impl = {.destroy = buffer_destroy};
 static void buffer_free(struct wl_resource *r)
 {
-    free(wl_resource_get_user_data(r));
+    struct buffer *b = wl_resource_get_user_data(r);
+    close(b->fd);
+    free(b);
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r)
@@ -152,6 +164,7 @@ static void params_create_immed(struct wl_client *client, struct wl_resource *r,
     struct buffer *b = calloc(1, sizeof *b);
     b->width = w;
     b->height = h;
+    b->fd = dup(p->fd);
     b->resource = wl_resource_create(client, &wl_buffer_interface, 1, id);
     wl_resource_set_implementation(b->resource, &k_buffer_impl, b, buffer_free);
 }
@@ -233,6 +246,14 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
         s->current = s->pending;
     }
     s->pending = NULL;
+    if (s->current) { /* what a compositor would sample */
+        struct buffer *b = wl_resource_get_user_data(s->current);
+        uint8_t *pixels = mmap(NULL, 4, PROT_READ, MAP_SHARED, b->fd, 0);
+        if (pixels != MAP_FAILED) {
+            memcpy(srv.shown, pixels, 4);
+            munmap(pixels, 4);
+        }
+    }
     srv.commits++;
     struct wl_resource *cb, *tmp;
     wl_resource_for_each_safe(cb, tmp, &s->frames) {
@@ -315,6 +336,228 @@ static void global_remove(void *data, struct wl_registry *registry, uint32_t nam
 }
 static const struct wl_registry_listener k_registry_listener = {global, global_remove};
 
+/* ---- the Vulkan app ---- */
+
+static VkDevice vk_dev;
+static VkQueue vk_queue;
+static VkCommandBuffer vk_cmd;
+static VkSemaphore vk_acquired, vk_drawn;
+
+/* One frame: the next image, filled with a colour, presented. */
+static VkResult vk_frame(VkSwapchainKHR swapchain, VkImage *images, float r, float g, float b)
+{
+    uint32_t i = 0;
+    VkResult result = vkAcquireNextImageKHR(vk_dev, swapchain, UINT64_MAX, vk_acquired, VK_NULL_HANDLE, &i);
+    if (result != VK_SUCCESS)
+        return result;
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(vk_cmd, &begin);
+    VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier to_clear = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                     .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                     .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = images[i],
+                                     .subresourceRange = whole};
+    vkCmdPipelineBarrier(vk_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                         NULL, 1, &to_clear);
+    VkClearColorValue colour = {.float32 = {r, g, b, 1}};
+    vkCmdClearColorImage(vk_cmd, images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colour, 1, &whole);
+    VkImageMemoryBarrier to_present = to_clear;
+    to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_present.dstAccessMask = 0;
+    to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(vk_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL,
+                         0, NULL, 1, &to_present);
+    vkEndCommandBuffer(vk_cmd);
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
+                           .pWaitSemaphores = &vk_acquired, .pWaitDstStageMask = &stage, .commandBufferCount = 1,
+                           .pCommandBuffers = &vk_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &vk_drawn};
+    result = vkQueueSubmit(vk_queue, 1, &submit, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS)
+        return result;
+    VkPresentInfoKHR present = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
+                                .pWaitSemaphores = &vk_drawn, .swapchainCount = 1, .pSwapchains = &swapchain,
+                                .pImageIndices = &i};
+    result = vkQueuePresentKHR(vk_queue, &present);
+    vkQueueWaitIdle(vk_queue); /* the one command buffer is free again */
+    return result;
+}
+
+static int shown(int r, int g, int b)
+{
+    return srv.shown[0] == r && srv.shown[1] == g && srv.shown[2] == b;
+}
+
+static int has_extension(const VkExtensionProperties *list, uint32_t n, const char *name)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (strcmp(list[i].extensionName, name) == 0)
+            return 1;
+    return 0;
+}
+
+static void vulkan_app(struct wl_display *display, struct wl_surface *surface)
+{
+    printf("Vulkan windows\n");
+    VkExtensionProperties exts[256];
+    uint32_t n = 256;
+    vkEnumerateInstanceExtensionProperties(NULL, &n, exts);
+    CHECK(has_extension(exts, n, "VK_KHR_surface") && has_extension(exts, n, "VK_KHR_wayland_surface") &&
+              !has_extension(exts, n, "VK_KHR_android_surface") && !has_extension(exts, n, "VK_KHR_xcb_surface"),
+          "Wayland surfaces offered, and no other kind");
+    const char *instance_exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1};
+    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+                                .enabledExtensionCount = 2, .ppEnabledExtensionNames = instance_exts};
+    VkInstance inst;
+    VkResult r = vkCreateInstance(&ici, NULL, &inst);
+    CHECK(r == VK_SUCCESS, "an instance with them (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    n = 1;
+    vkEnumeratePhysicalDevices(inst, &n, &phys);
+    VkWaylandSurfaceCreateInfoKHR wsci = {.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+                                          .display = display, .surface = surface};
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+    r = vkCreateWaylandSurfaceKHR(inst, &wsci, NULL, &vk_surface);
+    CHECK(r == VK_SUCCESS && vk_surface, "a surface on a wl_surface (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkBool32 can = VK_FALSE;
+    r = vkGetPhysicalDeviceSurfaceSupportKHR(phys, 0, vk_surface, &can);
+    CHECK(r == VK_SUCCESS && can && vkGetPhysicalDeviceWaylandPresentationSupportKHR(phys, 0, display),
+          "the device's queue presents to it and to the compositor");
+    VkSurfaceCapabilitiesKHR caps;
+    r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, vk_surface, &caps);
+    CHECK(r == VK_SUCCESS && caps.currentExtent.width == UINT32_MAX && caps.minImageExtent.width == 1 &&
+              caps.maxImageExtent.width >= 2048,
+          "a Wayland window: its size is the swapchain's");
+    CHECK(caps.supportedCompositeAlpha == (VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) &&
+              caps.supportedTransforms == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && caps.minImageCount >= 2,
+          "opaque or pre-multiplied alpha, never rotated, at least %u images", caps.minImageCount);
+    VkSurfaceFormatKHR formats[16];
+    n = 16;
+    r = vkGetPhysicalDeviceSurfaceFormatsKHR(phys, vk_surface, &n, formats);
+    CHECK(r == VK_SUCCESS && n == 2 && formats[0].format == VK_FORMAT_R8G8B8A8_UNORM &&
+              formats[1].format == VK_FORMAT_R8G8B8A8_SRGB,
+          "formats: 8-bit RGBA, plain and sRGB (%u)", n);
+    n = 1;
+    r = vkGetPhysicalDeviceSurfaceFormatsKHR(phys, vk_surface, &n, formats);
+    CHECK(r == VK_INCOMPLETE && n == 1, "...a list that doesn't fit is cut and says so");
+    VkPresentModeKHR modes[8];
+    n = 8;
+    r = vkGetPhysicalDeviceSurfacePresentModesKHR(phys, vk_surface, &n, modes);
+    CHECK(r == VK_SUCCESS && n == 2 && modes[0] == VK_PRESENT_MODE_FIFO_KHR && modes[1] == VK_PRESENT_MODE_MAILBOX_KHR,
+          "present modes: FIFO and mailbox");
+
+    n = 256;
+    vkEnumerateDeviceExtensionProperties(phys, NULL, &n, exts);
+    CHECK(has_extension(exts, n, "VK_KHR_swapchain"), "swapchains offered");
+    float priority = 1;
+    VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1,
+                                   .pQueuePriorities = &priority};
+    const char *device_exts[] = {"VK_KHR_swapchain"};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1,
+                              .pQueueCreateInfos = &qci, .enabledExtensionCount = 1,
+                              .ppEnabledExtensionNames = device_exts};
+    r = vkCreateDevice(phys, &dci, NULL, &vk_dev);
+    CHECK(r == VK_SUCCESS, "a device with them (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    vkGetDeviceQueue(vk_dev, 0, 0, &vk_queue);
+    VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT};
+    VkCommandPool pool;
+    vkCreateCommandPool(vk_dev, &cpci, NULL, &pool);
+    VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
+                                        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    vkAllocateCommandBuffers(vk_dev, &cbai, &vk_cmd);
+    VkSemaphoreCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    vkCreateSemaphore(vk_dev, &sci, NULL, &vk_acquired);
+    vkCreateSemaphore(vk_dev, &sci, NULL, &vk_drawn);
+
+    VkSwapchainCreateInfoKHR scci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk_surface,
+                                     .minImageCount = caps.minImageCount, .imageFormat = VK_FORMAT_R8G8B8A8_UNORM,
+                                     .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, .imageExtent = {64, 32},
+                                     .imageArrayLayers = 1,
+                                     .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                     .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                     .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                     .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    r = vkCreateSwapchainKHR(vk_dev, &scci, NULL, &swapchain);
+    CHECK(r == VK_SUCCESS, "an opaque FIFO swapchain of 64x32, which Android only knows as \"inherit\" (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkImage images[16];
+    uint32_t image_count = 16;
+    vkGetSwapchainImagesKHR(vk_dev, swapchain, &image_count, images);
+
+    static const float k_colours[6][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 1, 0}, {0, 1, 1}, {1, 0, 1}};
+    int right = 0;
+    r = VK_SUCCESS;
+    for (int i = 0; i < 6 && r == VK_SUCCESS; i++) {
+        r = vk_frame(swapchain, images, k_colours[i][0], k_colours[i][1], k_colours[i][2]);
+        wl_display_roundtrip(display);
+        right += shown((int)k_colours[i][0] * 255, (int)k_colours[i][1] * 255, (int)k_colours[i][2] * 255);
+    }
+    CHECK(r == VK_SUCCESS && srv.commits == 6 && right == 6,
+          "6 frames -> %d commits, each with its colour on screen (%d)", srv.commits, right);
+    CHECK(srv.buffers_created >= 2 && srv.buffers_created <= 3 && srv.buffers_unknown == 0 &&
+              srv.buffers_known_to_kwin == srv.buffers_created && srv.buffers_prime == srv.buffers_created,
+          "%d zero-copy buffers, all known to KWin and its render node", srv.buffers_created);
+    CHECK(srv.last_width == 64 && srv.last_height == 32 && srv.last_stride == 256 &&
+              srv.last_format == DRM_FORMAT_XBGR8888 && srv.last_modifier == DRM_FORMAT_MOD_INVALID,
+          "dmabuf %dx%d stride %d, XBGR8888 (opaque), implicit modifier", srv.last_width, srv.last_height,
+          srv.last_stride);
+    CHECK(srv.releases == 5 && srv.frames_done == 6, "buffers released (%d) and frames paced (%d callbacks)",
+          srv.releases, srv.frames_done);
+
+    /* The window gets another size: a new swapchain, this one unpaced and
+     * with alpha. */
+    VkSwapchainKHR old = swapchain;
+    scci.imageExtent = (VkExtent2D){80, 40};
+    scci.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    scci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    scci.oldSwapchain = old;
+    r = vkCreateSwapchainKHR(vk_dev, &scci, NULL, &swapchain);
+    vkDestroySwapchainKHR(vk_dev, old, NULL);
+    image_count = 16;
+    vkGetSwapchainImagesKHR(vk_dev, swapchain, &image_count, images);
+    int created = srv.buffers_created;
+    right = 0;
+    for (int i = 0; i < 4 && r == VK_SUCCESS; i++) {
+        r = vk_frame(swapchain, images, k_colours[i][0], k_colours[i][1], k_colours[i][2]);
+        wl_display_roundtrip(display);
+        right += shown((int)k_colours[i][0] * 255, (int)k_colours[i][1] * 255, (int)k_colours[i][2] * 255);
+    }
+    CHECK(r == VK_SUCCESS && srv.commits == 10 && right == 4, "a mailbox swapchain of 80x40: 4 more frames shown (%d)",
+          r);
+    CHECK(srv.last_width == 80 && srv.last_height == 40 && srv.last_format == DRM_FORMAT_ABGR8888 &&
+              srv.buffers_created > created && srv.buffers_unknown == 0,
+          "new buffers at %dx%d with alpha reach KWin", srv.last_width, srv.last_height);
+    CHECK(srv.frames_done == 6, "and nothing waited for the compositor's frame callbacks");
+    struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
+             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls; } *fake =
+        dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state");
+    CHECK(fake && fake->readers == 1, "one window for the surface's life (%d)", fake ? fake->readers : -1);
+
+    vkDestroySwapchainKHR(vk_dev, swapchain, NULL);
+    vkDestroySemaphore(vk_dev, vk_acquired, NULL);
+    vkDestroySemaphore(vk_dev, vk_drawn, NULL);
+    vkDestroyCommandPool(vk_dev, pool, NULL);
+    vkDestroyDevice(vk_dev, NULL);
+    vkDestroySurfaceKHR(inst, vk_surface, NULL);
+    vkDestroyInstance(inst, NULL);
+    wl_display_roundtrip(display);
+    CHECK(1, "swapchain, device, surface and instance gone");
+}
+
 int main(void)
 {
     const char *runtime = getenv("XDG_RUNTIME_DIR");
@@ -359,6 +602,17 @@ int main(void)
     wl_registry_add_listener(reg, &k_registry_listener, NULL);
     wl_display_roundtrip(display);
     struct wl_surface *surface = wl_compositor_create_surface(g_compositor);
+    if (getenv("VULKAN_WINDOW_TEST")) {
+        vulkan_app(display, surface);
+        wl_surface_destroy(surface);
+        wl_display_roundtrip(display);
+        wl_display_disconnect(display);
+        srv.stop = 1;
+        pthread_join(thread, NULL);
+        wl_display_destroy(server);
+        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures != 0;
+    }
     struct wl_egl_window *window = wl_egl_window_create(surface, 64, 32);
 
     if (getenv("EXPECT_DESKTOP_GL_QT")) {

@@ -15,11 +15,13 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "../../common/chameleon_drm.h"
 #include "../core/cham_shim.h"
 #include "vendor.h"
 
@@ -186,4 +188,18 @@ uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
 void cham_bo_handle_close(int fd, uint32_t handle)
 {
     core.bo_handle_close(fd, handle);
+}
+
+static int g_render_fd = -1;
+
+static void open_render_node(void)
+{
+    g_render_fd = open(CHAM_RENDER_PATH, O_RDWR | O_CLOEXEC);
+}
+
+int cham_render_fd(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, open_render_node);
+    return g_render_fd;
 }

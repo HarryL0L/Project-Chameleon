@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Private to libEGL_chameleon.so. */
+/* Private to libEGL_chameleon.so (bridge.c and window.c are built into
+ * libvulkan_chameleon.so too). */
 #ifndef CHAM_VENDOR_H
 #define CHAM_VENDOR_H
 
@@ -10,7 +11,6 @@
 void *cham_egl_get_proc(const char *name);
 EGLDisplay cham_egl_android_display(void);
 int cham_egl_available(void); /* Android's libEGL.so loads (no driver yet) */
-int cham_egl_render_fd(void); /* this process's render node file for the buffers it shares, -1 if none */
 void *cham_egl_device(void);  /* the card's EGLDeviceEXT (eglQueryDevicesEXT) */
 
 void *cham_egl_real(const char *name);      /* Android's entry point */
@@ -40,6 +40,9 @@ int cham_core_present(void);
 /* bridge.c: buffers can be shared with the session (cham_bo_wrap() and GEM
  * handles on a render node file). */
 int cham_bo_sharing(void);
+/* bridge.c: this process's render node file for the buffers it shares, -1 if
+ * none. */
+int cham_render_fd(void);
 /* bridge.c: this process renders with Android's driver: hand libchameleon's
  * crash reporter the breadcrumbs (it installs itself then). */
 void cham_crash_arm(void);

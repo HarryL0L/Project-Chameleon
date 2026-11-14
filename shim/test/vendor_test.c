@@ -30,6 +30,7 @@ struct fake_state {
     void *current_draw;
     int native_images, images_destroyed, copies, finishes;
     GLuint copy_source;
+    GLuint swizzle_a_one;
 };
 
 /* A texture as Firefox makes one for WebGL (bound, level 0 only). */
@@ -96,6 +97,26 @@ static void export_checks(EGLDisplay dpy, EGLContext ctx, struct fake_state *st)
     CHECK(own_bo && fd >= 0 && !own_bo(fd), "this process let go of the buffer (chameleon-kernel has it)");
     EGLImageKHR imported = fd >= 0 ? create_khr(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, import) : NULL;
     CHECK(imported != EGL_NO_IMAGE_KHR, "...and the exported dmabuf imports from there");
+    /* Declared XBGR: an opaque Vulkan window's buffers are stored as RGBA,
+     * alpha as the program left it; a texture of it reads alpha as 1, as on
+     * a driver that imports the dmabuf as XBGR. */
+    const EGLint import_x[] = {EGL_WIDTH, 64, EGL_HEIGHT, 32, EGL_LINUX_DRM_FOURCC_EXT, 0x34324258 /* XB24 */,
+                               EGL_DMA_BUF_PLANE0_FD_EXT, fd, EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+                               EGL_DMA_BUF_PLANE0_PITCH_EXT, 256, EGL_NONE};
+    EGLImageKHR opaque = fd >= 0 ? create_khr(dpy, EGL_NO_CONTEXT, EGL_LINUX_DMA_BUF_EXT, NULL, import_x) : NULL;
+    void (*target_texture)(GLenum, void *) =
+        (void (*)(GLenum, void *))eglGetProcAddress("glEGLImageTargetTexture2DOES");
+    GLuint with_alpha = texture(GL_RGBA, GL_RGBA, 8, 8), without = texture(GL_RGBA, GL_RGBA, 8, 8);
+    st->swizzle_a_one = 0;
+    glBindTexture(GL_TEXTURE_2D, with_alpha);
+    target_texture(GL_TEXTURE_2D, imported);
+    CHECK(opaque != EGL_NO_IMAGE_KHR && st->swizzle_a_one == 0, "a texture of an ABGR dmabuf keeps its alpha");
+    glBindTexture(GL_TEXTURE_2D, without);
+    target_texture(GL_TEXTURE_2D, opaque);
+    CHECK(st->swizzle_a_one == without, "a texture of an XBGR dmabuf reads alpha as 1 (texture %u)",
+          st->swizzle_a_one);
+    if (opaque)
+        eglDestroyImage(dpy, opaque);
     if (imported)
         eglDestroyImage(dpy, imported);
     if (fd >= 0)

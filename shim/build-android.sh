@@ -20,12 +20,14 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -shared -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon -Wl,-soname,libgbm.so
 # glvnd EGL vendor (EGL + GLES on Android's driver); not linked to
 # libchameleon.so, since it is loaded into every program glvnd routes to it.
-"$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
+"$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/vendor/window.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
 # The card's Vulkan driver for the Vulkan loader, on Android's (vk_forward.h
-# is generated: shim/vulkan/gen_vk.py).
-"$CC" $CFLAGS -shared -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c -ldl -Wl,-soname,libvulkan_chameleon.so
+# is generated: shim/vulkan/gen_vk.py), with the windows' code of the EGL
+# vendor and, like it, not linked to libchameleon.so.
+"$CC" $CFLAGS -shared -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c shim/vulkan/wsi.c shim/vendor/window.c \
+    shim/vendor/bridge.c -ldl -Wl,--version-script=shim/vulkan/vulkan.map -Wl,-soname,libvulkan_chameleon.so
 # Chameleon's input method, started by the compositor (packaging/kwinrc).
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 # The session's init: adopts and reaps the programs that detach in it.

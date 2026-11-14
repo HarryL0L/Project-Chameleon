@@ -68,7 +68,7 @@ LD_BIND_NOW=1 LD_DEBUG=symbols LD_DEBUG_OUTPUT="$OUT/ld-debug/log" \
 cc -O1 -g -Wall -Wextra -fPIC -shared -Wl,-Bsymbolic -o "$OUT/fake_android_gl.so" shim/test/fake_android_gl.c
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -Ishim/include \
     -Ishim/include/libdrm $(pkg-config --cflags libdrm) -shared -o "$OUT/libEGL_chameleon.so" \
-    shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c shim/gles/gles.c shim/gles/gles_forward.c \
+    shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/vendor/window.c shim/egl/egl.c shim/gles/gles.c shim/gles/gles_forward.c \
     shim/gles/glsl_fix.c -ldl -Wl,--version-script=shim/vendor/vendor.map
 cc -O1 -g -Wall -Wextra -o "$OUT/vendor_test" shim/test/vendor_test.c -lEGL -lGLESv2 -ldl
 printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' "$OUT/libEGL_chameleon.so" \
@@ -85,7 +85,8 @@ __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EG
 # real libwayland-server compositor, buffers registered with chameleon-kernel
 # (which learns the socket from the compositor's bind()).
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers $(pkg-config --cflags libdrm) -o "$OUT/wayland_client_test" \
-    shim/test/wayland_client_test.c -lEGL $(pkg-config --libs wayland-server wayland-client wayland-egl) -ldl -lpthread
+    shim/test/wayland_client_test.c -lEGL -lvulkan $(pkg-config --libs wayland-server wayland-client wayland-egl) \
+    -ldl -lpthread
 cc -O1 -Wall -Wextra -fPIC -shared -o "$OUT/fake_qtgui.so" shim/test/fake_qtgui.c
 FAKE="$OUT/fake_android_gl.so"
 # wayland_test RUNTIME EXTRA_PRELOAD [VAR=value...]: a session of its own each.
@@ -109,8 +110,10 @@ wayland_test "$OUT/runtime-wl3" ":$OUT/fake_qtgui.so" EXPECT_DESKTOP_GL_QT=1 CHA
 # validation layer checking every call made through it, and in a session,
 # where it names the card's nodes. Then a real program: vulkaninfo asks it
 # everything there is to ask.
-cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -shared \
-    -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c -ldl -lpthread
+cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -Ishim/include \
+    -Ishim/include/libdrm $(pkg-config --cflags libdrm) -shared -o "$OUT/libvulkan_chameleon.so" \
+    shim/vulkan/vulkan.c shim/vulkan/wsi.c shim/vendor/window.c shim/vendor/bridge.c -ldl -lpthread \
+    -Wl,--version-script=shim/vulkan/vulkan.map
 cc -O1 -g -Wall -Wextra -fPIC -shared -o "$OUT/fake_android_vulkan.so" shim/test/fake_android_vulkan.c -ldl
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/vulkan_test" shim/test/vulkan_test.c -lvulkan -ldl
 printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.3.0"}}\n' \
@@ -140,3 +143,20 @@ if ! grep -q "renderMajor *= 226" "$OUT/vulkaninfo.txt" || ! grep -q "renderMino
     exit 1
 fi
 echo "  ok    vulkaninfo: $(grep -c . "$OUT/vulkaninfo.txt") lines, the card's render node 226:128 among them"
+# A Vulkan program's window: a real Wayland server on one side, the loader
+# and this driver on the other, and the stand-in's swapchain presenting into
+# the fake Android window between them. Again under the validation layer.
+vulkan_window() {
+    rt=$1
+    shift
+    wayland_test "$rt" "" VULKAN_WINDOW_TEST=1 VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" \
+        CHAMELEON_ANDROID_VULKAN="$OUT/fake_android_vulkan.so" "$@"
+}
+vulkan_window "$OUT/runtime-vkw"
+if ! vulkan_window "$OUT/runtime-vkw2" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation \
+    > "$OUT/vulkan-window-validation.log" 2>&1 || grep -q "Validation Error\|VUID-" "$OUT/vulkan-window-validation.log"; then
+    cat "$OUT/vulkan-window-validation.log"
+    echo "Vulkan windows under the validation layer: FAILED"
+    exit 1
+fi
+grep "PASSED" "$OUT/vulkan-window-validation.log" | sed 's/^/  (validation layer) /'

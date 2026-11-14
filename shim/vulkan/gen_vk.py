@@ -4,7 +4,10 @@
 NDK's vulkan_core.h a forwarder that swaps the caller's instance, physical
 device, device, queue or command buffer for Android's own and calls Android's
 driver, the table vk_icdGetInstanceProcAddr() looks names up in, and the list
-of extensions the header knows.
+of extensions the header knows. What the files of shim/vulkan share comes
+first (the tables' slots, the prototypes of the functions written by hand);
+the forwarders and the table are vulkan.c's, which defines
+CHAM_VK_FORWARDERS.
 
 The Vulkan loader writes into the first word of those five kinds of handle,
 and so does Android's loader, so a program never gets Android's handles: it
@@ -37,7 +40,18 @@ HAND = {
     "vkAllocateCommandBuffers", "vkFreeCommandBuffers", "vkDestroyCommandPool", "vkCmdExecuteCommands",
     "vkQueueSubmit", "vkQueueSubmit2", "vkQueueSubmit2KHR",
     "vkSetPrivateData", "vkGetPrivateData", "vkSetPrivateDataEXT", "vkGetPrivateDataEXT",
+    # Windows (wsi.c): what Android answers for its own kind of window is
+    # turned into a Wayland window's answers, and frames go to the compositor.
+    "vkDestroySurfaceKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR",
+    "vkGetPhysicalDeviceSurfacePresentModesKHR", "vkCreateSwapchainKHR", "vkDestroySwapchainKHR",
+    "vkQueuePresentKHR",
 }
+# Functions of this driver alone, from a platform's header (their prototypes
+# are in vulkan.h): Android has none by these names.
+OWN = {"vkCreateWaylandSurfaceKHR": "INSTANCE", "vkGetPhysicalDeviceWaylandPresentationSupportKHR": "PHYSICAL"}
+# Extensions with all their functions here, but listed by vulkan.c only where
+# windows can be shown.
+WINDOWS = {"VK_KHR_surface", "VK_KHR_swapchain"}
 # Structures with a wrapped handle that reach the driver through a pNext
 # chain, and the function of HAND that translates each.
 CHAINED = {"VkDeviceGroupDeviceCreateInfo": "vkCreateDevice"}
@@ -47,8 +61,8 @@ PLAIN_OBJECTS = {"VkDeviceMemoryReportCallbackDataEXT"}
 
 # Extensions of the header that aren't offered, with their functions.
 LEFT_OUT = {
-    # Windows: Wayland and X11 surfaces come with their own steps.
-    "VK_KHR_surface", "VK_KHR_swapchain", "VK_KHR_display", "VK_KHR_display_swapchain",
+    # Windows beyond plain Wayland surfaces and swapchains.
+    "VK_KHR_display", "VK_KHR_display_swapchain",
     "VK_KHR_get_surface_capabilities2", "VK_KHR_get_display_properties2", "VK_KHR_incremental_present",
     "VK_KHR_shared_presentable_image", "VK_KHR_swapchain_mutable_format", "VK_KHR_surface_protected_capabilities",
     "VK_KHR_present_wait", "VK_KHR_present_id", "VK_EXT_swapchain_colorspace", "VK_EXT_display_surface_counter",
@@ -92,8 +106,8 @@ if unknown:
     sys.exit(f"gen_vk.py: LEFT_OUT names extensions the header doesn't have: {sorted(unknown)}")
 
 
-windows = [e for e in extensions
-           if e not in LEFT_OUT and {"surface", "swapchain", "display", "present"} & set(e.split("_"))]
+windows = [e for e in extensions if e not in LEFT_OUT and e not in WINDOWS and
+           {"surface", "swapchain", "display", "present"} & set(e.split("_"))]
 if windows:
     sys.exit(f"gen_vk.py: these look like window extensions and aren't in LEFT_OUT: {windows}")
 
@@ -189,24 +203,30 @@ for kind, levels in (("I", ("INSTANCE", "PHYSICAL")), ("D", ("DEVICE",))):
     out += [f"    {kind}_COUNT", "};"]
 out += ['struct instance_table {', '    PFN_vkVoidFunction fn[I_COUNT];', '};',
         'struct device_table {', '    PFN_vkVoidFunction fn[D_COUNT];', '};', '']
+hand = [f for f in funcs if f[0] in HAND]
+out += ['/* Written by hand (vulkan.c, wsi.c). */']
+out += [f"VKAPI_ATTR {ret} VKAPI_CALL cham_{name}({', '.join(params)});" for name, ret, params, names, first, level in hand]
+out += ['', '#ifdef CHAM_VK_FORWARDERS', '']
 for name, ret, params, names, first, level in funcs:
-    sig = f"static VKAPI_ATTR {ret} VKAPI_CALL cham_{name}({', '.join(params)})"
     if name in HAND:
-        out.append(sig + ";")
         continue
     kind, obj = ("I", "inst_obj") if level in ("INSTANCE", "PHYSICAL") else ("D", "dev_obj")
     args = ", ".join([f"({first})o->real"] + names[1:])
-    out.append(f"{sig}\n{{\n    struct {obj} *o = (struct {obj} *){names[0]};\n"
+    out.append(f"static VKAPI_ATTR {ret} VKAPI_CALL cham_{name}({', '.join(params)})\n{{\n"
+               f"    struct {obj} *o = (struct {obj} *){names[0]};\n"
                f"    {'' if ret == 'void' else 'return '}((PFN_{name})o->t->fn[{kind}_{name}])({args});\n}}")
-out += ['', '/* Every function by name (sorted), with its slot in the table of its level. */',
+out += ['', '/* Every function by name (sorted), with its slot in the table of its level;',
+        ' * `own` ones are this driver\'s alone. */',
         'enum { LEVEL_GLOBAL, LEVEL_INSTANCE, LEVEL_PHYSICAL, LEVEL_DEVICE };',
         'static const struct entry {', '    const char *name;', '    PFN_vkVoidFunction fn;',
-        '    unsigned short level, slot;', '} entries[] = {']
-for name, ret, params, names, first, level in sorted(funcs):
-    slot = "0" if level == "GLOBAL" else f"{'D' if level == 'DEVICE' else 'I'}_{name}"
-    out.append(f'    {{"{name}", (PFN_vkVoidFunction)cham_{name}, LEVEL_{level}, {slot}}},')
+        '    unsigned short level, slot;', '    unsigned char own;', '} entries[] = {']
+rows = [(name, level, "0" if level == "GLOBAL" else f"{'D' if level == 'DEVICE' else 'I'}_{name}", 0)
+        for name, ret, params, names, first, level in funcs]
+rows += [(name, level, "0", 1) for name, level in OWN.items()]
+for name, level, slot, own in sorted(rows):
+    out.append(f'    {{"{name}", (PFN_vkVoidFunction)cham_{name}, LEVEL_{level}, {slot}, {own}}},')
 out += ['};', '', "/* The extensions whose functions and structures are all known here (sorted). */",
         'static const char *const known_extensions[] = {']
-out += [f'    "{e}",' for e in extensions if e not in LEFT_OUT]
-out += ['};', '']
+out += [f'    "{e}",' for e in extensions if e not in LEFT_OUT and e not in WINDOWS]
+out += ['};', '', '#endif', '']
 print("\n".join(out))

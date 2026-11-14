@@ -32,6 +32,7 @@ API struct {
     /* textures made EGLImages of AHardwareBuffers (EGL_MESA_image_dma_buf_export) */
     int native_images, images_destroyed, copies, finishes;
     GLuint copy_source; /* texture the last glCopyTexSubImage2D read */
+    GLuint swizzle_a_one; /* the last texture told to read alpha as 1 */
 } fake_state;
 
 static EGLDisplay const k_display = (EGLDisplay)0x1234;
@@ -289,11 +290,15 @@ API EGLBoolean eglDestroySurface(EGLDisplay d, EGLSurface surface)
     free(surface);
     return EGL_TRUE;
 }
-API EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface)
+/* A producer's frame: queues a free buffer of the window's size and gives
+ * it, for a producer that has pixels to put in (the stand-in for Android's
+ * Vulkan swapchain). NULL when the reader holds them all: a real driver
+ * would block here. */
+API AHardwareBuffer *fake_window_queue(fake_window *w)
 {
-    (void)d;
-    fake_surface *s = surface;
-    AImageReader *r = s->reader;
+    if (!w || w->magic != 0x5f776e64)
+        return NULL;
+    AImageReader *r = w->reader;
     for (int i = 0; i < READER_SLOTS; i++) {
         if (r->state[i] == FREE) {
             AHardwareBuffer *b = r->buffers[i];
@@ -303,11 +308,19 @@ API EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface)
                 r->buffers[i] = fake_ahb_new((uint32_t)r->buffer_width, (uint32_t)r->buffer_height, (uint32_t)r->format);
             }
             r->state[i] = QUEUED;
-            fake_state.swaps++;
-            return EGL_TRUE;
+            return r->buffers[i];
         }
     }
-    return EGL_FALSE; /* a real driver would block here */
+    return NULL;
+}
+API EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface)
+{
+    (void)d;
+    fake_surface *s = surface;
+    if (!fake_window_queue(&s->reader->window))
+        return EGL_FALSE;
+    fake_state.swaps++;
+    return EGL_TRUE;
 }
 API EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface surface, EGLint attribute, EGLint *value)
 {
@@ -479,6 +492,11 @@ API void glGetTexLevelParameteriv(GLenum t, GLint level, GLenum pname, GLint *v)
          : pname == GL_TEXTURE_HEIGHT          ? g_tex[g_tex_2d].height
          : pname == GL_TEXTURE_INTERNAL_FORMAT ? g_tex[g_tex_2d].internal
                                                : 0;
+}
+API void glTexParameteri(GLenum t, GLenum pname, GLint v)
+{
+    if (t == GL_TEXTURE_2D && pname == GL_TEXTURE_SWIZZLE_A && v == GL_ONE)
+        fake_state.swizzle_a_one = g_tex_2d;
 }
 static void fake_image_target_texture(GLenum target, void *image)
 {
