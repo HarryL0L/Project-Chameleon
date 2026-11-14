@@ -659,24 +659,26 @@ int main(void)
     }
     CHECK(strcmp(ime.commit, "hi") == 0, "committed text reaches the text field (\"%s\")", ime.commit);
     CHECK(strcmp(ime.preedit, "\xc3\xa9x") == 0, "composing text too (\"%s\")", ime.preedit);
-    /* Enter and deletions are keys, in order with the text: a newline as
-     * text or a request to delete surrounding text is lost on some apps
-     * (single-line fields, terminals). */
+    /* Enter and deletions are keys: Enter as text or a request to delete
+     * surrounding text is lost on some apps (single-line fields, terminals).
+     * Line breaks inside text stay text, CR as LF: an app takes text at once
+     * and queues keys, so a Return between pasted lines would come last. */
     ime.seq[0] = 0;
     send_input(c, CHAM_INPUT_TEXT_CHAR, 'a', 0);
     send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
     send_input(c, CHAM_INPUT_TEXT_CHAR, 'b', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\r', 0);
     send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
     send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 1);
     send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
     send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
-    const char *want = "[a]<ff0d>[b]<ff08><ff08><ffff>[]<ff0d>";
+    const char *want = "[a\nb\n]<ff08><ff08><ffff>[]<ff0d>";
     for (int i = 0; i < 25 && strcmp(ime.seq, want) != 0; i++) {
         wl_event_loop_dispatch(loop, 20);
         wl_display_flush_clients(display);
     }
-    CHECK(strcmp(ime.seq, want) == 0, "Enter as Return, deleting 2 before and 1 after as BackSpace, Delete (%s)",
-          ime.seq);
+    CHECK(strcmp(ime.seq, want) == 0,
+          "pasted lines as text, Enter as Return, deleting 2 before and 1 after as BackSpace, Delete (%s)", ime.seq);
     if (ctx)
         wl_resource_post_event(ime.im, 1 /* deactivate */, ctx);
     for (int i = 0; i < 25; i++) {

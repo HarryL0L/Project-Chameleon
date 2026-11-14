@@ -5,8 +5,9 @@
  * started, says a text field takes text, the text goes to it (committed text,
  * the word being composed) and from there to the app through text-input;
  * Enter and deletions are keys (Return, BackSpace, Delete) it sends in the
- * same stream, which every app takes, unlike a newline as text or a request
- * to delete surrounding text. Otherwise it is all typed as keys, like on a
+ * same stream, which every app takes, unlike Enter as text or a request to
+ * delete surrounding text; the line breaks of pasted text stay in the text.
+ * Otherwise it is all typed as keys, like on a
  * real keyboard (keymap.c): composing text is typed as it changes and
  * corrected with Backspace. Runs on input.c's thread.
  */
@@ -121,24 +122,25 @@ static int ime_send(uint32_t kind, const uint32_t *text, size_t len, uint32_t ke
 static void tap(uint32_t keysym);
 static uint32_t keysym_for(uint32_t cp);
 
-/* Committed text to the text field, each newline in it as Return; the first
- * part even when empty, as it replaces the text being composed. If the
- * input method goes away on the way, the rest is typed as keys. */
+/* Committed text to the text field. A line break alone is the keyboard's
+ * Enter: Return, after an empty commit that ends the text being composed.
+ * Line breaks inside text (pasted lines) stay text: an app takes committed
+ * text at once but queues keys, so a Return between two pieces of text of
+ * one burst would act after both. If the input method goes away on the way,
+ * the text is typed as keys. */
 static void ime_commit(void)
 {
-    size_t start = 0;
-    for (size_t i = 0; i <= g_text_len; i++) {
-        int newline = i < g_text_len && (g_text[i] == '\n' || g_text[i] == '\r');
-        if (i < g_text_len && !newline)
-            continue;
-        if ((i > start || start == 0) && !ime_send(CHAM_IME_COMMIT, g_text + start, i - start, 0, 0))
-            break;
-        start = i; /* sent up to here */
-        if (newline && !ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_RETURN, 1))
-            break;
-        start = i + 1;
+    size_t sent = 0;
+    if (g_text_len == 1 && (g_text[0] == '\n' || g_text[0] == '\r')) {
+        sent = ime_send(CHAM_IME_COMMIT, g_text, 0, 0, 0) && ime_send(CHAM_IME_KEYSYM, NULL, 0, XK_RETURN, 1);
+    } else {
+        for (size_t i = 0; i < g_text_len; i++)
+            if (g_text[i] == '\r')
+                g_text[i] = '\n';
+        if (ime_send(CHAM_IME_COMMIT, g_text, g_text_len, 0, 0))
+            sent = g_text_len;
     }
-    for (size_t i = start; g_ime < 0 && i < g_text_len; i++)
+    for (size_t i = sent; g_ime < 0 && i < g_text_len; i++)
         tap(keysym_for(g_text[i]));
 }
 
