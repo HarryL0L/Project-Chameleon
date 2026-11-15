@@ -66,7 +66,8 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 `CHAMELEON_MODE=1080x2400@120` (mode if the app isn't open), `CHAMELEON_DPI`
 (default 400; decides KWin's default scale), `CHAMELEON_RESIZE=0` (KWin's
 screen keeps its first size instead of following the app's window),
-`CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver).
+`CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver) or
+`CHAMELEON_VULKAN=all` (every installed Vulkan driver next to it).
 
 ## Status / limits
 
@@ -150,7 +151,13 @@ screen keeps its first size instead of following the app's window),
   still scans it out for one more vsync.
 - Vulkan: `libvulkan_chameleon.so` is listed to the session's Vulkan loader
   (`VK_ADD_DRIVER_FILES`) and runs programs on Android's Vulkan driver, at
-  that driver's Vulkan version. The loader and Android's `libvulkan.so` both
+  that driver's Vulkan version. Another installed driver for the same GPU
+  (Mesa's panvk or turnip, a wrapper of Android's) would list the GPU a
+  second time, in no set order, so the session's loader is told to use the
+  card's driver and Mesa's software one (`VK_LOADER_DRIVERS_SELECT`, kept
+  if already set); one program runs on another driver with that variable
+  set for it, e.g. `VK_LOADER_DRIVERS_SELECT='*panfrost*'`. The loader and
+  Android's `libvulkan.so` both
   write into the first word of instances, physical devices, devices, queues
   and command buffers, so programs hold wrappers of those and every call
   swaps them for the driver's own (`vulkan/vulkan.c`; the forwarders are

@@ -103,8 +103,8 @@ fi
 export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDORS"
 
 # Vulkan for the whole session: the card's driver, on Android's, listed to
-# the Vulkan loader next to the installed drivers. CHAMELEON_VULKAN=0 leaves
-# Vulkan to those. (api_version: the Vulkan that shim/vulkan/vk_forward.h reaches.)
+# the Vulkan loader. CHAMELEON_VULKAN=0 leaves Vulkan to the installed
+# drivers. (api_version: the Vulkan that shim/vulkan/vk_forward.h reaches.)
 if [ "${CHAMELEON_VULKAN:-1}" != 0 ] && [ -f "$SHIM_DIR/libvulkan_chameleon.so" ]; then
     ICD_JSON="$XDG_RUNTIME_DIR/chameleon-vulkan.json"
     printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.3.0"}}\n' \
@@ -113,6 +113,16 @@ if [ "${CHAMELEON_VULKAN:-1}" != 0 ] && [ -f "$SHIM_DIR/libvulkan_chameleon.so" 
     *":$ICD_JSON:"*) ;;
     *) export VK_ADD_DRIVER_FILES="$ICD_JSON${VK_ADD_DRIVER_FILES:+:$VK_ADD_DRIVER_FILES}" ;;
     esac
+    # Another installed driver for the same GPU (Mesa's own, a wrapper of
+    # Android's) would list the GPU a second time: the loader has no order
+    # between the two, and a program that counts GPUs finds more than the
+    # card. So the session's programs see the card's driver and Mesa's
+    # software one. CHAMELEON_VULKAN=all lists every installed driver, and
+    # a filter of the user's own stays; one program gets another driver
+    # with VK_LOADER_DRIVERS_SELECT set for it.
+    if [ "${CHAMELEON_VULKAN:-1}" != all ] && [ -z "${VK_LOADER_DRIVERS_SELECT+set}" ]; then
+        export VK_LOADER_DRIVERS_SELECT="chameleon-vulkan.json,lvp_icd*"
+    fi
 fi
 
 # The app can't open the socket in $PREFIX/tmp that chameleon-kernel

@@ -143,6 +143,20 @@ if ! grep -q "renderMajor *= 226" "$OUT/vulkaninfo.txt" || ! grep -q "renderMino
     exit 1
 fi
 echo "  ok    vulkaninfo: $(grep -c . "$OUT/vulkaninfo.txt") lines, the card's render node 226:128 among them"
+# The filter the launcher gives the session's loader: with another driver for
+# the same GPU installed, programs see the card's driver and Mesa's software
+# one, not that driver.
+cp "$(ls /usr/share/vulkan/icd.d/lvp_icd*.json | head -n 1)" "$OUT/other_icd.json"
+SELECT=$(sed -n 's/.*export VK_LOADER_DRIVERS_SELECT="\(.*\)"$/\1/p' shim/chameleon)
+gpus() {
+    env VK_ADD_DRIVER_FILES="$OUT/chameleon-vulkan.json:$OUT/other_icd.json" \
+        CHAMELEON_ANDROID_VULKAN="$OUT/fake_android_vulkan.so" "$@" vulkaninfo --summary 2>/dev/null | grep -c "^GPU[0-9]"
+}
+if [ -z "$SELECT" ] || [ "$(gpus)" != 3 ] || [ "$(gpus VK_LOADER_DRIVERS_SELECT="$SELECT")" != 2 ]; then
+    echo "the session's driver filter '$SELECT' doesn't leave the card's driver and lavapipe: FAILED"
+    exit 1
+fi
+echo "  ok    the session's driver filter ($SELECT): 2 of 3 drivers, the card's and the software one"
 # A Vulkan program's window: a real Wayland server on one side, the loader
 # and this driver on the other, and the stand-in's swapchain presenting into
 # the fake Android window between them. Again under the validation layer.
