@@ -21,7 +21,7 @@
 > The progress card below is a snapshot of the roadmap, not a live status.
 
 <p align="center">
-  <img src="branding/roadmap.gif" width="100%" alt="Project Chameleon roadmap: kernel service, GPU render node and Firefox acceleration done; smooth pointer in progress; Glamor, screen sharing, any GPU driver, Vulkan and release planned">
+  <img src="branding/roadmap.gif" width="100%" alt="Project Chameleon roadmap: kernel service, GPU render node, Firefox acceleration, smooth pointer and screen sharing done; Vulkan in progress; Glamor, any GPU driver and release planned">
 </p>
 
 ---
