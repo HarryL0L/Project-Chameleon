@@ -353,7 +353,10 @@ static struct cham_bo *share_buffer(AHardwareBuffer *ahb, const native_handle *n
 
 /* ---- windows ---- */
 
-#define READER_IMAGES 3
+/* How many of a window's frames can be with the compositor (handed over, not
+ * released yet) at once. With one fewer, a program drawing faster than the
+ * compositor takes frames waits for a release in nearly every frame. */
+#define READER_IMAGES 4
 /* All the slots of an Android buffer queue (a Vulkan swapchain may ask for
  * as many images), and an older set's buffers still at the compositor. */
 #define MAX_BUFFERS (64 + READER_IMAGES)
