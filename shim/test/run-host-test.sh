@@ -157,6 +157,56 @@ if [ -z "$SELECT" ] || [ "$(gpus)" != 3 ] || [ "$(gpus VK_LOADER_DRIVERS_SELECT=
     exit 1
 fi
 echo "  ok    the session's driver filter ($SELECT): 2 of 3 drivers, the card's and the software one"
+# CHAMELEON_VULKAN_DRIVER: Android's Vulkan is opened through libadrenotools
+# (a stand-in here, found below $PREFIX as on a phone) with the named file as
+# its driver, given as a directory and a name, and with a directory that has
+# its two hook libraries and nothing else: links to them in the session's
+# runtime directory. Where that can't be done the program is told why and runs
+# on the phone's own driver.
+cc -O1 -g -Wall -Wextra -fPIC -fvisibility=hidden -shared -o "$OUT/fake_adrenotools.so" shim/test/fake_adrenotools.c -ldl
+AT="$(cd "$OUT" && pwd -P)/adrenotools"
+rm -rf "$AT/run"
+mkdir -p "$AT/usr/lib" "$AT/driver" "$AT/none" "$AT/run"
+cp "$OUT/fake_adrenotools.so" "$AT/usr/lib/libadrenotools.so"
+: > "$AT/driver/libvulkan_other.so"
+# other_driver WHAT TOLD ASKED [VAR=value...]: vulkan_test passes, the program
+# was told TOLD and the library was asked ASKED (nothing, if empty).
+other_driver() {
+    what=$1 told=$2 asked=$3
+    shift 3
+    rm -f "$AT/asked"
+    if ! vulkan PREFIX="$AT/usr" XDG_RUNTIME_DIR="$AT/run" FAKE_ADRENOTOOLS_LOG="$AT/asked" "$@" "$OUT/vulkan_test" > "$AT/out" 2>&1 ||
+        ! grep -qF "chameleon: vulkan: $told" "$AT/out" || [ "$(cat "$AT/asked" 2>/dev/null)" != "$asked" ]; then
+        grep "chameleon:\|FAIL" "$AT/out" || true
+        cat "$AT/asked" 2>/dev/null || true
+        echo "CHAMELEON_VULKAN_DRIVER, $what: FAILED"
+        exit 1
+    fi
+    echo "  ok    CHAMELEON_VULKAN_DRIVER, $what"
+}
+ASKED="features 1 tmp (none) hooks $AT/run/chameleon-vulkan-hooks dir $AT/driver/ name libvulkan_other.so redirect (none) mapping (none)"
+other_driver "a driver file: Android's Vulkan opened with it" "Android's Vulkan is given the driver $AT/driver/libvulkan_other.so" \
+    "$ASKED" CHAMELEON_VULKAN_DRIVER="$AT/none/../driver/libvulkan_other.so"
+if [ "$(ls "$AT/run/chameleon-vulkan-hooks" | tr '\n' ' ')" != "libhook_impl.so libmain_hook.so " ] ||
+    [ "$(readlink "$AT/run/chameleon-vulkan-hooks/libhook_impl.so")" != "$AT/usr/lib/libhook_impl.so" ] ||
+    [ "$(readlink "$AT/run/chameleon-vulkan-hooks/libmain_hook.so")" != "$AT/usr/lib/libmain_hook.so" ]; then
+    ls -l "$AT/run/chameleon-vulkan-hooks"
+    echo "CHAMELEON_VULKAN_DRIVER, the hook libraries' directory: FAILED"
+    exit 1
+fi
+echo "  ok    CHAMELEON_VULKAN_DRIVER, the hook libraries' directory: links to the two, nothing else"
+other_driver "a second program: the directory as it is" "Android's Vulkan is given the driver $AT/driver/libvulkan_other.so" \
+    "$ASKED" CHAMELEON_VULKAN_DRIVER="$AT/driver/libvulkan_other.so"
+other_driver "no such file: the phone's own driver" "CHAMELEON_VULKAN_DRIVER=$AT/driver/missing.so: No such file or directory; using the phone's own driver" \
+    "" CHAMELEON_VULKAN_DRIVER="$AT/driver/missing.so"
+other_driver "a directory: the phone's own driver" "CHAMELEON_VULKAN_DRIVER=$AT/driver: not a file; using the phone's own driver" \
+    "" CHAMELEON_VULKAN_DRIVER="$AT/driver"
+other_driver "libadrenotools not installed: the phone's own driver" "CHAMELEON_VULKAN_DRIVER needs libadrenotools" \
+    "" CHAMELEON_VULKAN_DRIVER="$AT/driver/libvulkan_other.so" PREFIX="$AT/none"
+other_driver "no runtime directory: the phone's own driver" "CHAMELEON_VULKAN_DRIVER: cannot make \$XDG_RUNTIME_DIR/chameleon-vulkan-hooks: No such file or directory; using the phone's own driver" \
+    "" CHAMELEON_VULKAN_DRIVER="$AT/driver/libvulkan_other.so" XDG_RUNTIME_DIR=
+other_driver "libadrenotools fails: the linker's reason, the phone's own driver" "libadrenotools cannot open Android's Vulkan with $AT/driver/libvulkan_other.so (/nowhere/libhook_impl.so: " \
+    "$ASKED" CHAMELEON_VULKAN_DRIVER="$AT/driver/libvulkan_other.so" FAKE_ADRENOTOOLS_FAIL=1
 # A Vulkan program's window: a real Wayland server on one side, the loader
 # and this driver on the other, and the stand-in's swapchain presenting into
 # the fake Android window between them. Again under the validation layer.

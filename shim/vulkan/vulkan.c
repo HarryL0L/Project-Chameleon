@@ -19,12 +19,16 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
+#include <unistd.h>
 
 #define CHAM_VK_FORWARDERS /* vk_forward.h's forwarders and name table are here */
 #include "vulkan.h"
@@ -40,13 +44,113 @@
 
 static PFN_vkGetInstanceProcAddr g_android;
 
+/* The directory libadrenotools is told its hook libraries are in: one of the
+ * session's with links to the two it loads by name, which Termux's package
+ * has in $PREFIX/lib. Not that directory itself: the library has Android's
+ * own libraries looked up in the one it is given too, and Termux's holds
+ * files named as some of those (libbinder_ndk.so, libandroid.so). 0, or -1
+ * and errno. */
+static int hook_dir(char *dir, size_t size, const char *prefix)
+{
+    static const char *const names[] = {"libhook_impl.so", "libmain_hook.so"};
+    const char *run = getenv("XDG_RUNTIME_DIR");
+    int set = run && *run;
+    if ((size_t)snprintf(dir, size, "%s/chameleon-vulkan-hooks", set ? run : "$XDG_RUNTIME_DIR") >= size) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    if (!set) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (mkdir(dir, 0700) != 0 && errno != EEXIST)
+        return -1;
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++) {
+        char from[PATH_MAX], to[PATH_MAX];
+        if ((size_t)snprintf(from, sizeof from, "%s/lib/%s", prefix, names[i]) >= sizeof from ||
+            (size_t)snprintf(to, sizeof to, "%s/%s", dir, names[i]) >= sizeof to) {
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (symlink(from, to) != 0 && errno != EEXIST)
+            return -1;
+    }
+    return 0;
+}
+
+/* CHAMELEON_VULKAN_DRIVER=/a/driver.so: Android's Vulkan with that driver in
+ * place of the phone's own - a build for Android of Mesa's turnip or panvk,
+ * say. Android's libvulkan.so takes its driver from the system and has no
+ * setting for another, so this is libadrenotools' work
+ * (https://github.com/bylaws/libadrenotools; Termux's package of that name,
+ * loaded for this alone): it opens a copy of Android's libvulkan.so of its
+ * own and answers that copy's request for the driver with the named file.
+ * NULL, with the reason logged, if that can't be done; the phone's driver
+ * serves then. */
+static void *load_with_driver(const char *driver)
+{
+    /* adrenotools_open_libvulkan() of the library's adrenotools/driver.h */
+    typedef void *open_fn(int mode, int features, const char *tmp_dir, const char *hook_dir,
+                          const char *driver_dir, const char *driver_name, const char *redirect_dir,
+                          void **mapping);
+    enum { DRIVER_CUSTOM = 1 << 0 }; /* its ADRENOTOOLS_DRIVER_CUSTOM */
+
+    /* The driver's directory, ending in '/', and its name there. */
+    char dir[PATH_MAX], name[NAME_MAX + 1];
+    struct stat st;
+    const char *why = !realpath(driver, dir) || stat(dir, &st) != 0 ? strerror(errno)
+                      : S_ISREG(st.st_mode) ? NULL : "not a file";
+    if (why) {
+        cham_log("vulkan: CHAMELEON_VULKAN_DRIVER=%s: %s; using the phone's own driver", driver, why);
+        return NULL;
+    }
+    char *slash = strrchr(dir, '/');
+    snprintf(name, sizeof name, "%s", slash + 1);
+    slash[1] = 0;
+
+    const char *prefix = getenv("PREFIX");
+    if (!prefix || !*prefix)
+        prefix = "/data/data/com.termux/files/usr";
+    char lib[PATH_MAX], hooks[PATH_MAX];
+    snprintf(lib, sizeof lib, "%s/lib/libadrenotools.so", prefix);
+
+    void *tools = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+    open_fn *open_libvulkan = tools ? (open_fn *)dlsym(tools, "adrenotools_open_libvulkan") : NULL;
+    if (!open_libvulkan) {
+        cham_log("vulkan: CHAMELEON_VULKAN_DRIVER needs libadrenotools (%s); using the phone's own driver",
+                 dlerror());
+        return NULL;
+    }
+    if (hook_dir(hooks, sizeof hooks, prefix) != 0) {
+        cham_log("vulkan: CHAMELEON_VULKAN_DRIVER: cannot make %s: %s; using the phone's own driver", hooks,
+                 strerror(errno));
+        return NULL;
+    }
+    dlerror(); /* the library names no reason; the linker's last complaint, if any, is told below */
+    void *vulkan = open_libvulkan(RTLD_NOW | RTLD_LOCAL, DRIVER_CUSTOM, NULL, hooks, dir, name, NULL, NULL);
+    if (!vulkan) {
+        const char *linker = dlerror();
+        cham_log("vulkan: libadrenotools cannot open Android's Vulkan with %s%s (%s); using the phone's own driver",
+                 dir, name, linker ? linker : "it gives no reason");
+        return NULL;
+    }
+    cham_log("vulkan: Android's Vulkan is given the driver %s%s", dir, name);
+    return vulkan;
+}
+
 static void load(void)
 {
-    /* CHAMELEON_ANDROID_VULKAN: a stand-in library for the host tests */
-    const char *path = getenv("CHAMELEON_ANDROID_VULKAN");
-    if (!path)
-        path = sizeof(void *) == 8 ? "/system/lib64/libvulkan.so" : "/system/lib/libvulkan.so";
-    void *lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *lib = NULL;
+    const char *driver = getenv("CHAMELEON_VULKAN_DRIVER");
+    if (driver && *driver)
+        lib = load_with_driver(driver);
+    if (!lib) {
+        /* CHAMELEON_ANDROID_VULKAN: a stand-in library for the host tests */
+        const char *path = getenv("CHAMELEON_ANDROID_VULKAN");
+        if (!path)
+            path = sizeof(void *) == 8 ? "/system/lib64/libvulkan.so" : "/system/lib/libvulkan.so";
+        lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    }
     if (!lib) {
         cham_log("vulkan: cannot load Android's libvulkan: %s", dlerror());
         return;

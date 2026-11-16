@@ -67,7 +67,9 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 (default 400; decides KWin's default scale), `CHAMELEON_RESIZE=0` (KWin's
 screen keeps its first size instead of following the app's window),
 `CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver) or
-`CHAMELEON_VULKAN=all` (every installed Vulkan driver next to it).
+`CHAMELEON_VULKAN=all` (every installed Vulkan driver next to it),
+`CHAMELEON_VULKAN_DRIVER=/a/driver.so` (another driver below the card's
+Vulkan driver in place of the phone's own; see below).
 
 ## Status / limits
 
@@ -178,6 +180,27 @@ screen keeps its first size instead of following the app's window),
   the file name `libvulkan.so`: a program that loads Vulkan by that exact
   name a second time, after its first use, gets Android's instead of the
   loader (by `libvulkan.so.1`, as usual on Linux, it doesn't).
+- Another GPU driver below the card's Vulkan driver, experimental:
+  `CHAMELEON_VULKAN_DRIVER=/a/driver.so`, for a session or for one program,
+  has Android's Vulkan run that driver in place of the phone's own - a build
+  for Android of Mesa's turnip or panvk, which talks to the phone's GPU
+  kernel driver and knows Android's buffers. Windows, the card's nodes and
+  everything else stay the card's driver's. Android's `libvulkan.so` has no
+  setting for this: it is done by
+  [libadrenotools](https://github.com/bylaws/libadrenotools), which opens a
+  copy of that library of its own and answers the copy's request for the
+  driver, using functions inside Android's linker that aren't public (arm64,
+  Android 9 and later; an Android update may end it). It isn't part of
+  Chameleon: it is Termux's package `libadrenotools`, whose
+  `$PREFIX/lib/libadrenotools.so` the driver loads when the variable is
+  set. The library's two hook libraries are handed to it in a directory of
+  the session's that links to them and holds nothing else, because it has
+  Android's libraries looked up there too and Termux's `lib` has files named
+  as some of those. The driver file must be where programs may load
+  libraries from (Termux's home, not shared storage). If any of it fails the
+  program is told why and runs on the phone's driver; `vulkaninfo` shows
+  which driver answered (`driverName`). The compositor's OpenGL ES stays the
+  phone's.
 
 ## Test on a desktop
 
@@ -209,8 +232,9 @@ vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardware
 - the Vulkan driver under the system's Vulkan loader, with Mesa's lavapipe
   in Android's place: its lists, every kind of wrapped object reaching the
   driver as the driver's own, frames drawn through it, the card's nodes in a
-  session; once more with the Khronos validation layer checking each call,
-  and `vulkaninfo` (`vulkan_test`);
+  session; once more with the Khronos validation layer checking each call;
+  `vulkaninfo`; and `CHAMELEON_VULKAN_DRIVER` with a stand-in for
+  libadrenotools (`vulkan_test`);
 - a Vulkan program's window against a real libwayland-server: surface,
   swapchains (FIFO and mailbox, opaque and with alpha), each frame's pixels
   as the compositor reads them from the shared buffer
