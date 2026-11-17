@@ -6,10 +6,45 @@
 #ifndef CHAM_SHIM_H
 #define CHAM_SHIM_H
 
+#include <dlfcn.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 
 #define CHAM_EXPORT __attribute__((visibility("default")))
+
+/* dlopen() for one of Android's own libraries. Loaded the plain way, such a
+ * library and all it needs sit among the program's own: there they answer to
+ * their names, so that a program asking for "libvulkan.so" gets Android's
+ * where it means Termux's Vulkan loader, and they take Termux's libraries
+ * for theirs of the same name (libz.so). Termux has a helper against that,
+ * libtermux-platform-ns.so of its libandroid-stub package: it loads Android's
+ * libraries into one linker namespace of their own per process, the one
+ * Termux's own stand-ins for Android's libraries use too. Without the helper,
+ * or with CHAMELEON_ANDROID_NAMESPACE=0, the plain way. */
+static inline void *cham_android_dlopen(const char *path)
+{
+    static uintptr_t helper; /* 0: not looked for yet, 1: none, else its platform_dlopen() */
+    uintptr_t h = __atomic_load_n(&helper, __ATOMIC_ACQUIRE);
+    if (!h) {
+        const char *use = getenv("CHAMELEON_ANDROID_NAMESPACE");
+        void *fn = NULL;
+        if (!use || use[0] != '0' || use[1]) {
+            const char *prefix = getenv("PREFIX");
+            char lib[4096];
+            snprintf(lib, sizeof lib, "%s/lib/libtermux-platform-ns.so",
+                     prefix && *prefix ? prefix : "/data/data/com.termux/files/usr");
+            void *ns = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+            fn = ns ? dlsym(ns, "platform_dlopen") : NULL;
+        }
+        h = fn ? (uintptr_t)fn : 1;
+        __atomic_store_n(&helper, h, __ATOMIC_RELEASE);
+    }
+    if (h != 1)
+        return ((void *(*)(const char *, int))h)(path, RTLD_NOW | RTLD_LOCAL);
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
 
 #ifdef __cplusplus
 extern "C" {

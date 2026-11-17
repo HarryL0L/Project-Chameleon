@@ -114,7 +114,9 @@ static void *load_with_driver(const char *driver)
     char lib[PATH_MAX], hooks[PATH_MAX];
     snprintf(lib, sizeof lib, "%s/lib/libadrenotools.so", prefix);
 
-    void *tools = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+    /* Among Android's libraries, where the library makes a namespace of its
+     * own from the one it is in, for the driver and Android's Vulkan. */
+    void *tools = cham_android_dlopen(lib);
     open_fn *open_libvulkan = tools ? (open_fn *)dlsym(tools, "adrenotools_open_libvulkan") : NULL;
     if (!open_libvulkan) {
         cham_log("vulkan: CHAMELEON_VULKAN_DRIVER needs libadrenotools (%s); using the phone's own driver",
@@ -149,7 +151,7 @@ static void load(void)
         const char *path = getenv("CHAMELEON_ANDROID_VULKAN");
         if (!path)
             path = sizeof(void *) == 8 ? "/system/lib64/libvulkan.so" : "/system/lib/libvulkan.so";
-        lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        lib = cham_android_dlopen(path);
     }
     if (!lib) {
         cham_log("vulkan: cannot load Android's libvulkan: %s", dlerror());

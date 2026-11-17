@@ -49,7 +49,7 @@ static void load(void)
     const char *path = getenv("CHAMELEON_ANDROID_EGL");
     if (!path)
         path = sizeof(void *) == 8 ? "/system/lib64/libEGL.so" : "/system/lib/libEGL.so";
-    g_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    g_lib = cham_android_dlopen(path);
     if (!g_lib) {
         cham_log("cannot load Android's libEGL: %s", dlerror());
         return;

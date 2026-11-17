@@ -58,7 +58,7 @@ __attribute__((constructor)) static void load(void)
     const char *path = getenv("CHAMELEON_ANDROID_GLES"); /* host tests */
     if (!path)
         path = sizeof(void *) == 8 ? "/system/lib64/libGLESv2.so" : "/system/lib/libGLESv2.so";
-    void *lib = g_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    void *lib = g_lib = cham_android_dlopen(path);
     if (!lib) {
         cham_log("cannot load Android's libGLESv2: %s", dlerror());
         return;

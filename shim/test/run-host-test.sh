@@ -224,3 +224,52 @@ if ! vulkan_window "$OUT/runtime-vkw2" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_valid
     exit 1
 fi
 grep "PASSED" "$OUT/vulkan-window-validation.log" | sed 's/^/  (validation layer) /'
+# Android's own libraries are opened through Termux's namespace helper where
+# $PREFIX has one (a stand-in here, which writes down what it is asked for):
+# those of the EGL vendor, of gbm and the windows, the Vulkan driver's, and
+# libadrenotools for another driver. Not with CHAMELEON_ANDROID_NAMESPACE=0;
+# and the plain way where there is no helper, as in every run above.
+NS="$(cd "$OUT" && pwd -P)/ns"
+mkdir -p "$NS/usr/lib" "$NS/android"
+cc -O1 -g -Wall -Wextra -fPIC -fvisibility=hidden -shared -o "$NS/usr/lib/libtermux-platform-ns.so" \
+    shim/test/fake_platform_ns.c -ldl
+cp "$OUT/fake_adrenotools.so" "$NS/usr/lib/libadrenotools.so"
+for lib in libEGL.so libGLESv2.so libnativewindow.so libmediandk.so; do
+    ln -sf "$OUT/fake_android_gl.so" "$NS/android/$lib"
+done
+ln -sf "$OUT/fake_android_vulkan.so" "$NS/android/libvulkan.so"
+# apart WHAT ASKED [VAR=value...] PROGRAM: the program passes and the helper
+# was asked for the libraries ASKED, each as often as said, no others.
+asked_for() {
+    sort "$NS/asked" 2>/dev/null | uniq -c | awk '{printf "%s x%s ", $2, $1}'
+}
+apart() {
+    what=$1 asked=$2
+    shift 2
+    rm -f "$NS/asked"
+    if ! env PREFIX="$NS/usr" FAKE_PLATFORM_NS_LOG="$NS/asked" "$@" > "$NS/out" 2>&1 ||
+        [ "$(asked_for)" != "$asked" ]; then
+        tail -n 20 "$NS/out"
+        echo "asked for: $(asked_for)"
+        echo "Android's libraries apart from the program's, $what: FAILED"
+        exit 1
+    fi
+    echo "  ok    Android's libraries apart from the program's, $what"
+}
+apart "the EGL vendor's, gbm's and the windows'" "libEGL.so x1 libGLESv2.so x1 libmediandk.so x2 libnativewindow.so x2 " \
+    __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$NS/android/libEGL.so" \
+    CHAMELEON_ANDROID_GLES="$NS/android/libGLESv2.so" XDG_RUNTIME_DIR="$OUT/runtime-vendor" \
+    CHAMELEON_DRM_PATH="$OUT/card2" CHAMELEON_SOCKET="$OUT/presenter-none" VENDOR_TEST_SESSION=1 \
+    CHAMELEON_ANDROID_NATIVEWINDOW="$NS/android/libnativewindow.so" \
+    CHAMELEON_ANDROID_MEDIANDK="$NS/android/libmediandk.so" \
+    VENDOR_TEST_GBM="$OUT/libgbm.so" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/vendor_test"
+apart "the Vulkan driver's" "libvulkan.so x1 " \
+    VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" VULKAN_TEST_ICD="$OUT/libvulkan_chameleon.so" \
+    CHAMELEON_ANDROID_VULKAN="$NS/android/libvulkan.so" "$OUT/vulkan_test"
+apart "libadrenotools for another driver" "libadrenotools.so x1 " \
+    VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" VULKAN_TEST_ICD="$OUT/libvulkan_chameleon.so" \
+    CHAMELEON_ANDROID_VULKAN="$NS/android/libvulkan.so" XDG_RUNTIME_DIR="$AT/run" \
+    CHAMELEON_VULKAN_DRIVER="$AT/driver/libvulkan_other.so" "$OUT/vulkan_test"
+apart "not with CHAMELEON_ANDROID_NAMESPACE=0" "" \
+    VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" VULKAN_TEST_ICD="$OUT/libvulkan_chameleon.so" \
+    CHAMELEON_ANDROID_VULKAN="$NS/android/libvulkan.so" CHAMELEON_ANDROID_NAMESPACE=0 "$OUT/vulkan_test"

@@ -177,8 +177,8 @@ static int ahb_load(void)
     static int loaded = -1;
     if (loaded >= 0)
         return loaded;
-    void *lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so" : "/system/lib/libnativewindow.so",
-                       RTLD_NOW | RTLD_LOCAL);
+    void *lib = cham_android_dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so"
+                                                        : "/system/lib/libnativewindow.so");
     if (lib) {
         *(void **)&ahb.allocate = dlsym(lib, "AHardwareBuffer_allocate");
         *(void **)&ahb.acquire = dlsym(lib, "AHardwareBuffer_acquire");

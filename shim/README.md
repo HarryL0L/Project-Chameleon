@@ -69,7 +69,9 @@ screen keeps its first size instead of following the app's window),
 `CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver) or
 `CHAMELEON_VULKAN=all` (every installed Vulkan driver next to it),
 `CHAMELEON_VULKAN_DRIVER=/a/driver.so` (another driver below the card's
-Vulkan driver in place of the phone's own; see below).
+Vulkan driver in place of the phone's own; see below),
+`CHAMELEON_ANDROID_NAMESPACE=0` (Android's libraries loaded among the
+program's own, as before there was a namespace for them; see below).
 
 ## Status / limits
 
@@ -176,10 +178,22 @@ Vulkan driver in place of the phone's own; see below).
   alpha as 1 from a buffer declared XBGR or XRGB, as a driver importing
   that format does (`egl/egl.c`). Left out for now: X11 windows,
   dma-buf import and export, the debug extensions (the loader and the
-  validation layer provide those). Android's library has
-  the file name `libvulkan.so`: a program that loads Vulkan by that exact
-  name a second time, after its first use, gets Android's instead of the
-  loader (by `libvulkan.so.1`, as usual on Linux, it doesn't).
+  validation layer provide those).
+- Android's own libraries (`libEGL.so`, `libGLESv2.so`, `libvulkan.so`,
+  `libnativewindow.so`, `libmediandk.so`) are loaded apart from the
+  program's: into the linker namespace Termux keeps for Android's libraries
+  (`libtermux-platform-ns.so` of its package `libandroid-stub`, one
+  namespace per process, shared with Termux's own stand-ins for Android's
+  libraries). Loaded among the program's own they answer to their names
+  there: a program that asks for `libvulkan.so`, as some do (KWin among
+  them), then gets Android's Vulkan, without the card's driver and its
+  windows, where it means the Vulkan loader; and Android's libraries take
+  Termux's `libz.so` for theirs. That is still how it goes without Termux's
+  helper or with `CHAMELEON_ANDROID_NAMESPACE=0`. The price: the phone's GPU
+  driver takes the few of Android's libraries it needs itself
+  (`libnativewindow.so` and what that needs) from the program's namespace,
+  so those are in the process a second time; and a GPU driver that needs
+  `libvulkan.so` itself brings that name back.
 - Another GPU driver below the card's Vulkan driver, experimental:
   `CHAMELEON_VULKAN_DRIVER=/a/driver.so`, for a session or for one program,
   has Android's Vulkan run that driver in place of the phone's own - a build
@@ -235,6 +249,9 @@ vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardware
   session; once more with the Khronos validation layer checking each call;
   `vulkaninfo`; and `CHAMELEON_VULKAN_DRIVER` with a stand-in for
   libadrenotools (`vulkan_test`);
+- Android's libraries opened through Termux's namespace helper where there
+  is one (a stand-in that writes down what it is asked for), each of them
+  and libadrenotools, and not with `CHAMELEON_ANDROID_NAMESPACE=0`;
 - a Vulkan program's window against a real libwayland-server: surface,
   swapchains (FIFO and mailbox, opaque and with alpha), each frame's pixels
   as the compositor reads them from the shared buffer

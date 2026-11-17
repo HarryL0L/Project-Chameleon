@@ -61,7 +61,7 @@ Version: $VERSION
 Architecture: aarch64
 Maintainer: Project Chameleon <https://github.com/HarryL0L/Project-Chameleon>
 Installed-Size: $SIZE
-Depends: libglvnd, libwayland, libdrm, dbus
+Depends: libglvnd, libwayland, libdrm, libandroid-stub, dbus
 Recommends: kwin
 Homepage: https://github.com/HarryL0L/Project-Chameleon
 Description: KWin and Plasma on Android's GPU, shown by the Chameleon app
