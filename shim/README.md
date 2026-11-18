@@ -17,10 +17,11 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 1. Install `chameleon.apk` from the CI artifact and open it.
 2. Install the Termux package from the artifact
    (`apt install ./chameleon_<version>_aarch64.deb`; files go to
-   `$PREFIX/lib/chameleon`, commands to `$PREFIX/bin`). Or copy the artifact's
-   `chameleon/` folder into Termux (not `/sdcard`, which is `noexec`),
-   replacing an older copy completely, and run
-   `chmod +x chameleon/chameleon* chameleon/bin/* && chameleon/chameleon --install`.
+   `$PREFIX/lib/chameleon`, commands to `$PREFIX/bin`). A folder built with
+   `shim/build-android.sh` works without the package: copy it into Termux
+   (not `/sdcard`, which is `noexec`), replacing an older copy completely,
+   and run
+   `chmod +x chameleon/chameleon* && chameleon/chameleon --install`.
    Then:
 
 ```sh

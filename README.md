@@ -370,9 +370,8 @@ More switches and the details of each piece are in
 ## Building
 
 Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml)).
-Each push produces one artifact with the APK, the Termux package, the same
-files as a plain `chameleon/` folder, and the probe. It also runs the host
-tests and the conformance tests.
+Each push produces one artifact with the APK and the Termux package, and
+runs the host tests and the conformance tests.
 
 Locally:
 

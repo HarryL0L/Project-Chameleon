@@ -42,12 +42,10 @@ jobs:
             echo "::error::a release needs the signing secrets"
             exit 1
           fi
-          gradle --no-daemon -p android assembleRelease assembleDebug
+          gradle --no-daemon -p android assembleRelease
           rm -f "$RUNNER_TEMP/chameleon.jks"
           mkdir -p out
           cp android/app/build/outputs/apk/release/app-release.apk out/chameleon.apk
-          # Debuggable, for development; releases ship chameleon.apk only.
-          cp android/app/build/outputs/apk/debug/app-debug.apk out/chameleon-debug.apk
           # The NDK the app build uses (android/app/build.gradle ndkVersion).
           echo "NDK_CC=$ANDROID_HOME/ndk/26.3.11579264/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang" >> "$GITHUB_ENV"
 
@@ -76,7 +74,11 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: chameleon-${{ github.sha }}
-          path: out/
+          # What gets installed, nothing else: the app and the Termux package.
+          path: |
+            out/chameleon.apk
+            out/chameleon_*_aarch64.deb
+          if-no-files-found: error
 
   shim-host-test:
     runs-on: ubuntu-24.04
