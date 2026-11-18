@@ -84,6 +84,7 @@ STUB(EGLBoolean, eglDestroySyncKHR, (EGLDisplay dpy, EGLSyncKHR sync), (dpy, syn
 STUB(EGLint, eglClientWaitSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint flags, EGLTimeKHR timeout),
      (dpy, sync, flags, timeout), EGL_FALSE)
 STUB(EGLint, eglWaitSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint flags), (dpy, sync, flags), EGL_FALSE)
+STUB(EGLBoolean, eglSignalSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLenum mode), (dpy, sync, mode), EGL_FALSE)
 STUB(EGLBoolean, eglGetSyncAttribKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint attribute, EGLint *value),
      (dpy, sync, attribute, value), EGL_FALSE)
 STUB(EGLint, eglDupNativeFenceFDANDROID, (EGLDisplay dpy, EGLSyncKHR sync), (dpy, sync),
@@ -149,6 +150,7 @@ static const struct {
     ENTRY(eglQueryDmaBufModifiersEXT), ENTRY(eglSwapBuffersWithDamageKHR), ENTRY(eglSwapBuffersWithDamageEXT),
     ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID), ENTRY(eglQueryDeviceStringEXT),
     ENTRY(eglQueryDeviceAttribEXT),  ENTRY(eglExportDMABUFImageQueryMESA), ENTRY(eglExportDMABUFImageMESA),
+    ENTRY(eglSignalSyncKHR),
 };
 
 static void *get_dispatch_address(const char *name)

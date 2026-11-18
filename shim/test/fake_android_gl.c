@@ -57,8 +57,8 @@ API const char *eglQueryString(EGLDisplay d, EGLint name)
     (void)d;
     switch (name) {
     case EGL_EXTENSIONS:
-        return "EGL_KHR_image_base EGL_ANDROID_native_fence_sync EGL_KHR_no_config_context "
-               "EGL_KHR_surfaceless_context";
+        return "EGL_KHR_image_base EGL_ANDROID_get_frame_timestamps EGL_ANDROID_native_fence_sync "
+               "EGL_KHR_no_config_context EGL_KHR_reusable_sync EGL_KHR_surfaceless_context EGL_KHR_lock_surface3";
     case EGL_VENDOR:
         return "fake Android";
     case EGL_VERSION:
@@ -333,6 +333,11 @@ API EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface surface, EGLint attribut
     else
         return EGL_FALSE;
     return EGL_TRUE;
+}
+API EGLBoolean eglSignalSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLenum mode)
+{
+    (void)mode;
+    return d == k_display && s != EGL_NO_SYNC_KHR;
 }
 /* Android's libEGL: the EGL 1.5 entry point, even on a 1.4 driver. */
 API EGLBoolean eglWaitSync(EGLDisplay d, EGLSync s, EGLint flags)

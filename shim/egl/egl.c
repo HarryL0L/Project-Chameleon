@@ -529,6 +529,27 @@ static const char k_client_extensions[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_MESA_platform_surfaceless EGL_KHR_platform_android "
     "EGL_KHR_client_get_all_proc_addresses";
 
+/* Extensions of Android's whose functions the vendor library doesn't hand
+ * out: a program that reads one of these names asks for its functions next
+ * and may take their absence for a broken EGL (ANGLE in Chromium does, over
+ * EGL_ANDROID_get_frame_timestamps). So they aren't listed. */
+static int unserved(const char *name, size_t len)
+{
+    static const char *const k_names[] = {
+        "EGL_ANDROID_blob_cache",   "EGL_ANDROID_create_native_client_buffer",
+        "EGL_ANDROID_get_frame_timestamps", "EGL_KHR_cl_event2",
+        "EGL_KHR_lock_surface",     "EGL_KHR_lock_surface2",
+        "EGL_KHR_lock_surface3",    "EGL_KHR_stream",
+        "EGL_KHR_stream_consumer_gltexture", "EGL_KHR_stream_cross_process_fd",
+        "EGL_KHR_stream_fifo",      "EGL_KHR_stream_producer_eglsurface",
+        "EGL_NV_post_sub_buffer",   "EGL_NV_system_time",
+    };
+    for (size_t i = 0; i < sizeof k_names / sizeof k_names[0]; i++)
+        if (strlen(k_names[i]) == len && memcmp(k_names[i], name, len) == 0)
+            return 1;
+    return 0;
+}
+
 EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
 {
     REAL(const char *, eglQueryString, (EGLDisplay, EGLint))
@@ -553,7 +574,18 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
         /* and textures exported as such buffers (see texture_image) */
         const char *export = cham_core_present() ? " EGL_MESA_image_dma_buf_export" : "";
         cached = malloc(strlen(s) + strlen(extra) + strlen(export) + 1);
-        strcpy(cached, s);
+        char *end = cached;
+        for (const char *p = s; *p;) {
+            size_t n = strcspn(p, " ");
+            if (n && !unserved(p, n)) {
+                if (end != cached)
+                    *end++ = ' ';
+                memcpy(end, p, n);
+                end += n;
+            }
+            p += n + strspn(p + n, " ");
+        }
+        *end = 0;
         if (!strstr(s, "EGL_EXT_image_dma_buf_import_modifiers"))
             strcat(cached, extra);
         if (!strstr(s, "EGL_MESA_image_dma_buf_export"))

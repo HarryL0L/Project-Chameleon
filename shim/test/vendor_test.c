@@ -295,6 +295,15 @@ int main(void)
     const char *vendor = eglQueryString(dpy, EGL_VENDOR);
     CHECK(vendor && strcmp(vendor, "fake Android") == 0, "display belongs to the Android driver");
     const char *exts = eglQueryString(dpy, EGL_EXTENSIONS);
+    /* Android's own extensions are listed only with their functions */
+    CHECK(exts && !strstr(exts, "EGL_ANDROID_get_frame_timestamps") && !strstr(exts, "EGL_KHR_lock_surface3") &&
+              !eglGetProcAddress("eglGetCompositorTimingSupportedANDROID"),
+          "extensions whose functions aren't handed out aren't listed");
+    CHECK(exts && strstr(exts, "EGL_KHR_image_base EGL_ANDROID_native_fence_sync EGL_KHR_no_config_context") &&
+              strstr(exts, "EGL_KHR_surfaceless_context") && !strstr(exts, "  ") && exts[0] != ' ',
+          "the driver's other extensions are, in its order");
+    CHECK(strstr(exts, "EGL_KHR_reusable_sync") && eglGetProcAddress("eglSignalSyncKHR"),
+          "EGL_KHR_reusable_sync comes with eglSignalSyncKHR");
     if (session) {
         CHECK(exts && strstr(exts, "EGL_EXT_image_dma_buf_import"), "dmabuf import for the compositor");
         /* Everything gbm allocates is importable, or KWin takes those formats
