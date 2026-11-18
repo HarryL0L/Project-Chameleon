@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -112,6 +113,57 @@ static int fork_and_close(void)
     return 0;
 }
 
+/* Opening the card waits for the app's first report, which the stub sends
+ * once the shim connects to it. */
+static void *open_card(void *path)
+{
+    return (void *)(intptr_t)open(path, O_RDWR | O_CLOEXEC);
+}
+
+/* The session started before the app reported its screen: the card's screen
+ * and the touchpad have the assumed size (1080x1920), and the app's window,
+ * reported later, is longer. All of the glass must still reach the touchpad. */
+static int late_app(int c, pthread_t *opener)
+{
+    printf("an app that reports after the session started\n");
+    void *opened;
+    pthread_join(*opener, &opened); /* returns once the service stops waiting */
+    CHECK((int)(intptr_t)opened >= 0, "the card opens without the app's report");
+    struct cham_msg window = {CHAM_WINDOW, 0, 1080 | (uint64_t)2400 << 32, 0};
+    struct cham_msg surface = {CHAM_CONFIG, 0, 1080 | (uint64_t)2400 << 32, 60000};
+    cham_send(c, &window, -1);
+    cham_send(c, &surface, -1);
+    int pad = open("/dev/input/event3", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct input_absinfo pad_y = {0};
+    CHECK(pad >= 0 && ioctl(pad, EVIOCGABS(ABS_MT_POSITION_Y), &pad_y) == 0 && pad_y.maximum == 1919,
+          "touchpad: axes of the assumed screen (max %d, want 1919)", pad_y.maximum);
+    /* (0.5, 0.9) of the window, then its far corner */
+    const uint64_t at[] = {CHAM_INPUT_POS(32768, 58982), CHAM_INPUT_POS(65535, 65535)};
+    const int want[][2] = {{432, 1727}, {863, 1919}};
+    for (int i = 0; i < 2; i++) {
+        send_input(c, i ? CHAM_INPUT_PAD_MOTION : CHAM_INPUT_PAD_DOWN, 3, at[i]);
+        send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+        int x = -1, y = -1;
+        struct pollfd pp = {pad, POLLIN, 0};
+        struct input_event pe;
+        while (pad >= 0 && poll(&pp, 1, 1000) == 1 && read(pad, &pe, sizeof pe) == sizeof pe &&
+               !(pe.type == EV_SYN && pe.code == SYN_REPORT && x >= 0)) {
+            if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_X)
+                x = pe.value;
+            if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_Y)
+                y = pe.value;
+        }
+        CHECK(x == want[i][0] && y == want[i][1], "touchpad: the window's %s is at %d,%d (want %d,%d)",
+              i ? "far corner" : "(0.5, 0.9)", x, y, want[i][0], want[i][1]);
+    }
+    if (pad >= 0)
+        close(pad);
+    close(c);
+    close((int)(intptr_t)opened);
+    printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+    return failures != 0;
+}
+
 int main(void)
 {
     const char *dev_path = getenv("CHAMELEON_DRM_PATH");
@@ -127,11 +179,23 @@ int main(void)
     unlink(sock_path);
     bind(l, (struct sockaddr *)&addr, sizeof addr);
     listen(l, 1);
-    int fd = open(dev_path, O_RDWR | O_CLOEXEC); /* starts the shim's presenter link */
-    CHECK(fd >= 0, "open fake DRM device");
+    pthread_t opener; /* opening the card starts the shim's presenter link */
+    pthread_create(&opener, NULL, open_card, (void *)dev_path);
     struct pollfd p = {l, POLLIN, 0};
     CHECK(poll(&p, 1, 5000) == 1, "shim connects to the presenter");
     int c = accept(l, NULL, NULL);
+    if (getenv("EVDEV_TEST_LATE_APP"))
+        return late_app(c, &opener);
+    /* The app's first report, with the keyboard up: its whole window, then
+     * the surface the keyboard leaves for the desktop. */
+    struct cham_msg window = {CHAM_WINDOW, 0, 1080 | (uint64_t)2400 << 32, 0};
+    struct cham_msg surface = {CHAM_CONFIG, 0, 1080 | (uint64_t)1443 << 32, 60000};
+    cham_send(c, &window, -1);
+    cham_send(c, &surface, -1);
+    void *opened;
+    pthread_join(opener, &opened);
+    int fd = (int)(intptr_t)opened;
+    CHECK(fd >= 0, "open fake DRM device");
     /* A finger down before any program reads the touchscreen: as with the
      * kernel, the device has it down when libinput opens it (checked below). */
     send_input(c, CHAM_INPUT_TOUCH_DOWN, 1, CHAM_INPUT_POS(0, 0));
@@ -158,31 +222,63 @@ int main(void)
     if (d)
         udev_device_unref(d);
     udev_enumerate_unref(e);
+    /* Its render node, as a program that only renders looks for one. */
+    e = udev_enumerate_new(udev);
+    udev_enumerate_add_match_subsystem(e, "drm");
+    udev_enumerate_add_match_sysname(e, "renderD*");
+    udev_enumerate_scan_devices(e);
+    first = udev_enumerate_get_list_entry(e);
+    syspath = first ? udev_list_entry_get_name(first) : NULL;
+    CHECK(syspath && !udev_list_entry_get_next(first), "one render node listed (%s)", syspath ? syspath : "none");
+    d = syspath ? udev_device_new_from_syspath(udev, syspath) : NULL;
+    node = d ? udev_device_get_devnode(d) : NULL;
+    CHECK(node && strcmp(node, "/dev/dri/renderD128") == 0 && stat(node, &st) == 0 && S_ISCHR(st.st_mode) &&
+              st.st_rdev == makedev(226, 128) && st.st_rdev == udev_device_get_devnum(d),
+          "/dev/dri/renderD128, 226:128 (%s)", node ? node : "none");
+    CHECK(d && !udev_device_get_tags_list_entry(d) && udev_device_get_property_value(d, "ID_PATH"),
+          "untagged, with its path (ID_PATH)");
+    if (d)
+        udev_device_unref(d);
+    udev_enumerate_unref(e);
 
     /* libdrm names and describes the card from its sysfs entries, as for a
-     * KMS-only platform card such as vkms: card0, no render node. */
+     * platform card with a render node (virtio-gpu's nodes). */
     printf("libdrm\n");
     char *name = drmGetPrimaryDeviceNameFromFd(fd);
     CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "primary node name (%s)", name ? name : "none");
     free(name);
     name = drmGetRenderDeviceNameFromFd(fd);
-    CHECK(!name, "no render node");
+    CHECK(name && strcmp(name, "/dev/dri/renderD128") == 0, "render node name (%s)", name ? name : "none");
     free(name);
     CHECK(drmGetNodeTypeFromFd(fd) == DRM_NODE_PRIMARY, "node type: primary");
+    int rfd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    CHECK(rfd >= 0 && drmGetNodeTypeFromFd(rfd) == DRM_NODE_RENDER, "the render node opens; node type: render");
+    name = rfd >= 0 ? drmGetPrimaryDeviceNameFromFd(rfd) : NULL;
+    CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "...its primary node (%s)", name ? name : "none");
+    free(name);
+    name = rfd >= 0 ? drmGetDeviceNameFromFd2(rfd) : NULL;
+    CHECK(name && strcmp(name, "/dev/dri/renderD128") == 0, "...its name from its uevent (%s)", name ? name : "none");
+    free(name);
+    if (rfd >= 0)
+        close(rfd);
     name = drmGetDeviceNameFromFd2(fd);
     CHECK(name && strcmp(name, "/dev/dri/card0") == 0, "device name from its uevent (%s)", name ? name : "none");
     free(name);
     drmDevicePtr dev = NULL;
     CHECK(drmGetDevice2(fd, 0, &dev) == 0 && dev->bustype == DRM_BUS_PLATFORM &&
-              dev->available_nodes == 1 << DRM_NODE_PRIMARY &&
+              dev->available_nodes == (1 << DRM_NODE_PRIMARY | 1 << DRM_NODE_RENDER) &&
               strcmp(dev->nodes[DRM_NODE_PRIMARY], "/dev/dri/card0") == 0 &&
+              strcmp(dev->nodes[DRM_NODE_RENDER], "/dev/dri/renderD128") == 0 &&
               strcmp(dev->businfo.platform->fullname, "chameleon") == 0 &&
               strcmp(dev->deviceinfo.platform->compatible[0], "chameleon") == 0,
-          "drmGetDevice2: platform device \"chameleon\" with card0");
+          "drmGetDevice2: platform device \"chameleon\" with card0 and renderD128");
     drmFreeDevice(&dev);
     char resolved[PATH_MAX];
     CHECK(realpath("/sys/dev/char/226:0/device", resolved) && strcmp(resolved, "/sys/devices/platform/chameleon") == 0,
           "realpath of its device link (%s)", resolved);
+    CHECK(realpath("/sys/dev/char/226:128/device", resolved) &&
+              strcmp(resolved, "/sys/devices/platform/chameleon") == 0,
+          "...the render node's leads to the same device (%s)", resolved);
     int fd2 = open("/dev/dri/card0", O_RDWR | O_CLOEXEC);
     CHECK(fd2 >= 0 && drmIsKMS(fd2), "the named node opens as the card");
     if (fd2 >= 0)
@@ -195,7 +291,7 @@ int main(void)
         snprintf(listed + strlen(listed), sizeof listed - strlen(listed), "%s ", e->d_name);
     if (dir)
         closedir(dir);
-    int missing = !strstr(listed, "card0 "), real_dri = (int)syscall(SYS_openat, AT_FDCWD, "/dev/dri",
+    int missing = !strstr(listed, "card0 ") + !strstr(listed, "renderD128 "), real_dri = (int)syscall(SYS_openat, AT_FDCWD, "/dev/dri",
                                                                      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     char dents[4096];
     long n;
@@ -210,7 +306,7 @@ int main(void)
             } *d = (void *)(dents + off);
             char want[300];
             snprintf(want, sizeof want, "%s ", d->name);
-            if (d->name[0] != '.' && strcmp(d->name, "card0") != 0) {
+            if (d->name[0] != '.' && strcmp(d->name, "card0") != 0 && strcmp(d->name, "renderD128") != 0) {
                 struct stat real_st, seen_st;
                 missing += !strstr(listed, want) ||
                            (fstatat(real_dri, d->name, &real_st, 0) == 0 &&
@@ -221,7 +317,7 @@ int main(void)
         }
     if (real_dri >= 0)
         close(real_dri);
-    CHECK(!missing, "/dev/dri: the card and every real entry, the real ones as they are (%s)", listed);
+    CHECK(!missing, "/dev/dri: the card's nodes and every real entry, the real ones as they are (%s)", listed);
 
     /* Tag filters as systemd's libudev applies them: a device needs every
      * tag; the card has seat, the input event nodes none. */
@@ -453,6 +549,31 @@ int main(void)
         libinput_event_destroy(ev);
     }
     CHECK(button == BTN_LEFT, "touchpad: a tap is a left click (button 0x%x)", button);
+    /* The touchpad is the whole window, not the smaller first surface: its
+     * axes are the window's longer side, and a finger low on the glass (over
+     * the keyboard) isn't cut off at the desktop's edge. */
+    int pad = open("/dev/input/event3", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct input_absinfo pad_y = {0};
+    CHECK(pad >= 0 && ioctl(pad, EVIOCGABS(ABS_MT_POSITION_Y), &pad_y) == 0 && pad_y.maximum == 2399,
+          "touchpad: axes span the window's longer side (max %d, want 2399)", pad_y.maximum);
+    send_input(c, CHAM_INPUT_PAD_DOWN, 3, CHAM_INPUT_POS(32768, 58982)); /* (0.5, 0.9) of the window */
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    int pad_x = -1, pad_yv = -1;
+    struct pollfd pp = {pad, POLLIN, 0};
+    struct input_event pe;
+    while (pad >= 0 && poll(&pp, 1, 1000) == 1 && read(pad, &pe, sizeof pe) == sizeof pe &&
+           !(pe.type == EV_SYN && pe.code == SYN_REPORT && pad_x >= 0)) {
+        if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_X)
+            pad_x = pe.value;
+        if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_Y)
+            pad_yv = pe.value;
+    }
+    CHECK(pad_x == 540 && pad_yv == 2159, "touchpad: a finger at (0.5, 0.9) of the window is at %d,%d (want 540,2159)",
+          pad_x, pad_yv);
+    send_input(c, CHAM_INPUT_PAD_UP, 3, 0);
+    send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+    if (pad >= 0)
+        close(pad);
 
     printf("hotplug\n");
     /* The app's window changes: the connector's mode follows, and a udev
@@ -487,8 +608,16 @@ int main(void)
               conn->modes[0].vrefresh == 60 && (conn->modes[0].type & DRM_MODE_TYPE_PREFERRED),
           "the connector's one mode is the window: %dx%d@%d, preferred", conn && conn->count_modes ? conn->modes[0].hdisplay : 0,
           conn && conn->count_modes ? conn->modes[0].vdisplay : 0, conn && conn->count_modes ? conn->modes[0].vrefresh : 0);
+    CHECK(conn && conn->mmWidth == 69 && conn->mmHeight == 152,
+          "the screen's physical size is the whole window's: %ux%u mm (want 69x152)", conn ? conn->mmWidth : 0,
+          conn ? conn->mmHeight : 0);
     drmModeFreeConnector(conn);
     drmModeFreeResources(res);
+    drmSetClientCap(fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+    drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
+    CHECK(pres && pres->count_planes == 1, "an app that doesn't show a cursor plane: the primary plane only (%d)",
+          pres ? (int)pres->count_planes : -1);
+    drmModeFreePlaneResources(pres);
     cham_send(c, &cfg, -1); /* the same window again: nothing changed */
     CHECK(poll(&mp, 1, 300) == 0, "the same size again: no uevent");
     struct pollfd ip = {udev_monitor_get_fd(input_mon), POLLIN, 0};

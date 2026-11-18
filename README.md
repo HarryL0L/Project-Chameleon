@@ -166,15 +166,19 @@ Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/ch
   caps, GEM handles), released when the file's last copy closes, even in a
   process that died.
 - It offers one connector (with an EDID: "Chameleon", the phone's physical
-  size, the app's size and refresh rate as its preferred mode), one CRTC
-  and one primary plane, with atomic
+  size, the app's size and refresh rate as its preferred mode), one CRTC,
+  a primary plane and a cursor plane (the pointer is its own Android
+  layer, so moving it redraws nothing), with atomic
   modesetting, `TEST_ONLY` commits, `EBUSY` while a flip is pending, and
-  page-flip events written to the pipe.
+  page-flip events written to the pipe, timed on the display's vsync.
+- `/dev/dri/renderD128` is the card's render node, for programs that only
+  render: every GPU buffer of the session can be shared through the card's
+  nodes by PRIME, as on a real GPU.
 - An atomic commit sends a `PRESENT` to the app with the framebuffer's
   `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
   vblank keeps KWin running.
-- It also runs the input devices, the input thread and the registry of
-  apps' GPU buffers, so a KWin that dies takes none of them along.
+- It also runs the input devices, the input thread and the table of the
+  session's GPU buffers, so a KWin that dies takes none of them along.
   `libchameleon.so` keeps a crash reporter in programs that render with
   Android's driver, which logs the last GL/EGL calls and a symbolised
   backtrace.
@@ -211,7 +215,8 @@ Code: [`shim/gbm/`](shim/gbm/)
 - **Wayland apps on the GPU:** under a Chameleon KWin it also takes
   `EGL_PLATFORM_WAYLAND_KHR`. Each `wl_egl_window` renders into an
   `AImageReader`, a real Android window surface, so the driver's buffer
-  handling works as usual. Every frame then reaches KWin as an
+  handling works as usual; a resize asks that window for buffers of the
+  new size, as a `SurfaceView` resizes. Every frame then reaches KWin as an
   `AHardwareBuffer`: it is registered with `chameleon-kernel`, wrapped in a
   `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
   is copied, and frame callbacks pace the app.
@@ -468,10 +473,12 @@ AHardwareBuffer and AImageReader support.
 | [`shim/core/`](shim/core/) | `chameleon-kernel`: fake KMS device, presenter link, input, screen size, clipboard, apps' GPU buffers; `libchameleon.so`: the card node, crash reporter |
 | [`shim/udev/`](shim/udev/) | `libchameleon_udev.so`: udev, the sysfs entries and the `/dev/input` nodes of Chameleon's devices |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
+| [`shim/init/`](shim/init/) | `chameleon-init`: the session's init, adopts and reaps the programs that detach in it |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
-| [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor |
+| [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor; `vendor/window.c`: an app's window, for EGL and Vulkan |
+| [`shim/vulkan/`](shim/vulkan/) | `libvulkan_chameleon.so`, the card's Vulkan driver on Android's, with Wayland windows |
 | [`shim/chameleon`](shim/chameleon), [`shim/chameleon-vendor-install`](shim/chameleon-vendor-install) | Launchers |
-| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd; conformance tests against a real Linux kernel in QEMU |
+| [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd, Vulkan with the real loader on lavapipe; conformance tests against a real Linux kernel in QEMU |
 | [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |

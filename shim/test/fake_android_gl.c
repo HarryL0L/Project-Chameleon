@@ -10,7 +10,7 @@
 #define _GNU_SOURCE
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
-#include <GLES2/gl2.h>
+#include <GLES3/gl31.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,7 +27,12 @@ API struct {
     int create_image_target;
     int query_counter_calls;
     int swaps, swap_interval_calls, last_swap_interval;
+    int readers, geometry_calls;
     void *current_draw;
+    /* textures made EGLImages of AHardwareBuffers (EGL_MESA_image_dma_buf_export) */
+    int native_images, images_destroyed, copies, finishes;
+    GLuint copy_source; /* texture the last glCopyTexSubImage2D read */
+    GLuint swizzle_a_one; /* the last texture told to read alpha as 1 */
 } fake_state;
 
 static EGLDisplay const k_display = (EGLDisplay)0x1234;
@@ -186,6 +191,7 @@ typedef struct {
 } fake_window;
 typedef struct AImageReader {
     int32_t width, height, format, max_images, acquired;
+    int32_t buffer_width, buffer_height; /* what the window gives (setBuffersGeometry) */
     AHardwareBuffer *buffers[READER_SLOTS];
     int state[READER_SLOTS];
     fake_window window;
@@ -199,9 +205,10 @@ API int AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format, uint64_t
                                   AImageReader **out)
 {
     (void)usage;
+    fake_state.readers++;
     AImageReader *r = calloc(1, sizeof *r);
-    r->width = w;
-    r->height = h;
+    r->width = r->buffer_width = w;
+    r->height = r->buffer_height = h;
     r->format = format;
     r->max_images = max_images;
     r->window.magic = 0x5f776e64;
@@ -209,6 +216,18 @@ API int AImageReader_newWithUsage(int32_t w, int32_t h, int32_t format, uint64_t
     for (int i = 0; i < READER_SLOTS; i++)
         r->buffers[i] = fake_ahb_new((uint32_t)w, (uint32_t)h, (uint32_t)format);
     *out = r;
+    return 0;
+}
+/* As a BufferQueue's producer: buffers of this size from the next one on
+ * (0x0: the reader's own size). */
+API int ANativeWindow_setBuffersGeometry(fake_window *w, int32_t width, int32_t height, int32_t format)
+{
+    (void)format;
+    if (!w || w->magic != 0x5f776e64 || width < 0 || height < 0)
+        return -22;
+    w->reader->buffer_width = width ? width : w->reader->width;
+    w->reader->buffer_height = height ? height : w->reader->height;
+    fake_state.geometry_calls++;
     return 0;
 }
 API int AImageReader_getWindow(AImageReader *r, void **window)
@@ -271,27 +290,46 @@ API EGLBoolean eglDestroySurface(EGLDisplay d, EGLSurface surface)
     free(surface);
     return EGL_TRUE;
 }
+/* A producer's frame: queues a free buffer of the window's size and gives
+ * it, for a producer that has pixels to put in (the stand-in for Android's
+ * Vulkan swapchain). NULL when the reader holds them all: a real driver
+ * would block here. */
+API AHardwareBuffer *fake_window_queue(fake_window *w)
+{
+    if (!w || w->magic != 0x5f776e64)
+        return NULL;
+    AImageReader *r = w->reader;
+    for (int i = 0; i < READER_SLOTS; i++) {
+        if (r->state[i] == FREE) {
+            AHardwareBuffer *b = r->buffers[i];
+            if ((int32_t)b->desc.width != r->buffer_width || (int32_t)b->desc.height != r->buffer_height) {
+                /* the queue reallocates a buffer of another size */
+                AHardwareBuffer_release(b);
+                r->buffers[i] = fake_ahb_new((uint32_t)r->buffer_width, (uint32_t)r->buffer_height, (uint32_t)r->format);
+            }
+            r->state[i] = QUEUED;
+            return r->buffers[i];
+        }
+    }
+    return NULL;
+}
 API EGLBoolean eglSwapBuffers(EGLDisplay d, EGLSurface surface)
 {
     (void)d;
     fake_surface *s = surface;
-    for (int i = 0; i < READER_SLOTS; i++) {
-        if (s->reader->state[i] == FREE) {
-            s->reader->state[i] = QUEUED;
-            fake_state.swaps++;
-            return EGL_TRUE;
-        }
-    }
-    return EGL_FALSE; /* a real driver would block here */
+    if (!fake_window_queue(&s->reader->window))
+        return EGL_FALSE;
+    fake_state.swaps++;
+    return EGL_TRUE;
 }
 API EGLBoolean eglQuerySurface(EGLDisplay d, EGLSurface surface, EGLint attribute, EGLint *value)
 {
     (void)d;
     fake_surface *s = surface;
     if (attribute == EGL_WIDTH)
-        *value = s->reader->width;
+        *value = s->reader->buffer_width;
     else if (attribute == EGL_HEIGHT)
-        *value = s->reader->height;
+        *value = s->reader->buffer_height;
     else
         return EGL_FALSE;
     return EGL_TRUE;
@@ -308,11 +346,34 @@ API EGLBoolean eglDestroyContext(EGLDisplay d, EGLContext c)
     (void)d, (void)c;
     return EGL_TRUE;
 }
+/* Images of AHardwareBuffers are distinct; any other is 0x42. */
 API EGLImageKHR eglCreateImageKHR(EGLDisplay d, EGLContext c, EGLenum target, EGLClientBuffer b, const EGLint *a)
 {
-    (void)d, (void)c, (void)b, (void)a;
+    (void)d, (void)c, (void)a;
     fake_state.create_image_target = (int)target;
-    return (EGLImageKHR)0x42;
+    if (target != EGL_NATIVE_BUFFER_ANDROID)
+        return (EGLImageKHR)0x42;
+    if (!b)
+        return EGL_NO_IMAGE_KHR;
+    fake_state.native_images++;
+    return (EGLImageKHR)malloc(1);
+}
+API EGLBoolean eglDestroyImageKHR(EGLDisplay d, EGLImageKHR image)
+{
+    (void)d;
+    if (image != (EGLImageKHR)0x42) {
+        fake_state.images_destroyed++;
+        free(image);
+    }
+    return EGL_TRUE;
+}
+API EGLBoolean eglDestroyImage(EGLDisplay d, EGLImage image)
+{
+    return eglDestroyImageKHR(d, image);
+}
+API EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer *b)
+{
+    return (EGLClientBuffer)b;
 }
 API EGLint eglDupNativeFenceFDANDROID(EGLDisplay d, EGLSyncKHR s)
 {
@@ -324,10 +385,13 @@ static void fake_query_counter(GLuint id, GLenum target)
     (void)id, (void)target;
     fake_state.query_counter_calls++;
 }
+static void fake_image_target_texture(GLenum target, void *image);
 API void (*eglGetProcAddress(const char *name))(void)
 {
     if (strcmp(name, "glQueryCounterEXT") == 0)
         return (void (*)(void))fake_query_counter;
+    if (strcmp(name, "glEGLImageTargetTexture2DOES") == 0)
+        return (void (*)(void))fake_image_target_texture;
     return NULL;
 }
 
@@ -341,11 +405,141 @@ API const GLubyte *glGetString(GLenum name)
         return (const GLubyte *)"OpenGL ES 3.2 fake";
     return (const GLubyte *)"fake";
 }
+/* Textures and framebuffers, enough for a texture to be given an EGLImage's
+ * storage: 2D textures on one unit, the read framebuffer binding. */
+#define NAMES 32
+static struct {
+    int exists, target, width, height, internal, immutable, level1;
+    void *image;
+} g_tex[NAMES];
+static GLuint g_tex_2d, g_read_fb, g_fb_tex[NAMES];
+static GLenum g_error;
+
+API GLenum glGetError(void)
+{
+    GLenum e = g_error;
+    g_error = GL_NO_ERROR;
+    return e;
+}
 API void glGetIntegerv(GLenum pname, GLint *v)
 {
-    (void)pname;
-    *v = 0;
+    *v = pname == GL_TEXTURE_BINDING_2D ? (GLint)g_tex_2d : pname == GL_READ_FRAMEBUFFER_BINDING ? (GLint)g_read_fb : 0;
 }
+API void glGenTextures(GLsizei n, GLuint *names)
+{
+    for (GLsizei i = 0; i < n; i++) {
+        GLuint t = 1;
+        while (t < NAMES - 1 && g_tex[t].exists)
+            t++;
+        memset(&g_tex[t], 0, sizeof g_tex[t]);
+        g_tex[t].exists = 1;
+        names[i] = t;
+    }
+}
+API void glDeleteTextures(GLsizei n, const GLuint *names)
+{
+    for (GLsizei i = 0; i < n; i++)
+        if (names[i] < NAMES)
+            g_tex[names[i]].exists = 0;
+}
+API GLboolean glIsTexture(GLuint t)
+{
+    return t < NAMES && g_tex[t].exists && g_tex[t].target;
+}
+API void glBindTexture(GLenum target, GLuint t)
+{
+    if (t >= NAMES || (t && g_tex[t].target && (GLenum)g_tex[t].target != target)) {
+        g_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (t)
+        g_tex[t].target = (int)target;
+    if (target == GL_TEXTURE_2D)
+        g_tex_2d = t;
+}
+API void glTexImage2D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *p)
+{
+    (void)t, (void)b, (void)f, (void)ty, (void)p;
+    fake_state.tex_uploads++;
+    if (!g_tex_2d)
+        return;
+    if (g_tex[g_tex_2d].immutable) {
+        g_error = GL_INVALID_OPERATION;
+        return;
+    }
+    if (l == 1)
+        g_tex[g_tex_2d].level1 = w;
+    else if (l == 0)
+        g_tex[g_tex_2d].width = w, g_tex[g_tex_2d].height = h, g_tex[g_tex_2d].internal = i,
+        g_tex[g_tex_2d].image = NULL;
+}
+API void glTexStorage2D(GLenum t, GLsizei levels, GLenum internal, GLsizei w, GLsizei h)
+{
+    (void)t, (void)levels;
+    g_tex[g_tex_2d].width = w, g_tex[g_tex_2d].height = h, g_tex[g_tex_2d].internal = (int)internal;
+    g_tex[g_tex_2d].immutable = 1;
+}
+API void glGetTexParameteriv(GLenum t, GLenum pname, GLint *v)
+{
+    (void)t;
+    *v = pname == GL_TEXTURE_IMMUTABLE_FORMAT ? g_tex[g_tex_2d].immutable : 0;
+}
+API void glGetTexLevelParameteriv(GLenum t, GLint level, GLenum pname, GLint *v)
+{
+    (void)t;
+    *v = level == 1 ? (pname == GL_TEXTURE_WIDTH ? g_tex[g_tex_2d].level1 : 0)
+         : pname == GL_TEXTURE_WIDTH           ? g_tex[g_tex_2d].width
+         : pname == GL_TEXTURE_HEIGHT          ? g_tex[g_tex_2d].height
+         : pname == GL_TEXTURE_INTERNAL_FORMAT ? g_tex[g_tex_2d].internal
+                                               : 0;
+}
+API void glTexParameteri(GLenum t, GLenum pname, GLint v)
+{
+    if (t == GL_TEXTURE_2D && pname == GL_TEXTURE_SWIZZLE_A && v == GL_ONE)
+        fake_state.swizzle_a_one = g_tex_2d;
+}
+static void fake_image_target_texture(GLenum target, void *image)
+{
+    (void)target;
+    if (!g_tex_2d || g_tex[g_tex_2d].immutable) {
+        g_error = GL_INVALID_OPERATION;
+        return;
+    }
+    g_tex[g_tex_2d].image = image;
+}
+API void glGenFramebuffers(GLsizei n, GLuint *names)
+{
+    for (GLsizei i = 0; i < n; i++)
+        names[i] = 7 + (GLuint)i;
+}
+API void glDeleteFramebuffers(GLsizei n, const GLuint *names) { (void)n, (void)names; }
+API void glBindFramebuffer(GLenum t, GLuint f)
+{
+    if (t == GL_READ_FRAMEBUFFER || t == GL_FRAMEBUFFER)
+        g_read_fb = f;
+}
+API void glFramebufferTexture2D(GLenum t, GLenum attachment, GLenum textarget, GLuint tex, GLint level)
+{
+    (void)t, (void)attachment, (void)textarget, (void)level;
+    if (g_read_fb < NAMES)
+        g_fb_tex[g_read_fb] = tex;
+}
+API GLenum glCheckFramebufferStatus(GLenum t)
+{
+    (void)t;
+    return g_read_fb && g_fb_tex[g_read_fb] ? GL_FRAMEBUFFER_COMPLETE : GL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT;
+}
+API void glCopyTexSubImage2D(GLenum t, GLint l, GLint xo, GLint yo, GLint x, GLint y, GLsizei w, GLsizei h)
+{
+    (void)t, (void)l, (void)xo, (void)yo, (void)x, (void)y, (void)w, (void)h;
+    if (!g_read_fb || !g_tex[g_tex_2d].image) {
+        g_error = GL_INVALID_OPERATION;
+        return;
+    }
+    fake_state.copies++;
+    fake_state.copy_source = g_fb_tex[g_read_fb];
+}
+API void glFinish(void) { fake_state.finishes++; }
 API void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *src, const GLint *len)
 {
     (void)shader, (void)len;
@@ -353,10 +547,4 @@ API void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *src, 
     for (GLsizei i = 0; i < count; i++)
         strncat(fake_state.shader, src[i], sizeof fake_state.shader - strlen(fake_state.shader) - 1);
 }
-API void glTexImage2D(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *p)
-{
-    (void)t, (void)l, (void)i, (void)w, (void)h, (void)b, (void)f, (void)ty, (void)p;
-    fake_state.tex_uploads++;
-}
-API void glBindFramebuffer(GLenum t, GLuint f) { (void)t, (void)f; }
 API void glClear(GLbitfield m) { (void)m; }

@@ -4,9 +4,10 @@
  * program of a Chameleon session (shim/chameleon), as a device node is
  * there for every program.
  *
- * The card's node (/dev/dri/card0, or $CHAMELEON_DRM_PATH;
- * libchameleon_udev.so lists it as a drm device) is served by
- * chameleon-kernel (card.c), as a device node by the kernel: opening it
+ * The card's nodes (/dev/dri/card0, or $CHAMELEON_DRM_PATH, and the render
+ * node /dev/dri/renderD128; libchameleon_udev.so lists them as drm devices)
+ * are served by chameleon-kernel (card.c), as device nodes by the kernel:
+ * opening one
  * returns the read end of a pipe the program polls and read()s DRM events
  * from, and a DRM ioctl on it is sent there as the system call's
  * arguments (the service reads and writes our memory itself). Each open is
@@ -17,8 +18,9 @@
  * sysfs entries (shim/udev/sysfs.c). A pipe is only taken for a card file
  * when it holds one page, as card files' pipes do, so ordinary pipes cost
  * nothing. bind() is watched to tell chameleon-kernel the compositor's
- * Wayland socket, and a dmabuf import in the compositor gets Wayland apps'
- * buffers from there (cham_client_ahb_acquire). (crash.c overrides
+ * Wayland socket, and a dmabuf import (EGL) gets any buffer of the session
+ * from there, another process's gbm buffer or a Wayland app's
+ * (cham_buffer_ahb_acquire). (crash.c overrides
  * sigaction.)
  */
 #define _GNU_SOURCE
@@ -30,6 +32,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/prctl.h>
@@ -43,8 +46,6 @@
 #include "../../common/cham_io.h"
 #include "../../common/chameleon_drm.h"
 #include "internal.h"
-
-static const dev_t fake_rdev = (dev_t)((226u << 8) | CHAM_DRM_MINOR);
 
 /* The overrides of libc symbols below must be exported. */
 #pragma GCC visibility push(default)
@@ -94,10 +95,15 @@ static const char *fake_path(void)
     return p && *p ? p : CHAM_DRM_PATH;
 }
 
-/* Its node as udev names it, or as libdrm does from sysfs. */
+/* 1 for the primary node, as udev names it or libdrm does from sysfs; 2
+ * for the render node; 0 for any other path. */
 static int is_fake_path(const char *path)
 {
-    return path && (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0);
+    if (!path)
+        return 0;
+    if (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0)
+        return 1;
+    return strcmp(path, CHAM_RENDER_PATH) == 0 ? 2 : 0;
 }
 
 __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
@@ -121,6 +127,7 @@ static struct known {
     dev_t dev;
     ino_t ino;
     uint32_t id; /* 0: not the card */
+    int render;
 } g_known[KNOWN];
 static unsigned g_known_next;
 
@@ -170,6 +177,25 @@ static int connect_locked(void)
     return s;
 }
 
+/* The service answered here before and no longer does: it was stopped or
+ * killed (by Android, in the background) or crashed. Said once per program,
+ * as nothing else tells why the card went quiet. */
+static int g_served;
+
+static void service_lost_locked(void)
+{
+    static int said;
+    disconnect_locked();
+    if (!g_served || said++)
+        return;
+#ifdef __ANDROID__
+    const char *prog = getprogname();
+#else
+    const char *prog = program_invocation_short_name;
+#endif
+    cham_log("%s: chameleon-kernel is gone (stopped, killed or crashed): the card no longer works here", prog);
+}
+
 /* Sends a request (with fd, or followed by a bo's AHardwareBuffer) and answers
  * the service's questions until its CARD_DONE; returns that result, and its
  * fd in *fd_out. -ENODEV when there is no service. */
@@ -179,17 +205,18 @@ static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo
         *fd_out = -1;
     int s = connect_locked();
     if (s < 0 || cham_send(s, &req, fd) != 0 || (bo && bo_send(bo, s) != 0)) {
-        disconnect_locked();
+        service_lost_locked();
         return -ENODEV;
     }
     for (;;) {
         struct cham_msg m;
         int got = -1;
         if (cham_recv(s, &m, &got) != 1) {
-            disconnect_locked();
+            service_lost_locked();
             return -ENODEV;
         }
         if (m.type == CARD_DONE) {
+            g_served = 1;
             if (fd_out)
                 *fd_out = got;
             else if (got >= 0)
@@ -211,21 +238,24 @@ static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo
         if (got >= 0)
             close(got);
         if (cham_send(s, &reply, send_fd) != 0) {
-            disconnect_locked();
+            service_lost_locked();
             return -ENODEV;
         }
     }
 }
 
-static void remember_locked(const struct stat *st, uint32_t id)
+static void remember_locked(const struct stat *st, int64_t file)
 {
-    g_known[g_known_next++ % KNOWN] = (struct known){st->st_dev, st->st_ino, id};
+    g_known[g_known_next++ % KNOWN] =
+        (struct known){st->st_dev, st->st_ino, file > 0 ? CARD_FILE_ID(file) : 0, file > 0 && CARD_FILE_RENDER(file)};
 }
 
-/* The card file `fd` is (its id), or 0. Only a one-page pipe can be one. */
-static uint32_t card_file(int fd)
+/* The card file `fd` is (its id), or 0; *render tells whether it is the
+ * render node's. Only a one-page pipe can be one. */
+static uint32_t card_file(int fd, int *render)
 {
     struct stat st;
+    *render = 0;
     if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) ||
         fcntl(fd, F_GETPIPE_SZ) != CHAM_CARD_PIPE_SIZE)
         return 0;
@@ -233,6 +263,7 @@ static uint32_t card_file(int fd)
     for (int i = 0; i < KNOWN; i++) {
         if (g_known[i].ino == st.st_ino && g_known[i].dev == st.st_dev) { /* st_ino is never 0 */
             uint32_t id = g_known[i].id;
+            *render = g_known[i].render;
             unlock_conn();
             return id;
         }
@@ -240,37 +271,41 @@ static uint32_t card_file(int fd)
     /* A copy we haven't seen here (inherited, passed): the service knows. */
     struct cham_msg req = {CARD_ATTACH, 0, 0, 0};
     int64_t ret = call_locked(req, fd, NULL, NULL);
-    uint32_t id = ret > 0 ? (uint32_t)ret : 0;
+    uint32_t id = ret > 0 ? CARD_FILE_ID(ret) : 0;
+    *render = ret > 0 && CARD_FILE_RENDER(ret);
     if (ret != -ENODEV)
-        remember_locked(&st, id);
+        remember_locked(&st, ret);
     unlock_conn();
     return id;
 }
 
-static void fake_stat(struct stat *st)
+/* What stat() says of a node: a DRM character device, the render node
+ * open to every user as distributions make it. */
+static void fake_stat(struct stat *st, int render)
 {
     memset(st, 0, sizeof *st);
-    st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = fake_rdev;
+    st->st_mode = S_IFCHR | (render ? 0666 : 0660);
+    st->st_rdev = makedev(226, render ? CHAM_RENDER_MINOR : CHAM_DRM_MINOR);
     st->st_nlink = 1;
     st->st_uid = getuid();
     st->st_gid = getgid();
 }
 
-static int fake_open(void)
+static int fake_open(int node)
 {
-    struct cham_msg req = {CARD_OPEN, 0, 0, 0};
+    struct cham_msg req = {CARD_OPEN, 0, node == 2, 0};
     int fd;
     struct stat st;
     lock_conn();
     int64_t ret = call_locked(req, -1, NULL, &fd);
     if (ret > 0 && fd >= 0 && real_fstat(fd, &st) == 0)
-        remember_locked(&st, (uint32_t)ret);
+        remember_locked(&st, ret);
     unlock_conn();
     if (ret <= 0 || fd < 0) {
         if (fd >= 0)
             close(fd);
-        cham_log("cannot open the card: %s", ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
+        cham_log("cannot open the %s: %s", node == 2 ? "render node" : "card",
+                 ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
         errno = ret < 0 ? (int)-ret : ENODEV;
         return -1;
     }
@@ -281,21 +316,24 @@ static int fake_open(void)
 
 uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
 {
-    uint32_t id = card_file(fd);
+    int render;
+    uint32_t id = card_file(fd, &render);
     if (!id)
         return 0;
     struct cham_msg req = {CARD_IMPORT, id, bo->format, 0};
     lock_conn();
     int64_t ret = call_locked(req, -1, bo, NULL);
     unlock_conn();
+    if (ret > 0)
+        __atomic_store_n(&bo->in_service, 1, __ATOMIC_RELAXED);
     return ret > 0 ? (uint32_t)ret : 0;
 }
 
-/* ---- Wayland apps' buffers (cham_shim.h) ---- */
+/* ---- the session's buffers (cham_shim.h) ---- */
 
-AHardwareBuffer *cham_client_ahb_acquire(int dmabuf)
+AHardwareBuffer *cham_buffer_ahb_acquire(int dmabuf)
 {
-    struct cham_msg req = {CARD_CLIENT_BUFFER, 0, 0, 0};
+    struct cham_msg req = {CARD_BUFFER_AHB, 0, 0, 0};
     AHardwareBuffer *b = NULL;
     lock_conn();
     if (call_locked(req, dmabuf, NULL, NULL) == 1 && !(b = ahb_recv(g_conn)))
@@ -304,7 +342,7 @@ AHardwareBuffer *cham_client_ahb_acquire(int dmabuf)
     return b;
 }
 
-void cham_client_ahb_release(AHardwareBuffer *b)
+void cham_buffer_ahb_release(AHardwareBuffer *b)
 {
     ahb_release(b);
 }
@@ -354,31 +392,33 @@ static int read_own(void *to, uint64_t from, size_t n)
     return n == 0 || process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)n ? 0 : -1;
 }
 
-/* The fd a commit gives as IN_FENCE_FD, or -1: none, more than one, or
- * anything unreadable (the service then asks, as for any other fd). */
-static int commit_fence(int fd, const void *arg)
+/* The fds a commit gives as IN_FENCE_FD (one per plane: the primary's and
+ * the cursor's), into found[2]; how many: none for more, or for anything
+ * unreadable (the service then asks, as for any other fd). */
+static int commit_fences(int fd, const void *arg, int found[2])
 {
     struct drm_mode_atomic a;
     uint32_t counts[16], props[128];
     uint64_t values[128];
     if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a) || a.count_objs > 16 ||
         read_own(counts, a.count_props_ptr, a.count_objs * sizeof counts[0]))
-        return -1;
+        return 0;
     uint32_t total = 0;
     for (uint32_t i = 0; i < a.count_objs; i++)
         total += counts[i] < 128 ? counts[i] : 128;
     if (total > 128 || read_own(props, a.props_ptr, total * sizeof props[0]) ||
         read_own(values, a.prop_values_ptr, total * sizeof values[0]))
-        return -1;
-    int found = -1;
+        return 0;
+    int n = 0;
     for (uint32_t k = 0; k < total; k++) {
         if ((int64_t)values[k] < 0 || values[k] > INT32_MAX || !is_fence_prop(fd, props[k]))
             continue;
-        if (found >= 0)
-            return -1;
-        found = (int)values[k];
+        if (n == 2 || fcntl((int)values[k], F_GETFD) < 0)
+            return 0;
+        if (n == 0 || found[0] != (int)values[k])
+            found[n++] = (int)values[k];
     }
-    return found >= 0 && fcntl(found, F_GETFD) >= 0 ? found : -1;
+    return n;
 }
 
 void cham_bo_handle_close(int fd, uint32_t handle)
@@ -397,8 +437,9 @@ void link_forget_bo_locked(struct cham_bo *bo)
 
 int open(const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_open();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -414,8 +455,9 @@ int open64(const char *path, int flags, ...) __attribute__((alias("open")));
 
 int openat(int dirfd, const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_openat();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -431,16 +473,18 @@ int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("
 
 int __open_2(const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___open_2();
     return REAL(__open_2)(path, flags);
 }
 
 int __openat_2(int dirfd, const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___openat_2();
     return REAL(__openat_2)(dirfd, path, flags);
 }
@@ -449,8 +493,9 @@ int __openat_2(int dirfd, const char *path, int flags)
 
 int stat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_stat();
@@ -459,8 +504,9 @@ int stat(const char *path, struct stat *st)
 
 int lstat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_lstat();
@@ -469,8 +515,9 @@ int lstat(const char *path, struct stat *st)
 
 int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_fstatat();
@@ -479,9 +526,9 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 
 int fstat(int fd, struct stat *st)
 {
-    int ret = real_fstat(fd, st);
-    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd))
-        fake_stat(st);
+    int ret = real_fstat(fd, st), render;
+    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd, &render))
+        fake_stat(st, render);
     return ret;
 }
 
@@ -521,7 +568,8 @@ int ioctl(int fd, int request, ...)
      * (TCGETS: ENOTTY as a DRM device; FIONREAD: a byte count where a DRM
      * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
-        uint32_t id = card_file(fd);
+        int render;
+        uint32_t id = card_file(fd, &render);
         struct drm_prime_handle prime;
         if (id && (unsigned int)request == DRM_IOCTL_PRIME_FD_TO_HANDLE && read_own(&prime, (uint64_t)(uintptr_t)arg,
                                                                                      sizeof prime) == 0) {
@@ -537,11 +585,18 @@ int ioctl(int fd, int request, ...)
         }
         if (id) {
             struct cham_msg req = {CARD_IOCTL, id, (unsigned int)request, (uint64_t)(uintptr_t)arg};
-            int fence = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fence(fd, arg) : -1;
-            if (fence >= 0)
-                req.a |= (uint64_t)(fence + 1) << 32; /* which of our fds it is */
+            int fences[2] = {-1, -1};
+            int n = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fences(fd, arg, fences) : 0;
+            if (n)
+                req.a |= (uint64_t)(fences[0] + 1) << 32; /* which of our fds it is */
             lock_conn();
-            int64_t ret = call_locked(req, fence, NULL, NULL);
+            if (n == 2) { /* the second one ahead of the request */
+                struct cham_msg ahead = {CARD_SEND_FD, 0, (uint64_t)fences[1], 0};
+                int s = connect_locked();
+                if (s >= 0)
+                    cham_send(s, &ahead, fences[1]);
+            }
+            int64_t ret = call_locked(req, fences[0], NULL, NULL);
             unlock_conn();
             if (ret < 0) {
                 errno = (int)-ret;

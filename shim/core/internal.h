@@ -18,15 +18,22 @@ uint64_t now_ns(void);
 /* ---- ahb.c ---- */
 void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
-/* Waits (briefly) for every pending presenter release fence. */
-void bo_wait_release_fences_locked(void);
-/* An AHardwareBuffer sent by another process (clients.c, card.c). */
+/* Takes every pending presenter release fence (up to max) for the caller
+ * to wait on and close. */
+int bo_take_release_fences_locked(int *fences, int max);
+/* An AHardwareBuffer sent by another process (card.c). */
 AHardwareBuffer *ahb_recv(int sock);
 /* The bo for a buffer another process sent (card.c), one per buffer however
  * often it arrives (matched by dmabuf). Takes over `b`'s reference; returns
- * the bo with a reference for the caller, or NULL. */
+ * the bo with a reference for the caller, or NULL. It stays while its
+ * dmabuf is held anywhere, as a GEM object. */
 struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format);
+/* The known bo whose dmabuf `fd` is, with a reference for the caller, or NULL. */
+struct cham_bo *ahb_bo_for_fd(int fd);
+int ahb_is_dmabuf(int fd); /* a dmabuf at all (as /proc names it) */
+void ahb_acquire(AHardwareBuffer *b);
 void ahb_release(AHardwareBuffer *b);
+uint32_t ahb_drm_format(const AHardwareBuffer *b); /* 0 if gbm couldn't have made it */
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
 /* AHardwareBuffer_sendHandleToUnixSocket (the presenter link). */
 int ahb_send(const AHardwareBuffer *b, int sock);
@@ -35,11 +42,40 @@ int bo_send(const struct cham_bo *bo, int sock);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);
-/* Blocks until the presenter reported a surface size, or the timeout. */
-int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, int timeout_ms);
-/* Shows `bo` (acquire fence borrowed, may be -1). Returns 1 if the presenter
- * will answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
+/* Blocks until the presenter reported a surface size, or the timeout; the
+ * window's size is 0x0 from an app that doesn't report it. */
+int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, uint32_t *win_width,
+                     uint32_t *win_height, int timeout_ms);
+/* Shows `bo` (acquire fence borrowed, may be -1); NULL leaves the frame on
+ * screen as it is (only the cursor changed). Returns 1 if the presenter will
+ * answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
 int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
+/* The app shows a cursor plane (it said so in its first CONFIG), unless
+ * CHAMELEON_CURSOR_PLANE=0/1 says otherwise. */
+int link_app_cursor(void);
+/* The cursor plane as committed, shown with the next present: bo NULL hides
+ * it; new_image: its FB_ID was set (copy it again). Takes over fence. */
+struct link_cursor {
+    struct cham_bo *bo;
+    int new_image;
+    int32_t x, y;               /* top left on the screen */
+    uint32_t src_x, src_y, w, h; /* the part of the buffer shown, pixels */
+    int fence;
+};
+void link_cursor_locked(const struct link_cursor *c);
+/* The primary plane as committed, for the next presents: plain if its whole
+ * buffer is the whole screen; else the part of the buffer shown (pixels) and
+ * where it goes on the screen, clipped to it (w or h 0: nothing), the rest
+ * black. */
+struct link_plane {
+    int plain;
+    uint32_t crtc_w, crtc_h;
+    uint32_t src_x, src_y, src_w, src_h;
+    uint32_t dst_x, dst_y, dst_w, dst_h;
+};
+void link_plane_locked(const struct link_plane *p);
+/* The app shows a plane that isn't the whole screen (CHAM_CONFIG_PLANE). */
+int link_shows_planes_locked(void);
 void link_forget_bo_locked(struct cham_bo *bo);
 /* Tells the presenter the compositor turned its screen off (1) or on (0). */
 void link_screen_off_locked(int off);
@@ -57,6 +93,9 @@ struct cham_msg;
 /* CHAM_INPUT, CHAM_CONFIG (the connector's mode) and CHAM_CLIPBOARD_OFFER
  * for clipboard.c; handled on the input thread. */
 void input_post(const struct cham_msg *m);
+/* How long the compositor has left the input thread's question (a
+ * wl_display.sync per CHAM_PING) unanswered, in ms; 0: it answers. Any thread. */
+uint32_t input_compositor_wait_ms(void);
 
 /* ---- wlpath.c: the compositor's Wayland socket ---- */
 /* A process bound a Wayland socket (card.c). */
@@ -65,18 +104,14 @@ void input_note_socket(pid_t pid, const char *path);
  * the DRM master's process or an ancestor); "" if none yet. */
 void input_socket_path(char *out, size_t size);
 
-/* ---- clients.c: Wayland apps' GPU buffers (in chameleon-kernel) ---- */
-void clients_start(void);
-/* Calls fn with the registered app buffer whose dmabuf `fd` is, while it
- * stays registered; returns fn's result, or -ENOENT. */
-int clients_with_buffer(int fd, int (*fn)(const AHardwareBuffer *b, void *arg), void *arg);
-
 /* ---- evdev.c: the app's input as evdev devices for libchameleon_udev.so ---- */
 void evdev_start(void);
 /* A uevent (struct cham_uevent's what) to every udev monitor. */
 void evdev_uevent(uint32_t what);
 /* Takes an input message for a device (input thread); 0 if none. */
 int evdev_input(const struct cham_msg *m);
+/* The app's whole window (CHAM_WINDOW, input thread): the touchpad spans it. */
+void evdev_window(uint32_t width, uint32_t height);
 /* Whether the keyboard device has this Linux key code. */
 int evdev_keyboard_has(unsigned code);
 
@@ -119,7 +154,9 @@ struct fake_fd {
     ino_t ino;        /* the read end the program holds */
     int event_wfd;    /* write end of the pipe the program reads DRM events from */
     pid_t pid;        /* the opener, for SET_MASTER's permission check */
+    int render;       /* opened as the render node: never master, render ioctls only */
     int master, was_master;
+    int authenticated; /* root at open, the first master, or AUTH_MAGIC (DRM_AUTH ioctls) */
     uint32_t magic;   /* 0 until GET_MAGIC */
     int magic_used;   /* AUTH_MAGIC took it */
     int universal_planes, atomic, writeback;
@@ -156,14 +193,18 @@ uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 /* Requests (struct cham_msg type), one at a time per connection, each
  * answered by CARD_DONE (a = the result, or -errno): */
 enum {
-    CARD_OPEN = 1, /* -> a = file id, and the read end of its event pipe */
-    CARD_ATTACH,   /* + an fd: -> a = the id of the file it is, or -EBADF */
+    CARD_OPEN = 1, /* a = 1 for the render node: -> a = a file (CARD_FILE_*), and
+                    * the read end of its event pipe */
+    CARD_ATTACH,   /* + an fd: -> a = the file it is (CARD_FILE_*), or -EBADF */
     CARD_IOCTL,    /* id = file, a = request (+ the number of an fd sent with it << 32,
                     * plus one), b = the argument's address */
     CARD_IMPORT,   /* id = file, a = DRM format, then the AHardwareBuffer: -> a = GEM handle */
     CARD_WAYLAND,  /* then a packet with a Wayland socket path a process bound; no answer */
-    CARD_CLIENT_BUFFER, /* + a dmabuf fd: -> a = 1 and then an app's registered
-                         * AHardwareBuffer behind it (clients.c), or -ENOENT */
+    CARD_BUFFER_AHB, /* + a dmabuf fd: -> a = 1 and then the AHardwareBuffer of the
+                      * session's buffer behind it (any process's gbm buffer, an
+                      * app's registered one), or -ENOENT */
+    CARD_SEND_FD,  /* + an fd, a = its number in the caller: a second fd the next
+                    * CARD_IOCTL names (a commit's other fence); no answer */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */
@@ -171,6 +212,10 @@ enum {
     CARD_PUT_FD,   /* + an fd, a = 1 for close-on-exec: CARD_FD, a = its number in the caller */
     CARD_FD,
 };
+/* A file in OPEN's and ATTACH's answers: its id, and whether it is the render node's. */
+#define CARD_FILE_ID(a) ((uint32_t)(a))
+#define CARD_FILE_RENDER(a) ((int)(((uint64_t)(a) >> 32) & 1))
+#define CARD_FILE(id, render) ((int64_t)(id) | (int64_t)((render) != 0) << 32)
 int card_start(void); /* 0 once it listens */
 /* The process whose ioctl is running on this thread. */
 pid_t card_caller_pid(void);
@@ -182,6 +227,9 @@ int card_copy_to(uint64_t to, const void *from, size_t n);
 int card_fd_get(int n);
 /* fd_install: `fd` (still ours) as a new fd of the caller; its number, or -errno. */
 int card_fd_install(int fd, int cloexec);
+/* The session's buffer whose dmabuf `fd` is (any process's gbm buffer, an
+ * app's registered one), with a reference for the caller, or NULL. */
+struct cham_bo *card_session_buffer(int fd);
 
 /* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
 /* A card file's event pipe holds one page, as the kernel gives a DRM file

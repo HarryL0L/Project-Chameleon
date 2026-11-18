@@ -83,10 +83,10 @@ enum cham_evdev_record_type {
  * gets the Android keyboard's text while it says a text field takes text,
  * and the shim types the text as keys otherwise. */
 #define CHAM_EVDEV_IME 0x494d4531u /* "IME1" */
-enum { CHAM_IME_COMMIT = 1, CHAM_IME_PREEDIT, CHAM_IME_DELETE };
+enum { CHAM_IME_COMMIT = 1, CHAM_IME_PREEDIT, CHAM_IME_KEYSYM };
 struct cham_ime_text {
     uint32_t kind;          /* CHAM_IME_*; COMMIT and PREEDIT: the UTF-8 text follows */
-    uint32_t before, after; /* DELETE: code points before / after the cursor */
+    uint32_t keysym, count; /* KEYSYM: a key (Return, BackSpace, Delete) tapped count times */
 };
 
 /* A uevent: so far only the card's "change" with HOTPLUG=1, which the kernel

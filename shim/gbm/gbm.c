@@ -286,7 +286,7 @@ static void *open_system_lib(const char *env, const char *name)
         snprintf(buf, sizeof buf, "%s/%s", sizeof(void *) == 8 ? "/system/lib64" : "/system/lib", name);
         path = buf;
     }
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    return cham_android_dlopen(path);
 }
 
 static int load_android(void)

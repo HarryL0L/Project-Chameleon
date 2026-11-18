@@ -72,10 +72,12 @@ public class PresenterActivity extends Activity
 
     private static native void nativeStart();
     private static native void nativeSurfaceCreated(Object surface);
-    private static native void nativeSurfaceChanged(int width, int height, int refreshMilliHz);
+    private static native void nativeSurfaceChanged(int width, int height, int windowWidth, int windowHeight,
+            int refreshMilliHz);
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    private static native boolean nativeLostProducer();
     /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
     static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
@@ -114,6 +116,8 @@ public class PresenterActivity extends Activity
         @Override
         public void run() {
             String status = nativeStatus();
+            if ("waiting for Termux".equals(status) && nativeLostProducer() && BrokerLink.sessionRuns())
+                status = "the desktop's session still runs, but its service (chameleon-kernel) is gone";
             boolean off = nativeScreenOff();
             boolean showing = off || "showing frames".equals(status);
             mStatus.setVisibility(showing ? View.GONE : View.VISIBLE);
@@ -158,10 +162,12 @@ public class PresenterActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
+        TouchInput.unbuffered(view);
         // KWin draws its own cursor in the frames; Android's would be a second one.
         view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
         mStatus.setTextColor(Color.LTGRAY);
+        mStatus.setBackgroundColor(0xC0000000); // readable over a frozen frame too
         mStatus.setTextSize(12);
         mStatus.setPadding(32, 96, 32, 32);
         // KWin turned its screen off (idle): a tap wakes it. The tap is ours,
@@ -183,6 +189,7 @@ public class PresenterActivity extends Activity
         // view usually holds the focus, else the surface.
         view.setOnCapturedPointerListener(mTouch);
         mImeView.setOnCapturedPointerListener(mTouch);
+        TouchInput.unbuffered(mImeView);
         FrameLayout root = new FrameLayout(this);
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -771,7 +778,7 @@ public class PresenterActivity extends Activity
     public void onDisplayChanged(int displayId) {
         Display display = display();
         if (display != null && display.getDisplayId() == displayId && mWidth > 0)
-            nativeSurfaceChanged(mWidth, mHeight, refreshMilliHz());
+            surfaceChanged();
     }
 
     @Override
@@ -816,7 +823,14 @@ public class PresenterActivity extends Activity
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         mWidth = width;
         mHeight = height;
-        nativeSurfaceChanged(width, height, refreshMilliHz());
+        surfaceChanged();
+    }
+
+    /** The surface's size, and the whole window's: the trackpad spans it, also under the keyboard. */
+    private void surfaceChanged() {
+        View root = (View) mSurface.getParent();
+        nativeSurfaceChanged(mWidth, mHeight, root != null ? root.getWidth() : 0, root != null ? root.getHeight() : 0,
+                refreshMilliHz());
     }
 
     @Override

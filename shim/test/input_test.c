@@ -8,12 +8,15 @@
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <linux/input.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
@@ -103,8 +106,7 @@ static const struct wl_interface k_context = {"zwp_input_method_context_v1", 1, 
 static struct {
     struct wl_resource *im;
     char commit[64], preedit[64];
-    int delete_index;
-    unsigned delete_length;
+    char seq[256]; /* committed text and keys, in order: "[text]" or "<keysym>" per press */
 } ime;
 
 static void ctx_destroy(struct wl_client *c, struct wl_resource *r)
@@ -119,6 +121,7 @@ static void ctx_commit_string(struct wl_client *c, struct wl_resource *r, uint32
     (void)r;
     (void)serial;
     snprintf(ime.commit, sizeof ime.commit, "%s", text);
+    snprintf(ime.seq + strlen(ime.seq), sizeof ime.seq - strlen(ime.seq), "[%s]", text);
 }
 
 static void ctx_preedit_string(struct wl_client *c, struct wl_resource *r, uint32_t serial, const char *text,
@@ -131,12 +134,16 @@ static void ctx_preedit_string(struct wl_client *c, struct wl_resource *r, uint3
     snprintf(ime.preedit, sizeof ime.preedit, "%s", text);
 }
 
-static void ctx_delete(struct wl_client *c, struct wl_resource *r, int32_t index, uint32_t length)
+static void ctx_keysym(struct wl_client *c, struct wl_resource *r, uint32_t serial, uint32_t time, uint32_t sym,
+                       uint32_t state, uint32_t modifiers)
 {
     (void)c;
     (void)r;
-    ime.delete_index = index;
-    ime.delete_length = length;
+    (void)serial;
+    (void)time;
+    (void)modifiers;
+    if (state == 1) /* pressed */
+        snprintf(ime.seq + strlen(ime.seq), sizeof ime.seq - strlen(ime.seq), "<%x>", sym);
 }
 
 static void ctx_other(void)
@@ -145,8 +152,8 @@ static void ctx_other(void)
 
 static const struct {
     void *fns[14];
-} k_context_impl = {{ctx_destroy, ctx_commit_string, ctx_preedit_string, ctx_other, ctx_other, ctx_delete, ctx_other,
-                     ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other}};
+} k_context_impl = {{ctx_destroy, ctx_commit_string, ctx_preedit_string, ctx_other, ctx_other, ctx_other, ctx_other,
+                     ctx_other, ctx_keysym, ctx_other, ctx_other, ctx_other, ctx_other, ctx_other}};
 
 static void bind_im(struct wl_client *client, void *data, uint32_t version, uint32_t id)
 {
@@ -320,6 +327,22 @@ static int wait_msg(int c, uint32_t type, struct cham_msg *out)
         pump(1);
     }
     return -1;
+}
+
+/* The next CHAM_PONG within 2 s, without running the compositor. */
+static int recv_pong(int c, struct cham_msg *out)
+{
+    struct pollfd p = {c, POLLIN, 0};
+    while (poll(&p, 1, 2000) == 1) {
+        int fd = -1;
+        if (cham_recv(c, out, &fd) <= 0)
+            return 0;
+        if (fd >= 0)
+            close(fd);
+        if (out->type == CHAM_PONG)
+            return 1;
+    }
+    return 0;
 }
 
 static void read_all(int fd, char *buf, size_t size)
@@ -563,6 +586,33 @@ int main(void)
         pump(1);
     CHECK(dc.device != NULL, "20 programs binding Wayland sockets don't hide the compositor's (reconnected)");
 
+    /* The app's "are you there?" while it is in front: the service answers,
+     * and says how long the compositor has left the service's own question
+     * to it (a wl_display.sync) unanswered. */
+    printf("is the desktop there\n");
+    struct cham_msg ping = {CHAM_PING, 0, 77, 0}, pong = {0};
+    cham_send(c, &ping, -1);
+    wait_msg(c, CHAM_PONG, &pong);
+    CHECK(pong.type == CHAM_PONG && pong.a == 77, "the service answers a ping, with the ping's number");
+    pump(10);
+    usleep(50000);
+    ping.a = 78;
+    cham_send(c, &ping, -1);
+    CHECK(recv_pong(c, &pong) && pong.a == 78 && pong.b == 0, "a compositor that answers: nothing waits (%llu ms)",
+          (unsigned long long)pong.b);
+    usleep(3200000); /* the compositor doesn't run: this test is it */
+    ping.a = 79;
+    cham_send(c, &ping, -1);
+    CHECK(recv_pong(c, &pong) && pong.a == 79 && pong.b >= 3000 && pong.b < 5000,
+          "a compositor that stopped answering: the answer says for how long (%llu ms)", (unsigned long long)pong.b);
+    pump(10);
+    usleep(50000);
+    ping.a = 80;
+    cham_send(c, &ping, -1);
+    CHECK(recv_pong(c, &pong) && pong.a == 80 && pong.b == 0, "it answers again: nothing waits (%llu ms)",
+          (unsigned long long)pong.b);
+    pump(10);
+
     /* Chameleon's input method, started the way KWin starts one: with a
      * private connection that offers zwp_input_method_v1. While a text field
      * takes text (a context), the text goes there; without one, as keys. */
@@ -603,15 +653,32 @@ int main(void)
     send_input(c, CHAM_INPUT_TEXT_CHAR, 0x00e9, 0); /* é */
     send_input(c, CHAM_INPUT_TEXT_CHAR, 'x', 0);
     send_input(c, CHAM_INPUT_TEXT_PREEDIT, 0, 0);
-    send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 0);
-    for (int i = 0; i < 25 && !ime.delete_length; i++) {
+    for (int i = 0; i < 25 && !*ime.preedit; i++) {
         wl_event_loop_dispatch(loop, 20);
         wl_display_flush_clients(display);
     }
     CHECK(strcmp(ime.commit, "hi") == 0, "committed text reaches the text field (\"%s\")", ime.commit);
     CHECK(strcmp(ime.preedit, "\xc3\xa9x") == 0, "composing text too (\"%s\")", ime.preedit);
-    CHECK(ime.delete_index == -2 && ime.delete_length == 2, "deleting 2 before the cursor (%d, %u)",
-          ime.delete_index, ime.delete_length);
+    /* Enter and deletions are keys: Enter as text or a request to delete
+     * surrounding text is lost on some apps (single-line fields, terminals).
+     * Line breaks inside text stay text, CR as LF: an app takes text at once
+     * and queues keys, so a Return between pasted lines would come last. */
+    ime.seq[0] = 0;
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'a', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, 'b', 0);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\r', 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    send_input(c, CHAM_INPUT_TEXT_DELETE, 2, 1);
+    send_input(c, CHAM_INPUT_TEXT_CHAR, '\n', 0);
+    send_input(c, CHAM_INPUT_TEXT_COMMIT, 0, 0);
+    const char *want = "[a\nb\n]<ff08><ff08><ffff>[]<ff0d>";
+    for (int i = 0; i < 25 && strcmp(ime.seq, want) != 0; i++) {
+        wl_event_loop_dispatch(loop, 20);
+        wl_display_flush_clients(display);
+    }
+    CHECK(strcmp(ime.seq, want) == 0,
+          "pasted lines as text, Enter as Return, deleting 2 before and 1 after as BackSpace, Delete (%s)", ime.seq);
     if (ctx)
         wl_resource_post_event(ime.im, 1 /* deactivate */, ctx);
     for (int i = 0; i < 25; i++) {
@@ -646,11 +713,35 @@ int main(void)
     /* An app built from another protocol version says so and closes; the
      * shim must not keep reconnecting. */
     printf("app of another protocol version\n");
+    struct ucred service = {0};
+    socklen_t service_len = sizeof service;
+    getsockopt(c, SOL_SOCKET, SO_PEERCRED, &service, &service_len);
     struct cham_msg bye = {CHAM_BYE, 0, CHAM_BYE_VERSION, CHAM_PROTO_VERSION + 1};
     cham_send(c, &bye, -1);
     close(c);
     p = (struct pollfd){l, POLLIN, 0};
     CHECK(poll(&p, 1, 2500) == 0, "the shim doesn't reconnect");
+
+    /* The service killed under a running session (Android does that to
+     * background processes): programs using the card say so, once. */
+    printf("the service is gone\n");
+    int errs[2], saved = dup(2);
+    char said[1024] = "", version[64] = {0};
+    CHECK(service.pid > 1 && kill(service.pid, SIGKILL) == 0, "chameleon-kernel (pid %d) killed", (int)service.pid);
+    usleep(200000);
+    CHECK(pipe2(errs, O_CLOEXEC | O_NONBLOCK) == 0, "a pipe for what it says");
+    dup2(errs[1], 2);
+    int r1 = ioctl(fd, 0xc0406400 /* DRM_IOCTL_VERSION */, version), e1 = errno;
+    int r2 = ioctl(fd, 0xc0406400, version);
+    dup2(saved, 2);
+    close(saved);
+    if (read(errs[0], said, sizeof said - 1) < 0)
+        said[0] = 0;
+    close(errs[0]);
+    close(errs[1]);
+    char *first = strstr(said, "chameleon-kernel is gone");
+    CHECK(r1 == -1 && r2 == -1, "the card's requests fail (%s)", strerror(e1));
+    CHECK(first && !strstr(first + 1, "chameleon-kernel is gone"), "this program says why, once: %s", said);
     close(fd);
     close(l);
     wl_display_destroy(display);

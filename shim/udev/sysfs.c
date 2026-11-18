@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * The card's sysfs entries and its /dev/dri directory, as the kernel shows a
- * KMS-only platform card (vkms on 6.8 has the same shape):
+ * platform card with a primary and a render node (virtio-gpu on 6.8 has the
+ * same nodes):
  *
  *   /sys/dev/char/226:0 -> ../../devices/platform/chameleon/drm/card0
+ *   /sys/dev/char/226:128 -> ../../devices/platform/chameleon/drm/renderD128
  *   /sys/devices/platform/chameleon/{uevent,subsystem -> bus/platform}
- *   .../drm/card0/{uevent,dev,subsystem -> class/drm,device -> chameleon}
- *   /dev/dri listing card0 (no render node)
+ *   .../drm/{card0,renderD128}/{uevent,dev,subsystem -> class/drm,device -> chameleon}
+ *   /dev/dri listing card0 and renderD128
  *
  * libdrm reads them to name and type the card (drmGetPrimaryDeviceNameFromFd,
  * drmGetNodeTypeFromFd, drmGetDevice2...). They are a real tree under
@@ -14,10 +16,11 @@
  * exists (the compositor's libchameleon.so serving), as udev lists it. The
  * node itself is libchameleon.so's; here it only stats and is accessible.
  *
- * Only the /dev/dri directory itself is the tree's: it lists card0 next to
- * the real entries the program can see (a GPU's render node, on the few
- * devices that let apps reach one), and those stay the real ones. A real
- * card0 is the one name hidden: it can't drive Android's screen.
+ * Only the /dev/dri directory itself is the tree's: it lists the card's
+ * nodes next to the real entries the program can see, and those stay the
+ * real ones. A real card0 or renderD128 (a GPU's, on the few devices that
+ * let apps reach one) is hidden behind ours: neither can drive Android's
+ * screen or share buffers with it.
  */
 #define _GNU_SOURCE
 #include <dirent.h>
@@ -41,7 +44,9 @@
 
 #define STR(x) #x
 #define XSTR(x) STR(x)
-#define CHAR_DEV "/sys/dev/char/226:" XSTR(CHAM_DRM_MINOR)
+#define CARD_CHAR_DEV "/sys/dev/char/226:" XSTR(CHAM_DRM_MINOR)
+#define RENDER_CHAR_DEV "/sys/dev/char/226:" XSTR(CHAM_RENDER_MINOR)
+#define DEVICE "/sys/devices/platform/chameleon"
 
 static pthread_once_t g_once = PTHREAD_ONCE_INIT;
 static char g_root[PATH_MAX], g_real_root[PATH_MAX]; /* "" if the tree couldn't be made */
@@ -83,6 +88,27 @@ static int link_to(const char *target, const char *path)
     return symlink(target, path) != 0 && errno != EEXIST ? -1 : 0;
 }
 
+/* One node's entries: its directory under the card's drm directory, its
+ * /sys/dev/char link and its name in /dev/dri. */
+static int make_node(const char *name, unsigned minor)
+{
+    char p[PATH_MAX + 64], dir[PATH_MAX + 64], text[128]; /* g_root leaves room for the longest entry */
+#define AT(rel, ...) (snprintf(p, sizeof p, "%s" rel, g_root, __VA_ARGS__), p)
+    snprintf(dir, sizeof dir, "%s" DEVICE "/drm/%s", g_root, name);
+    snprintf(text, sizeof text, "MAJOR=226\nMINOR=%u\nDEVNAME=dri/%s\nDEVTYPE=drm_minor\n", minor, name);
+    int ok = make_dirs(dir) == 0 && write_file(AT(DEVICE "/drm/%s/uevent", name), text) == 0;
+    snprintf(text, sizeof text, "226:%u\n", minor);
+    return ok && write_file(AT(DEVICE "/drm/%s/dev", name), text) == 0 &&
+                   link_to("../../../../../class/drm", AT(DEVICE "/drm/%s/subsystem", name)) == 0 &&
+                   link_to("../../../chameleon", AT(DEVICE "/drm/%s/device", name)) == 0 &&
+                   (snprintf(text, sizeof text, "../../devices/platform/chameleon/drm/%s", name),
+                    link_to(text, AT("/sys/dev/char/226:%u", minor)) == 0) &&
+                   write_file(AT("/dev/dri/%s", name), "") == 0 /* for the listing; the node is libchameleon.so's */
+               ? 0
+               : -1;
+#undef AT
+}
+
 static void build_tree(void)
 {
     const char *dir = getenv("XDG_RUNTIME_DIR");
@@ -90,22 +116,14 @@ static void build_tree(void)
         g_root[0] = 0;
         return;
     }
-    char p[PATH_MAX + 64], text[128]; /* g_root leaves room for the longest entry */
+    char p[PATH_MAX + 64];
 #define AT(rel) (snprintf(p, sizeof p, "%s%s", g_root, rel), p)
-    const char *card = "/sys/devices/platform/chameleon/drm/card0";
-    snprintf(text, sizeof text, "MAJOR=226\nMINOR=%d\nDEVNAME=dri/card0\nDEVTYPE=drm_minor\n", CHAM_DRM_MINOR);
-    int ok = make_dirs(AT(card)) == 0 && make_dirs(AT("/sys/dev/char")) == 0 &&
-             make_dirs(AT("/sys/bus/platform")) == 0 && make_dirs(AT("/sys/class/drm")) == 0 &&
-             make_dirs(AT("/dev/dri")) == 0 &&
-             write_file(AT("/sys/devices/platform/chameleon/uevent"), "MODALIAS=platform:chameleon\n") == 0 &&
-             link_to("../../../bus/platform", AT("/sys/devices/platform/chameleon/subsystem")) == 0 &&
-             write_file(AT("/sys/devices/platform/chameleon/drm/card0/uevent"), text) == 0 &&
-             (snprintf(text, sizeof text, "226:%d\n", CHAM_DRM_MINOR),
-              write_file(AT("/sys/devices/platform/chameleon/drm/card0/dev"), text) == 0) &&
-             link_to("../../../../../class/drm", AT("/sys/devices/platform/chameleon/drm/card0/subsystem")) == 0 &&
-             link_to("../../../chameleon", AT("/sys/devices/platform/chameleon/drm/card0/device")) == 0 &&
-             link_to("../../devices/platform/chameleon/drm/card0", AT(CHAR_DEV)) == 0 &&
-             write_file(AT("/dev/dri/card0"), "") == 0; /* for the listing; the node is libchameleon.so's */
+    int ok = make_dirs(AT("/sys/dev/char")) == 0 && make_dirs(AT("/sys/bus/platform")) == 0 &&
+             make_dirs(AT("/sys/class/drm")) == 0 && make_dirs(AT("/dev/dri")) == 0 &&
+             make_dirs(AT(DEVICE "/drm")) == 0 &&
+             write_file(AT(DEVICE "/uevent"), "MODALIAS=platform:chameleon\n") == 0 &&
+             link_to("../../../bus/platform", AT(DEVICE "/subsystem")) == 0 &&
+             make_node(CHAM_DRM_NAME, CHAM_DRM_MINOR) == 0 && make_node(CHAM_RENDER_NAME, CHAM_RENDER_MINOR) == 0;
     /* Past our own open() (bionic's opendir() calls it, and /dev/dri leads
      * back here while the tree is being built). */
     NEXT(openat);
@@ -114,7 +132,7 @@ static void build_tree(void)
     if (real_fd >= 0 && !real)
         close(real_fd);
     for (struct dirent *e; real && (e = readdir(real));) {
-        if (e->d_name[0] == '.' || strcmp(e->d_name, "card0") == 0)
+        if (e->d_name[0] == '.' || strcmp(e->d_name, CHAM_DRM_NAME) == 0 || strcmp(e->d_name, CHAM_RENDER_NAME) == 0)
             continue;
         char name[16 + sizeof e->d_name];
         snprintf(name, sizeof name, "/dev/dri/%s", e->d_name);
@@ -131,11 +149,16 @@ static void build_tree(void)
         g_root[0] = 0;
 }
 
-/* The card's node, as named in udev (CHAMELEON_DRM_PATH) or by libdrm. */
+/* 1 for the card's primary node, as named in udev (CHAMELEON_DRM_PATH) or
+ * by libdrm; 2 for its render node; 0 for any other path. */
 static int is_node(const char *path)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");
-    return path && (strcmp(path, CHAM_DRM_PATH) == 0 || (p && *p && strcmp(path, p) == 0));
+    if (!path)
+        return 0;
+    if (strcmp(path, CHAM_DRM_PATH) == 0 || (p && *p && strcmp(path, p) == 0))
+        return 1;
+    return strcmp(path, CHAM_RENDER_PATH) == 0 ? 2 : 0;
 }
 
 static int prefixed(const char *path, const char *prefix)
@@ -147,7 +170,7 @@ static int prefixed(const char *path, const char *prefix)
 const char *cham_sys_path(const char *path, char *buf, size_t size)
 {
     if (!path || path[0] != '/' || is_node(path) ||
-        (!prefixed(path, CHAR_DEV) && !prefixed(path, "/sys/devices/platform/chameleon") &&
+        (!prefixed(path, CARD_CHAR_DEV) && !prefixed(path, RENDER_CHAR_DEV) && !prefixed(path, DEVICE) &&
          strcmp(path, "/dev/dri") != 0 && strcmp(path, "/dev/dri/") != 0))
         return path;
     pthread_once(&g_once, build_tree);
@@ -158,11 +181,12 @@ const char *cham_sys_path(const char *path, char *buf, size_t size)
 
 int cham_sys_node_stat(const char *path, struct stat *st)
 {
-    if (!is_node(path) || !cham_card_present())
+    int node = is_node(path);
+    if (!node || !cham_card_present())
         return 0;
     memset(st, 0, sizeof *st);
-    st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = makedev(226, CHAM_DRM_MINOR);
+    st->st_mode = S_IFCHR | (node == 2 ? 0666 : 0660); /* the render node open to every user, by mode */
+    st->st_rdev = makedev(226, node == 2 ? CHAM_RENDER_MINOR : CHAM_DRM_MINOR);
     st->st_nlink = 1;
     st->st_uid = getuid();
     st->st_gid = getgid();
@@ -181,7 +205,7 @@ EXPORT FILE *fopen64(const char *path, const char *mode) __attribute__((alias("f
 EXPORT int access(const char *path, int mode)
 {
     char buf[PATH_MAX];
-    if (is_node(path) && cham_card_present()) /* uaccess: the seat's user may use it */
+    if (is_node(path) && cham_card_present()) /* uaccess, or the render node's mode: the user may use it */
         return 0;
     NEXT(access);
     return next_access(cham_sys_path(path, buf, sizeof buf), mode);

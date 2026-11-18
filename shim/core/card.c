@@ -6,7 +6,8 @@
  * libchameleon.so (interpose.c) answers open/fstat/ioctl on the card node
  * by asking here, over $XDG_RUNTIME_DIR/chameleon-card: one SOCK_SEQPACKET
  * connection per process, one request at a time (the protocol is in
- * internal.h). OPEN makes a file with kms.c's per-file state, and a pipe:
+ * internal.h). OPEN makes a file of the card's primary node or of its
+ * render node with kms.c's per-file state, and a pipe:
  * the program gets the read end and reads DRM events from it, the service
  * keeps the write end. Once every copy of the read end is closed (in any
  * process, even a dead one) the write end reports POLLERR and the file is
@@ -42,7 +43,8 @@ struct caller {
     pid_t pid;
     uid_t uid;
     int broken; /* a callback went unanswered: the connection is out of step */
-    int sent_fd, sent_num; /* an fd that came with the request, and its number in the caller */
+    int sent_fd[2], sent_num[2]; /* fds that came with the request (the second ahead of it,
+                                  * CARD_SEND_FD), and their numbers in the caller */
 };
 /* The caller of the call running on a thread. A pthread key, not __thread:
  * bionic refuses executables whose TLS segment is aligned below 64 bytes,
@@ -53,6 +55,10 @@ static void caller_key(void) { pthread_key_create(&g_caller_key, NULL); }
 static struct caller *current(void) { return pthread_getspecific(g_caller_key); }
 
 static pthread_mutex_t g_card_lock = PTHREAD_MUTEX_INITIALIZER;
+/* Held while closed files are released, so a request that checks for them
+ * waits until a release another thread started is done (a closed master
+ * must not still hold the master when the next request runs). */
+static pthread_mutex_t g_reap_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct fake_fd *g_card_files; /* open files (next), each holding one ref */
 static uint32_t g_next_file_id;
 static int g_wake[2] = {-1, -1};     /* a file was opened: the server thread watches it too */
@@ -99,8 +105,9 @@ static int callback_answer(struct caller *c, struct cham_msg *m, int *fd_out)
 int card_fd_get(int n)
 {
     struct caller *c = current();
-    if (c && c->sent_fd >= 0 && n == c->sent_num)
-        return fcntl(c->sent_fd, F_DUPFD_CLOEXEC, 0); /* came with the request */
+    for (int i = 0; c && i < 2; i++)
+        if (c->sent_fd[i] >= 0 && n == c->sent_num[i])
+            return fcntl(c->sent_fd[i], F_DUPFD_CLOEXEC, 0); /* came with the request */
     struct cham_msg m = {CARD_GET_FD, 0, (uint64_t)(int64_t)n, 0};
     int fd = -1;
     if (!c || c->broken || cham_send(c->sock, &m, -1) != 0 || callback_answer(c, &m, &fd) != 0 ||
@@ -117,11 +124,10 @@ int card_fd_install(int fd, int cloexec)
     struct caller *c = current();
     struct cham_msg m = {CARD_PUT_FD, 0, (uint64_t)(cloexec != 0), 0};
     int unused = -1;
-    if (!c || c->broken || cham_send(c->sock, &m, fd) != 0 || callback_answer(c, &m, &unused) != 0)
-        return -EMFILE;
+    int failed = !c || c->broken || cham_send(c->sock, &m, fd) != 0 || callback_answer(c, &m, &unused) != 0;
     if (unused >= 0)
         close(unused);
-    return (int)(int64_t)m.a;
+    return failed ? -EMFILE : (int)(int64_t)m.a;
 }
 
 /* ---- files ---- */
@@ -156,6 +162,7 @@ static void file_put(struct fake_fd *f)
 static void reap_closed(void)
 {
     struct fake_fd *dead = NULL;
+    pthread_mutex_lock(&g_reap_lock);
     pthread_mutex_lock(&g_card_lock);
     for (struct fake_fd **q = &g_card_files; *q;) {
         struct pollfd pfd = {(*q)->event_wfd, 0, 0};
@@ -172,11 +179,12 @@ static void reap_closed(void)
     while (dead) {
         struct fake_fd *f = dead;
         dead = f->next;
-        file_put(f); /* now, or when the call in progress ends */
+        file_put(f); /* now, or when the call in progress ends, as the kernel's last fput */
     }
+    pthread_mutex_unlock(&g_reap_lock);
 }
 
-static int file_open(struct caller *c, int *read_end)
+static int64_t file_open(struct caller *c, int render, int *read_end)
 {
     kms_init_once(); /* the first open waits for the app, as the card's driver probing a panel */
     int p[2];
@@ -196,6 +204,7 @@ static int file_open(struct caller *c, int *read_end)
     f->ino = st.st_ino;
     f->event_wfd = p[1];
     f->pid = c->pid;
+    f->render = render;
     f->refs = 1;
     kms_file_open(f);
     pthread_mutex_lock(&g_card_lock);
@@ -214,24 +223,25 @@ static int file_open(struct caller *c, int *read_end)
             comm[strcspn(comm, "\n")] = 0;
         fclose(fp);
     }
-    cham_log("%s (pid %d) opened the card%s", comm, (int)c->pid, f->master ? ", DRM master" : "");
+    cham_log("%s (pid %d) opened the %s%s", comm, (int)c->pid, render ? "render node" : "card",
+             f->master ? ", DRM master" : "");
     *read_end = p[0];
-    return (int)f->id;
+    return CARD_FILE(f->id, render);
 }
 
 /* Which open file `fd` (a copy of a read end) is. */
-static int file_attach(int fd)
+static int64_t file_attach(int fd)
 {
     struct stat st;
     if (fd < 0 || fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode))
         return -EBADF;
-    int id = -EBADF;
+    int64_t ret = -EBADF;
     pthread_mutex_lock(&g_card_lock);
     for (struct fake_fd *f = g_card_files; f; f = f->next)
         if (f->dev == st.st_dev && f->ino == st.st_ino)
-            id = (int)f->id;
+            ret = CARD_FILE(f->id, f->render);
     pthread_mutex_unlock(&g_card_lock);
-    return id;
+    return ret;
 }
 
 /* ---- connections ---- */
@@ -242,13 +252,9 @@ static int answer(struct caller *c, int64_t ret, int fd)
     return cham_send(c->sock, &m, fd);
 }
 
-/* CARD_CLIENT_BUFFER's answer: the done, then the app's buffer. */
-static int send_client_buffer(const AHardwareBuffer *b, void *arg)
+struct cham_bo *card_session_buffer(int fd)
 {
-    struct caller *c = arg;
-    if (answer(c, 1, -1) != 0 || ahb_send(b, c->sock) != 0)
-        c->broken = 1;
-    return 0;
+    return ahb_bo_for_fd(fd);
 }
 
 static void handle(struct caller *c, const struct cham_msg *m, int fd)
@@ -256,7 +262,7 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
     switch (m->type) {
     case CARD_OPEN: {
         int read_end = -1;
-        int ret = file_open(c, &read_end);
+        int64_t ret = file_open(c, m->a == 1, &read_end);
         answer(c, ret, read_end);
         if (read_end >= 0)
             close(read_end); /* the program's from now on */
@@ -269,10 +275,10 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         struct fake_fd *f = file_get(m->id);
         int ret = -EBADF;
         if (f) {
-            c->sent_fd = fd; /* an fd of the caller's this call names (IN_FENCE_FD) */
-            c->sent_num = (int)(m->a >> 32) - 1;
+            c->sent_fd[0] = fd; /* an fd of the caller's this call names (IN_FENCE_FD) */
+            c->sent_num[0] = (int)(m->a >> 32) - 1;
             ret = kms_ioctl(f, (unsigned int)m->a, (void *)(uintptr_t)m->b);
-            c->sent_fd = -1;
+            c->sent_fd[0] = -1;
             file_put(f);
         }
         answer(c, ret, -1);
@@ -292,10 +298,16 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         answer(c, handle ? (int64_t)handle : !f ? -EBADF : -EINVAL, -1);
         break;
     }
-    case CARD_CLIENT_BUFFER:
-        if (clients_with_buffer(fd, send_client_buffer, c) != 0)
+    case CARD_BUFFER_AHB: {
+        struct cham_bo *bo = card_session_buffer(fd);
+        if (!bo)
             answer(c, -ENOENT, -1);
+        else if (answer(c, 1, -1) != 0 || bo_send(bo, c->sock) != 0)
+            c->broken = 1;
+        if (bo)
+            cham_bo_unref(bo);
         break;
+    }
     case CARD_WAYLAND: {
         char path[sizeof(((struct sockaddr_un *)0)->sun_path) + 1];
         ssize_t n = recv(c->sock, path, sizeof path - 1, 0);
@@ -304,14 +316,23 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
             input_note_socket(c->pid, path);
         break;
     }
+    case CARD_SEND_FD:
+        if (c->sent_fd[1] >= 0)
+            close(c->sent_fd[1]);
+        c->sent_fd[1] = fd >= 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : -1;
+        c->sent_num[1] = (int)(int64_t)m->a;
+        return; /* for the next request */
     default:
         c->broken = 1;
     }
+    if (c->sent_fd[1] >= 0)
+        close(c->sent_fd[1]);
+    c->sent_fd[1] = -1;
 }
 
 static void *conn_main(void *arg)
 {
-    struct caller c = {.sock = (int)(intptr_t)arg, .sent_fd = -1};
+    struct caller c = {.sock = (int)(intptr_t)arg, .sent_fd = {-1, -1}};
     struct ucred cred;
     socklen_t len = sizeof cred;
     if (getsockopt(c.sock, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0) {
@@ -327,6 +348,8 @@ static void *conn_main(void *arg)
                 close(fd);
         }
     }
+    if (c.sent_fd[1] >= 0)
+        close(c.sent_fd[1]);
     close(c.sock);
     return NULL;
 }

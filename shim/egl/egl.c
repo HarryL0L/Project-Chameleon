@@ -7,6 +7,8 @@
  *  - EGL_EXT_image_dma_buf_import(_modifiers): a dmabuf that belongs to a
  *    Chameleon gbm_bo is imported as its AHardwareBuffer
  *    (EGL_NATIVE_BUFFER_ANDROID)
+ *  - EGL_MESA_image_dma_buf_export: an EGLImage of a GL texture is a session
+ *    buffer's, exported as its dmabuf
  *  - eglTerminate is a no-op, because the Android display is process-wide
  *  - on the GBM platform a config's EGL_NATIVE_VISUAL_ID is a GBM (DRM)
  *    format, as EGL_KHR_platform_gbm says, not an Android one
@@ -21,8 +23,10 @@
 #define EGL_EGLEXT_PROTOTYPES
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
+#include <GLES3/gl31.h>
 #include <dlfcn.h>
 #include <drm_fourcc.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +49,7 @@ static void load(void)
     const char *path = getenv("CHAMELEON_ANDROID_EGL");
     if (!path)
         path = sizeof(void *) == 8 ? "/system/lib64/libEGL.so" : "/system/lib/libEGL.so";
-    g_lib = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    g_lib = cham_android_dlopen(path);
     if (!g_lib) {
         cham_log("cannot load Android's libEGL: %s", dlerror());
         return;
@@ -87,7 +91,6 @@ FWD(EGLSurface, eglCreatePixmapSurface, (EGLDisplay d, EGLConfig c, EGLNativePix
 FWD(EGLSurface, eglCreatePlatformPixmapSurface, (EGLDisplay d, EGLConfig c, void *p, const EGLAttrib *a), (d, c, p, a), EGL_NO_SURFACE)
 FWD(EGLSync, eglCreateSync, (EGLDisplay d, EGLenum t, const EGLAttrib *a), (d, t, a), EGL_NO_SYNC)
 FWD(EGLBoolean, eglDestroyContext, (EGLDisplay d, EGLContext c), (d, c), EGL_FALSE)
-FWD(EGLBoolean, eglDestroyImage, (EGLDisplay d, EGLImage i), (d, i), EGL_FALSE)
 FWD(EGLBoolean, eglDestroySync, (EGLDisplay d, EGLSync s), (d, s), EGL_FALSE)
 FWD(EGLBoolean, eglGetConfigs, (EGLDisplay d, EGLConfig *c, EGLint n, EGLint *num), (d, c, n, num), EGL_FALSE)
 FWD(EGLBoolean, eglGetSyncAttrib, (EGLDisplay d, EGLSync s, EGLint a, EGLAttrib *v), (d, s, a, v), EGL_FALSE)
@@ -516,12 +519,12 @@ EGLAPI EGLBoolean EGLAPIENTRY eglTerminate(EGLDisplay dpy)
     return EGL_TRUE;
 }
 
-/* GBM and the GBM display's EGLDevice only where Chameleon's gbm
- * (libchameleon.so, i.e. the compositor) is loaded. */
+/* GBM and the card's EGLDevice only where Chameleon's gbm (libchameleon.so,
+ * in every program of a Chameleon session) is loaded. */
 static const char k_client_extensions_kms[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_KHR_platform_gbm EGL_MESA_platform_gbm "
     "EGL_MESA_platform_surfaceless EGL_KHR_platform_android EGL_KHR_client_get_all_proc_addresses "
-    "EGL_EXT_device_query";
+    "EGL_EXT_device_base EGL_EXT_device_enumeration EGL_EXT_device_query EGL_EXT_platform_device";
 static const char k_client_extensions[] =
     "EGL_EXT_client_extensions EGL_EXT_platform_base EGL_MESA_platform_surfaceless EGL_KHR_platform_android "
     "EGL_KHR_client_get_all_proc_addresses";
@@ -547,24 +550,46 @@ EGLAPI const char *EGLAPIENTRY eglQueryString(EGLDisplay dpy, EGLint name)
         const char *extra = cham_core_present()
                                 ? " EGL_EXT_image_dma_buf_import EGL_EXT_image_dma_buf_import_modifiers"
                                 : "";
-        cached = malloc(strlen(s) + strlen(extra) + 1);
+        /* and textures exported as such buffers (see texture_image) */
+        const char *export = cham_core_present() ? " EGL_MESA_image_dma_buf_export" : "";
+        cached = malloc(strlen(s) + strlen(extra) + strlen(export) + 1);
         strcpy(cached, s);
         if (!strstr(s, "EGL_EXT_image_dma_buf_import_modifiers"))
             strcat(cached, extra);
+        if (!strstr(s, "EGL_MESA_image_dma_buf_export"))
+            strcat(cached, export);
     }
     pthread_mutex_unlock(&lock);
     return cached;
 }
 
-/* ---- the display's EGLDevice (EGL_EXT_device_query) ----
- * Where the card exists (the compositor's), displays are on it: an
- * EGL_EXT_device_drm device with the primary node and no render node.
- * Like Mesa with a card that has no render node, it isn't enumerated
- * (no EGL_EXT_device_enumeration), so nothing opens a display on it
- * directly (EGL_EXT_platform_device); displays come through GBM. */
+/* ---- the card as an EGLDevice (EGL_EXT_device_base) ----
+ * Where the card exists (a Chameleon session), it is the GPU's device, as
+ * Mesa makes a DRM device with a render node one: enumerated, with its
+ * primary and render nodes (EGL_EXT_device_drm, _render_node), and the
+ * device of every display here. A display opened on it directly
+ * (EGL_EXT_platform_device, as wlroots does) is the same as a GBM one. */
 
 static const int g_device;
 #define CHAM_DEVICE ((EGLDeviceEXT)&g_device)
+#ifndef EGL_DRM_RENDER_NODE_FILE_EXT /* EGL_EXT_device_drm_render_node, newer than the NDK's headers */
+#define EGL_DRM_RENDER_NODE_FILE_EXT 0x3377
+#endif
+
+void *cham_egl_device(void)
+{
+    return CHAM_DEVICE;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglQueryDevicesEXT(EGLint max, EGLDeviceEXT *devices, EGLint *num)
+{
+    if (!num || (devices && max <= 0))
+        return fail(EGL_BAD_PARAMETER);
+    *num = cham_core_present() ? 1 : 0;
+    if (devices && *num)
+        devices[0] = CHAM_DEVICE;
+    return EGL_TRUE;
+}
 
 static const char *EGLAPIENTRY shim_eglQueryDeviceStringEXT(EGLDeviceEXT device, EGLint name)
 {
@@ -573,9 +598,11 @@ static const char *EGLAPIENTRY shim_eglQueryDeviceStringEXT(EGLDeviceEXT device,
         return NULL;
     }
     if (name == EGL_EXTENSIONS)
-        return "EGL_EXT_device_drm";
+        return "EGL_EXT_device_drm EGL_EXT_device_drm_render_node";
     if (name == EGL_DRM_DEVICE_FILE_EXT)
         return CHAM_DRM_PATH; /* the name libdrm finds for it in sysfs */
+    if (name == EGL_DRM_RENDER_NODE_FILE_EXT)
+        return CHAM_RENDER_PATH;
     fail(EGL_BAD_PARAMETER);
     return NULL;
 }
@@ -621,37 +648,350 @@ static EGLBoolean EGLAPIENTRY shim_eglQueryDmaBufModifiersEXT(EGLDisplay dpy, EG
     return EGL_TRUE;
 }
 
-static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
+/* An EGLImage of an AHardwareBuffer, from the driver (it holds its own
+ * reference to the buffer). */
+static EGLImageKHR ahb_image(EGLDisplay dpy, AHardwareBuffer *ahb)
 {
-    int fd = -1;
-    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2)
-        if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
-            fd = a[1];
-    /* The compositor's own gbm buffers, or apps' buffers registered with
-     * chameleon-kernel; any other dmabuf has no AHardwareBuffer we could
-     * hand the driver. */
-    struct cham_bo *bo = cham_bo_from_fd(fd);
-    AHardwareBuffer *client = bo ? NULL : cham_client_ahb_acquire(fd);
-    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : client;
-    if (!ahb) {
-        t_error = EGL_BAD_MATCH;
-        return EGL_NO_IMAGE_KHR;
-    }
     static EGLClientBuffer (*get_client_buffer)(const struct AHardwareBuffer *);
     static EGLImageKHR (*create_image)(EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *);
     if (!get_client_buffer)
         *(void **)&get_client_buffer = real("eglGetNativeClientBufferANDROID");
     if (!create_image)
         *(void **)&create_image = real("eglCreateImageKHR");
-    EGLImageKHR image = EGL_NO_IMAGE_KHR;
     if (!get_client_buffer || !create_image) {
         t_error = EGL_BAD_ALLOC;
-    } else {
-        const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
-        image = create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb), image_attribs);
+        return EGL_NO_IMAGE_KHR;
     }
-    cham_client_ahb_release(client); /* the image holds its own */
+    const EGLint image_attribs[] = {EGL_IMAGE_PRESERVED_KHR, EGL_TRUE, EGL_NONE};
+    return create_image(dpy, EGL_NO_CONTEXT, EGL_NATIVE_BUFFER_ANDROID, get_client_buffer(ahb), image_attribs);
+}
+
+/* Images of dmabufs declared without alpha (XRGB/XBGR). The driver only
+ * sees the AHardwareBuffer, whose format may have alpha all the same:
+ * Android gives a Vulkan swapchain RGBA buffers whatever the window's alpha
+ * means, and an opaque window's program leaves anything there (vkcube: 0.2).
+ * Textures made from these images read alpha as 1, as on a driver that
+ * imports the dmabuf as XRGB: a compositor blends an opaque window's texture
+ * like any other and paints nothing behind it. */
+struct opaque_image {
+    EGLImageKHR image;
+    struct opaque_image *next;
+};
+static pthread_mutex_t g_opaque_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct opaque_image *g_opaque;
+
+static void opaque_add(EGLImageKHR image)
+{
+    struct opaque_image *o = malloc(sizeof *o);
+    if (!o)
+        return;
+    o->image = image;
+    pthread_mutex_lock(&g_opaque_lock);
+    o->next = g_opaque;
+    g_opaque = o;
+    pthread_mutex_unlock(&g_opaque_lock);
+}
+
+static int opaque_find(EGLImageKHR image, int remove)
+{
+    struct opaque_image *found = NULL;
+    pthread_mutex_lock(&g_opaque_lock);
+    for (struct opaque_image **p = &g_opaque; *p && !found; p = &(*p)->next) {
+        if ((*p)->image == image) {
+            found = *p;
+            if (remove)
+                *p = found->next;
+        }
+    }
+    pthread_mutex_unlock(&g_opaque_lock);
+    if (found && remove)
+        free(found);
+    return found != NULL;
+}
+
+static EGLImageKHR import_dmabuf(EGLDisplay dpy, const EGLint *attribs)
+{
+    int fd = -1;
+    uint32_t fourcc = 0;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2) {
+        if (a[0] == EGL_DMA_BUF_PLANE0_FD_EXT)
+            fd = a[1];
+        else if (a[0] == EGL_LINUX_DRM_FOURCC_EXT)
+            fourcc = (uint32_t)a[1];
+    }
+    /* This process's own gbm buffers, or any other buffer of the session
+     * chameleon-kernel knows (another process's gbm buffer, an app's);
+     * any other dmabuf has no AHardwareBuffer we could hand the driver. */
+    struct cham_bo *bo = cham_bo_from_fd(fd);
+    AHardwareBuffer *session = bo ? NULL : cham_buffer_ahb_acquire(fd);
+    AHardwareBuffer *ahb = bo ? cham_bo_ahb(bo) : session;
+    if (!ahb) {
+        t_error = EGL_BAD_MATCH;
+        return EGL_NO_IMAGE_KHR;
+    }
+    EGLImageKHR image = ahb_image(dpy, ahb);
+    cham_buffer_ahb_release(session); /* the image holds its own */
+    if (image != EGL_NO_IMAGE_KHR && (fourcc == DRM_FORMAT_XRGB8888 || fourcc == DRM_FORMAT_XBGR8888))
+        opaque_add(image);
     return image;
+}
+
+/* ---- dmabuf export (EGL_MESA_image_dma_buf_export) ----
+ * Firefox (WebGL), GTK 4 and GStreamer make an EGLImage of a GL texture and
+ * export it as a dmabuf for another process. A texture's storage here is the
+ * driver's own, not an AHardwareBuffer, so it has no dmabuf another process
+ * could import. As Mesa's iris moves a texture to shareable storage when an
+ * EGLImage is made of it, the texture gets a session buffer (cham_bo_create,
+ * known to chameleon-kernel, so any process of the session imports its
+ * dmabuf): the image is the buffer's, and the texture is made a sibling of
+ * it (glEGLImageTargetTexture2DOES), keeping its contents if the app asks
+ * for that (EGL_IMAGE_PRESERVED_KHR; otherwise they are undefined, as
+ * EGL_KHR_image_base says). Only plain textures qualify: the base level of
+ * a mutable single-level 8-bit RGBA/RGB 2D texture of the current context;
+ * any other image is the driver's, which exports nothing. */
+
+struct export_image {
+    EGLImageKHR image;
+    struct cham_bo *bo;
+    uint32_t handle; /* on cham_render_fd(): chameleon-kernel has the buffer */
+    struct export_image *next;
+};
+static pthread_mutex_t g_export_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct export_image *g_exports;
+static struct {
+    GLenum (*GetError)(void);
+    const GLubyte *(*GetString)(GLenum);
+    void (*GetIntegerv)(GLenum, GLint *);
+    GLboolean (*IsTexture)(GLuint);
+    void (*BindTexture)(GLenum, GLuint);
+    void (*GetTexParameteriv)(GLenum, GLenum, GLint *);
+    void (*GetTexLevelParameteriv)(GLenum, GLint, GLenum, GLint *);
+    void (*GenTextures)(GLsizei, GLuint *);
+    void (*DeleteTextures)(GLsizei, const GLuint *);
+    void (*GenFramebuffers)(GLsizei, GLuint *);
+    void (*DeleteFramebuffers)(GLsizei, const GLuint *);
+    void (*BindFramebuffer)(GLenum, GLuint);
+    void (*FramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint);
+    GLenum (*CheckFramebufferStatus)(GLenum);
+    void (*CopyTexSubImage2D)(GLenum, GLint, GLint, GLint, GLint, GLint, GLsizei, GLsizei);
+    void (*Finish)(void);
+    void (*EGLImageTargetTexture2DOES)(GLenum, void *);
+} gl;
+static int g_gl_ok;
+
+static void resolve_gl(void)
+{
+#define GL(name) (*(void **)&gl.name = cham_gl_real("gl" #name))
+    GL(GetError), GL(GetString), GL(GetIntegerv), GL(IsTexture), GL(BindTexture), GL(GetTexParameteriv),
+        GL(GetTexLevelParameteriv), GL(GenTextures), GL(DeleteTextures), GL(GenFramebuffers),
+        GL(DeleteFramebuffers), GL(BindFramebuffer), GL(FramebufferTexture2D), GL(CheckFramebufferStatus),
+        GL(CopyTexSubImage2D), GL(Finish);
+#undef GL
+    *(void **)&gl.EGLImageTargetTexture2DOES = real("glEGLImageTargetTexture2DOES");
+    g_gl_ok = 1;
+    for (void **f = (void **)&gl; f < (void **)(&gl + 1); f++)
+        g_gl_ok &= *f != NULL;
+}
+
+/* OpenGL ES 3.1 or later: glGetTexLevelParameteriv. */
+static int gl_es31(void)
+{
+    const char *v = (const char *)gl.GetString(GL_VERSION);
+    int major = 0, minor = 0;
+    return v && sscanf(v, "OpenGL ES %d.%d", &major, &minor) == 2 && (major > 3 || (major == 3 && minor >= 1));
+}
+
+/* The texture's base level copied into `image` (GPU work finished, as the
+ * buffer may be read by another process as soon as it is exported). */
+static int copy_texture(GLuint tex, EGLImageKHR image, GLint width, GLint height)
+{
+    GLint old_read = 0;
+    GLuint copy = 0, fb = 0;
+    gl.GetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &old_read);
+    gl.GenTextures(1, &copy);
+    gl.BindTexture(GL_TEXTURE_2D, copy);
+    gl.EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+    gl.GenFramebuffers(1, &fb);
+    gl.BindFramebuffer(GL_READ_FRAMEBUFFER, fb);
+    gl.FramebufferTexture2D(GL_READ_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex, 0);
+    int ok = gl.CheckFramebufferStatus(GL_READ_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    if (ok)
+        gl.CopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
+    gl.BindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)old_read);
+    gl.DeleteFramebuffers(1, &fb);
+    gl.DeleteTextures(1, &copy);
+    if (ok && gl.GetError() == GL_NO_ERROR) {
+        gl.Finish();
+        return 1;
+    }
+    return 0;
+}
+
+/* eglCreateImage(EGL_GL_TEXTURE_2D) for a texture that can move to a session
+ * buffer (*handled); otherwise left to the driver. */
+static EGLImageKHR texture_image(EGLDisplay dpy, EGLContext ctx, GLuint tex, const EGLint *attribs, int *handled)
+{
+    *handled = 0;
+    EGLint level = 0, preserved = EGL_FALSE;
+    for (const EGLint *a = attribs; a && a[0] != EGL_NONE; a += 2) {
+        if (a[0] == EGL_GL_TEXTURE_LEVEL_KHR)
+            level = a[1];
+        else if (a[0] == EGL_IMAGE_PRESERVED_KHR)
+            preserved = a[1];
+    }
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, resolve_gl);
+    REAL(EGLContext, eglGetCurrentContext, (void))
+    if (level != 0 || !g_gl_ok || !p_eglGetCurrentContext || ctx == EGL_NO_CONTEXT || ctx != p_eglGetCurrentContext() ||
+        !cham_core_present() || !gl_es31() || !gl.IsTexture(tex))
+        return EGL_NO_IMAGE_KHR;
+    /* An error the app hasn't fetched yet would be taken for ours: leave
+     * that texture to the driver. */
+    if (gl.GetError() != GL_NO_ERROR)
+        return EGL_NO_IMAGE_KHR;
+    GLint old_tex = 0;
+    gl.GetIntegerv(GL_TEXTURE_BINDING_2D, &old_tex);
+    gl.BindTexture(GL_TEXTURE_2D, tex);
+    if (gl.GetError() != GL_NO_ERROR) /* not a 2D texture */
+        return EGL_NO_IMAGE_KHR;
+    GLint immutable = 0, width = 0, height = 0, internal = 0, level1 = 0;
+    gl.GetTexParameteriv(GL_TEXTURE_2D, GL_TEXTURE_IMMUTABLE_FORMAT, &immutable);
+    gl.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_WIDTH, &width);
+    gl.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_HEIGHT, &height);
+    gl.GetTexLevelParameteriv(GL_TEXTURE_2D, 0, GL_TEXTURE_INTERNAL_FORMAT, &internal);
+    gl.GetTexLevelParameteriv(GL_TEXTURE_2D, 1, GL_TEXTURE_WIDTH, &level1);
+    uint32_t format = internal == GL_RGBA8 || internal == GL_RGBA  ? DRM_FORMAT_ABGR8888
+                      : internal == GL_RGB8 || internal == GL_RGB ? DRM_FORMAT_XBGR8888
+                                                                  : 0;
+    struct cham_bo *bo = NULL;
+    uint32_t handle = 0;
+    EGLImageKHR image = EGL_NO_IMAGE_KHR;
+    if (gl.GetError() == GL_NO_ERROR && !immutable && width > 0 && height > 0 && level1 == 0 && format) {
+        bo = cham_render_fd() >= 0 ? cham_bo_create((uint32_t)width, (uint32_t)height, format, CHAM_USE_RENDERING) : NULL;
+        handle = bo ? cham_bo_handle_open(bo, cham_render_fd()) : 0;
+        image = handle ? ahb_image(dpy, cham_bo_ahb(bo)) : EGL_NO_IMAGE_KHR;
+    }
+    struct export_image *e = image != EGL_NO_IMAGE_KHR ? malloc(sizeof *e) : NULL;
+    int ok = e && (!preserved || copy_texture(tex, image, width, height));
+    if (ok) {
+        gl.BindTexture(GL_TEXTURE_2D, tex);
+        gl.EGLImageTargetTexture2DOES(GL_TEXTURE_2D, image);
+        ok = gl.GetError() == GL_NO_ERROR;
+    }
+    gl.BindTexture(GL_TEXTURE_2D, (GLuint)old_tex);
+    if (!ok) {
+        free(e);
+        static int logged;
+        if (bo && logged++ < 4)
+            cham_log("cannot move a %dx%d texture to a session buffer: no dmabuf export for it", width, height);
+        if (image != EGL_NO_IMAGE_KHR) {
+            REAL(EGLBoolean, eglDestroyImageKHR, (EGLDisplay, EGLImageKHR))
+            if (p_eglDestroyImageKHR)
+                p_eglDestroyImageKHR(dpy, image);
+        }
+        if (handle)
+            cham_bo_handle_close(cham_render_fd(), handle);
+        if (bo)
+            cham_bo_unref(bo);
+        return EGL_NO_IMAGE_KHR;
+    }
+    *e = (struct export_image){image, bo, handle, NULL};
+    pthread_mutex_lock(&g_export_lock);
+    e->next = g_exports;
+    g_exports = e;
+    pthread_mutex_unlock(&g_export_lock);
+    *handled = 1;
+    return image;
+}
+
+/* The exportable image's buffer, or NULL. Under g_export_lock. */
+static struct cham_bo *export_bo_locked(EGLImageKHR image)
+{
+    for (struct export_image *e = g_exports; e; e = e->next)
+        if (e->image == image)
+            return e->bo;
+    return NULL;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglExportDMABUFImageQueryMESA(EGLDisplay dpy, EGLImageKHR image, int *fourcc,
+                                                                  int *num_planes, EGLuint64KHR *modifiers)
+{
+    (void)dpy;
+    pthread_mutex_lock(&g_export_lock);
+    struct cham_bo *bo = export_bo_locked(image);
+    if (bo && fourcc)
+        *fourcc = (int)bo->format;
+    pthread_mutex_unlock(&g_export_lock);
+    if (!bo)
+        return fail(EGL_BAD_PARAMETER);
+    if (num_planes)
+        *num_planes = 1;
+    if (modifiers)
+        modifiers[0] = DRM_FORMAT_MOD_INVALID; /* gralloc's layout: implicit */
+    return EGL_TRUE;
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglExportDMABUFImageMESA(EGLDisplay dpy, EGLImageKHR image, int *fds,
+                                                             EGLint *strides, EGLint *offsets)
+{
+    (void)dpy;
+    int fd = -1;
+    pthread_mutex_lock(&g_export_lock);
+    struct cham_bo *bo = export_bo_locked(image);
+    if (bo && fds)
+        fd = cham_bo_export_fd(bo);
+    if (bo && strides)
+        strides[0] = (EGLint)bo->stride;
+    pthread_mutex_unlock(&g_export_lock);
+    if (!bo)
+        return fail(EGL_BAD_PARAMETER);
+    if (fds && fd < 0)
+        return fail(EGL_BAD_ALLOC);
+    if (fds)
+        fds[0] = fd; /* the caller's */
+    if (offsets)
+        offsets[0] = 0;
+    return EGL_TRUE;
+}
+
+/* An exportable image's buffer goes with it; the texture keeps its own
+ * reference to the memory, and chameleon-kernel keeps the buffer as long as
+ * its dmabuf is held anywhere. */
+static EGLBoolean destroy_image(EGLDisplay dpy, EGLImageKHR image, const char *name)
+{
+    REAL(EGLBoolean, eglDestroyImageKHR, (EGLDisplay, EGLImageKHR))
+    REAL(EGLBoolean, eglDestroyImage, (EGLDisplay, EGLImage))
+    CHAM_NOTE_CALL(name);
+    opaque_find(image, 1);
+    struct export_image *found = NULL;
+    pthread_mutex_lock(&g_export_lock);
+    for (struct export_image **p = &g_exports; *p; p = &(*p)->next) {
+        if ((*p)->image == image) {
+            found = *p;
+            *p = found->next;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_export_lock);
+    EGLBoolean ok = p_eglDestroyImageKHR ? p_eglDestroyImageKHR(dpy, image)
+                    : p_eglDestroyImage  ? p_eglDestroyImage(dpy, image)
+                                         : EGL_FALSE;
+    if (found) {
+        cham_bo_handle_close(cham_render_fd(), found->handle);
+        cham_bo_unref(found->bo);
+        free(found);
+    }
+    return ok;
+}
+
+EGLAPI EGLBoolean EGLAPIENTRY eglDestroyImage(EGLDisplay dpy, EGLImage image)
+{
+    return destroy_image(dpy, image, "eglDestroyImage");
+}
+
+static EGLBoolean EGLAPIENTRY shim_eglDestroyImageKHR(EGLDisplay dpy, EGLImageKHR image)
+{
+    return destroy_image(dpy, image, "eglDestroyImageKHR");
 }
 
 static EGLImageKHR EGLAPIENTRY shim_eglCreateImageKHR(EGLDisplay dpy, EGLContext ctx, EGLenum target,
@@ -659,6 +999,12 @@ static EGLImageKHR EGLAPIENTRY shim_eglCreateImageKHR(EGLDisplay dpy, EGLContext
 {
     if (target == EGL_LINUX_DMA_BUF_EXT)
         return import_dmabuf(dpy, attribs);
+    if (target == EGL_GL_TEXTURE_2D_KHR) {
+        int handled;
+        EGLImageKHR image = texture_image(dpy, ctx, (GLuint)(uintptr_t)buffer, attribs, &handled);
+        if (handled)
+            return image;
+    }
     REAL(EGLImageKHR, eglCreateImageKHR, (EGLDisplay, EGLContext, EGLenum, EGLClientBuffer, const EGLint *))
     return p_eglCreateImageKHR ? p_eglCreateImageKHR(dpy, ctx, target, buffer, attribs) : EGL_NO_IMAGE_KHR;
 }
@@ -703,8 +1049,26 @@ TRACED_VOID(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT", (unsigned id, un
             (id, pname, v))
 TRACED_VOID(BeginQueryEXT, "glBeginQueryEXT", (unsigned target, unsigned id), (target, id))
 TRACED_VOID(EndQueryEXT, "glEndQueryEXT", (unsigned target), (target))
-TRACED_VOID(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES", (unsigned target, void *image),
-            (target, image))
+static void (*p_tr_EGLImageTargetTexture2DOES)(unsigned target, void *image);
+static void tr_EGLImageTargetTexture2DOES(unsigned target, void *image)
+{
+    CHAM_NOTE_CALL("glEGLImageTargetTexture2DOES");
+    p_tr_EGLImageTargetTexture2DOES(target, image);
+    if (target == GL_TEXTURE_2D && opaque_find(image, 0)) {
+        /* Texture swizzles are OpenGL ES 3's; an ES 2 compositor (wlroots)
+         * has a shader of its own for textures without alpha. */
+        static const GLubyte *(*get_string)(GLenum);
+        static void (*tex_parameteri)(GLenum, GLenum, GLint);
+        if (!tex_parameteri) {
+            *(void **)&get_string = cham_gl_real("glGetString");
+            *(void **)&tex_parameteri = cham_gl_real("glTexParameteri");
+        }
+        const char *v = get_string ? (const char *)get_string(GL_VERSION) : NULL;
+        int major = 0;
+        if (tex_parameteri && v && sscanf(v, "OpenGL ES %d", &major) == 1 && major >= 3)
+            tex_parameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_ONE);
+    }
+}
 TRACED_VOID(EGLImageTargetRenderbufferStorageOES, "glEGLImageTargetRenderbufferStorageOES",
             (unsigned target, void *image), (target, image))
 TRACED(EGLSyncKHR, CreateSyncKHR, "eglCreateSyncKHR", (EGLDisplay d, EGLenum t, const EGLint *a), (d, t, a))
@@ -746,8 +1110,13 @@ static const struct {
     OWN(eglQueryString),
     OWN(eglCreateImage),
     {"eglCreateImageKHR", (void *)shim_eglCreateImageKHR},
+    OWN(eglDestroyImage),
+    {"eglDestroyImageKHR", (void *)shim_eglDestroyImageKHR},
+    {"eglExportDMABUFImageQueryMESA", (void *)shim_eglExportDMABUFImageQueryMESA},
+    {"eglExportDMABUFImageMESA", (void *)shim_eglExportDMABUFImageMESA},
     {"eglQueryDmaBufFormatsEXT", (void *)shim_eglQueryDmaBufFormatsEXT},
     {"eglQueryDmaBufModifiersEXT", (void *)shim_eglQueryDmaBufModifiersEXT},
+    {"eglQueryDevicesEXT", (void *)shim_eglQueryDevicesEXT},
     {"eglQueryDisplayAttribEXT", (void *)shim_eglQueryDisplayAttribEXT},
     {"eglQueryDisplayAttribKHR", (void *)shim_eglQueryDisplayAttribEXT},
     {"eglQueryDeviceStringEXT", (void *)shim_eglQueryDeviceStringEXT},
@@ -760,7 +1129,7 @@ static const struct {
     OWN(eglBindAPI), OWN(eglBindTexImage), OWN(eglChooseConfig), OWN(eglClientWaitSync), OWN(eglCopyBuffers),
     OWN(eglCreatePbufferFromClientBuffer), OWN(eglCreatePbufferSurface), OWN(eglCreatePixmapSurface),
     OWN(eglCreatePlatformPixmapSurface), OWN(eglCreatePlatformWindowSurface), OWN(eglCreateSync),
-    OWN(eglCreateWindowSurface), OWN(eglDestroyContext), OWN(eglDestroyImage), OWN(eglDestroySurface),
+    OWN(eglCreateWindowSurface), OWN(eglDestroyContext), OWN(eglDestroySurface),
     OWN(eglDestroySync), OWN(eglGetConfigAttrib), OWN(eglGetConfigs), OWN(eglGetSyncAttrib),
     OWN(eglInitialize), OWN(eglMakeCurrent), OWN(eglQueryContext), OWN(eglQuerySurface), OWN(eglReleaseTexImage),
     OWN(eglReleaseThread), OWN(eglSurfaceAttrib), OWN(eglSwapBuffers), OWN(eglSwapInterval), OWN(eglWaitClient),

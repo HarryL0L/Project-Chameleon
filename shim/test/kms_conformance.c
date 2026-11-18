@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,25 +64,108 @@ static uint32_t prop(int fd, uint32_t obj, uint32_t type, const char *name, uint
 }
 
 #ifdef REF_KERNEL
-static uint32_t buffer(int fd, uint32_t *pitch)
+static uint32_t sized_buffer(int fd, uint32_t w, uint32_t h, uint32_t format, uint32_t *pitch)
 {
-    struct drm_mode_create_dumb d = {.width = g_mode.hdisplay, .height = g_mode.vdisplay, .bpp = 32};
+    (void)format;
+    struct drm_mode_create_dumb d = {.width = w, .height = h, .bpp = 32};
     ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &d);
     *pitch = d.pitch;
     return d.handle;
 }
 #else
 #include <gbm.h>
-static uint32_t buffer(int fd, uint32_t *pitch)
+static uint32_t sized_buffer(int fd, uint32_t w, uint32_t h, uint32_t format, uint32_t *pitch)
 {
     static struct gbm_device *gbm;
     if (!gbm)
         gbm = gbm_create_device(fd);
-    struct gbm_bo *bo = gbm_bo_create(gbm, g_mode.hdisplay, g_mode.vdisplay, DRM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+    struct gbm_bo *bo = gbm_bo_create(gbm, w, h, format, GBM_BO_USE_SCANOUT);
     *pitch = gbm_bo_get_stride(bo);
     return gbm_bo_get_handle(bo).u32;
 }
 #endif
+
+static uint32_t buffer(int fd, uint32_t *pitch)
+{
+    return sized_buffer(fd, g_mode.hdisplay, g_mode.vdisplay, DRM_FORMAT_XRGB8888, pitch);
+}
+
+/* A w x h framebuffer in `format`. */
+static uint32_t sized_framebuffer(int fd, uint32_t w, uint32_t h, uint32_t format)
+{
+    uint32_t pitch, handle = sized_buffer(fd, w, h, format, &pitch);
+    struct drm_mode_fb_cmd2 c = {.width = w, .height = h, .pixel_format = format, .handles = {handle},
+                                 .pitches = {pitch}};
+    if (ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &c))
+        result("ADDFB2", -1);
+    return c.fb_id;
+}
+
+static int commit(int fd, uint32_t flags, uint32_t n, const uint32_t *objs, const uint32_t *counts,
+                  const uint32_t *props, const uint64_t *values, uint64_t reserved);
+
+/* The cursor plane, as vkms has one: any size and position, no scaling,
+ * commits of it alone complete like page flips. */
+static void cursor_checks(int fd)
+{
+    uint32_t planes[8], cursor = 0;
+    struct drm_mode_get_plane_res pr = {.plane_id_ptr = (uintptr_t)planes, .count_planes = 8};
+    ioctl(fd, DRM_IOCTL_MODE_GETPLANERESOURCES, &pr);
+    for (uint32_t i = 0; i < pr.count_planes && i < 8; i++) {
+        uint64_t type = 0;
+        prop(fd, planes[i], DRM_MODE_OBJECT_PLANE, "type", &type);
+        if (type == 2)
+            cursor = planes[i];
+    }
+    printf("%-60s %s\n", "  a cursor plane", yes(cursor));
+    if (!cursor)
+        return;
+    struct drm_get_cap cw = {.capability = DRM_CAP_CURSOR_WIDTH}, ch = {.capability = DRM_CAP_CURSOR_HEIGHT};
+    ioctl(fd, DRM_IOCTL_GET_CAP, &cw);
+    ioctl(fd, DRM_IOCTL_GET_CAP, &ch);
+    printf("%-60s %llux%llu\n", "  cursor size", (unsigned long long)cw.value, (unsigned long long)ch.value);
+    static const char *const names[] = {"FB_ID", "CRTC_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H",
+                                        "SRC_X", "SRC_Y", "SRC_W", "SRC_H"};
+    uint32_t props[10], counts[1] = {10};
+    for (int i = 0; i < 10; i++)
+        props[i] = prop(fd, cursor, DRM_MODE_OBJECT_PLANE, names[i], NULL);
+    uint32_t fb64 = sized_framebuffer(fd, 64, 64, DRM_FORMAT_ARGB8888);
+    uint32_t fb128 = sized_framebuffer(fd, 128, 128, DRM_FORMAT_ARGB8888);
+    uint32_t fbx = sized_framebuffer(fd, 64, 64, DRM_FORMAT_XRGB8888);
+#define CURSOR(flags, fb, x, y, w, h, sx, sw, sh)                                                         \
+    commit(fd, (flags), 1, &cursor, counts, props,                                                       \
+           (uint64_t[]){(fb), (fb) ? g_crtc : 0, (uint64_t)(int64_t)(x), (uint64_t)(int64_t)(y), (w), (h),  \
+                        (uint64_t)(sx) << 16, 0, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16},          \
+           0)
+    const uint32_t t = DRM_MODE_ATOMIC_TEST_ONLY, flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT;
+    /* The plane is on no CRTC yet: a commit of it alone has none for an event. */
+    result("PAGE_FLIP_EVENT, only a plane on no CRTC",
+           commit(fd, flip, 1, &cursor, (uint32_t[]){1}, &props[2], (uint64_t[]){5}, 0));
+    result("cursor 64x64 at 100,100", CURSOR(0, fb64, 100, 100, 64, 64, 0, 64, 64));
+    result("cursor alone, NONBLOCK | PAGE_FLIP_EVENT", CURSOR(flip, fb64, 120, 110, 64, 64, 0, 64, 64));
+    result("...again while it is pending", CURSOR(flip, fb64, 130, 110, 64, 64, 0, 64, 64));
+    char ev[64];
+    struct pollfd pfd = {fd, POLLIN, 0};
+    printf("%-60s %s\n", "  its event arrives", yes(poll(&pfd, 1, 1000) == 1 && read(fd, ev, sizeof ev) > 0));
+    result("cursor partly off the top left (test)", CURSOR(t, fb64, -20, -30, 64, 64, 0, 64, 64));
+    result("cursor past the right edge (test)", CURSOR(t, fb64, g_mode.hdisplay - 10, 10, 64, 64, 0, 64, 64));
+    result("cursor off the screen (test)", CURSOR(t, fb64, g_mode.hdisplay + 10, 10, 64, 64, 0, 64, 64));
+    result("cursor 128x128 (test)", CURSOR(t, fb128, 10, 10, 128, 128, 0, 128, 128));
+    result("cursor scaled 64x64 to 32x32 (test)", CURSOR(t, fb64, 10, 10, 32, 32, 0, 64, 64));
+    result("cursor 32x32 part of its buffer (test)", CURSOR(t, fb64, 10, 10, 32, 32, 0, 32, 32));
+    result("cursor part past its buffer's edge (test)", CURSOR(t, fb64, 10, 10, 32, 32, 48, 32, 32));
+    result("cursor XRGB8888 (test)", CURSOR(t, fbx, 10, 10, 64, 64, 0, 64, 64));
+    uint32_t one = 1;
+    uint64_t zero = 0, crtc = g_crtc;
+    result("cursor framebuffer without a CRTC (test)", commit(fd, t, 1, &cursor, &one, &props[1], &zero, 0));
+    result("cursor off", CURSOR(0, 0, 0, 0, 0, 0, 0, 0, 0));
+    result("cursor CRTC without a framebuffer (test)", commit(fd, t, 1, &cursor, &one, &props[1], &crtc, 0));
+    uint64_t fb_id = 9, crtc_id = 9;
+    prop(fd, cursor, DRM_MODE_OBJECT_PLANE, "FB_ID", &fb_id);
+    prop(fd, cursor, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &crtc_id);
+    printf("%-60s %s, %s\n", "  cursor FB_ID / CRTC_ID when off", fb_id ? "set" : "0", crtc_id ? "set" : "0");
+#undef CURSOR
+}
 
 static uint32_t framebuffer(int fd)
 {
@@ -266,6 +350,25 @@ int main(void)
     result("ACTIVE = 2", commit(fd, t, 1, &g_crtc, &one, &p_active, &v2, 0));
     result("NULL objects pointer, 1 object", commit(fd, t, 1, NULL, &one, &p_fb, &v_fb, 0));
     result("nothing (0 objects)", commit(fd, t, 0, NULL, NULL, NULL, NULL, 0));
+    /* An event is some CRTC's: a commit without one can't have it. */
+    result("PAGE_FLIP_EVENT, nothing (0 objects)", commit(fd, DRM_MODE_PAGE_FLIP_EVENT, 0, NULL, NULL, NULL, NULL, 0));
+    /* IN_FENCE_FD: -1 or a sync file, once per plane. */
+    uint32_t p_fence = prop(fd, g_plane, DRM_MODE_OBJECT_PLANE, "IN_FENCE_FD", NULL);
+    uint32_t fence_props[2] = {p_fence, p_fence}, two = 2;
+    uint64_t no_fences[2] = {(uint64_t)-1, (uint64_t)-1}, v_minus2 = (uint64_t)-2, v_closed = 9999;
+    uint64_t v_null = (uint64_t)open("/dev/null", O_RDONLY | O_CLOEXEC);
+    result("IN_FENCE_FD -1 twice", commit(fd, t, 1, &g_plane, &two, fence_props, no_fences, 0));
+    result("IN_FENCE_FD -2", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_minus2, 0));
+    result("IN_FENCE_FD not an open file", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_closed, 0));
+    result("IN_FENCE_FD a file that is no fence", commit(fd, t, 1, &g_plane, &one, &p_fence, &v_null, 0));
+    close((int)v_null);
+    /* Which error a bad pointer gives depends on what was read before it. */
+    const void *bad = (const void *)8;
+    result("unknown object, bad other pointers", commit(fd, t, 1, &unknown, bad, bad, bad, 0));
+    result("bad values pointer", commit(fd, t, 1, &g_plane, &one, &p_fb, bad, 0));
+    result("a property the object lacks, bad values pointer", commit(fd, t, 1, &g_crtc, &one, &p_fb, bad, 0));
+    uint32_t two_objs[2] = {g_plane, unknown}, two_counts[2] = {1, 1}, two_props[2] = {p_fb, p_fb};
+    result("an unknown object after a bad values pointer", commit(fd, t, 2, two_objs, two_counts, two_props, bad, 0));
     result("LIST_LESSEES pad set", ioctl(fd, DRM_IOCTL_MODE_LIST_LESSEES, &(struct drm_mode_list_lessees){.pad = 1}));
 
     printf("== framebuffer lifetime, CRTC states\n");
@@ -282,6 +385,21 @@ int main(void)
         values[4 + i] = plane_values[i];
     }
     result("modeset showing fb1", commit(fd, DRM_MODE_ATOMIC_ALLOW_MODESET, 3, objs, counts, props, values, 0));
+    /* Long lists (fb1 is shown: setting it again changes nothing). */
+    static uint32_t many_props[600];
+    static uint64_t many_values[600];
+    for (int i = 0; i < 600; i++) {
+        many_props[i] = p_fb;
+        many_values[i] = fb1;
+    }
+    uint32_t n_many = 600, n_some = 100;
+    result("the same property 600 times", commit(fd, t, 1, &g_plane, &n_many, many_props, many_values, 0));
+    result("the same property 100 times", commit(fd, t, 1, &g_plane, &n_some, many_props, many_values, 0));
+    many_props[99] = p_active;
+    result("100 properties, the last one the object lacks",
+           commit(fd, t, 1, &g_plane, &n_some, many_props, many_values, 0));
+    printf("== cursor plane\n");
+    cursor_checks(fd);
     result("CLOSEFB fb1 (on screen)", ioctl(fd, DRM_IOCTL_MODE_CLOSEFB, &(struct drm_mode_closefb){.fb_id = fb1}));
     result("commit fb1 again after CLOSEFB", commit(fd, 0, 1, &g_plane, &one, &p_fb, &v_fb, 0));
     result("RMFB fb1 after CLOSEFB", ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb1));

@@ -43,14 +43,19 @@ enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_TABLET, DEV_COUNT }
 #define FRAME_EVENTS (TOUCH_SLOTS * 5 + 4)
 #define AXIS_MAX 65535
 
-#define OUT_MAX 16384 /* bytes queued for a reader whose socket is full */
+/* Bytes queued for a reader whose socket is full. The kernel puts events
+ * straight into each reader's queue, so none are lost on the way; here a
+ * reader's process takes them from a socket, and frames wait for it rather
+ * than being lost when it lags. Only a reader this far behind (a stopped
+ * program) loses frames. */
+#define OUT_MAX (1 << 20)
 
 struct reader {
     int fd;   /* 0 = free; closed by the accept thread only */
     int dead; /* the program went away; the accept thread closes it */
     int lost; /* frames didn't fit: it gets a fresh STATE once the queue drains */
-    size_t out_len;
-    char out[OUT_MAX];
+    size_t out_len, out_cap;
+    char *out; /* grown as needed, up to OUT_MAX */
     size_t in_len; /* a request read in part */
     char in[sizeof(struct cham_evdev_record) + sizeof(uint32_t) + sizeof(struct input_absinfo)];
 };
@@ -84,6 +89,7 @@ static struct mt {         /* a multitouch device (protocol B) */
     int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
 } g_touch, g_pad;
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
+static uint32_t g_window_w, g_window_h; /* input thread: the app's whole window, 0 = not reported */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
 static int64_t g_event_time; /* ns, from CHAM_INPUT_TIME; 0 = none yet */
 static struct device *g_pointer = &g_dev[DEV_MOUSE]; /* the mouse or the tablet, whichever moved last */
@@ -223,6 +229,25 @@ static int write_all(int fd, const void *buf, size_t len)
 
 /* ---- the readers' streams (under g_evdev_lock) ---- */
 
+/* Room for `len` more bytes in r's queue, up to OUT_MAX. */
+static int reserve(struct reader *r, size_t len)
+{
+    size_t need = r->out_len + len;
+    if (need > OUT_MAX)
+        return 0;
+    if (need <= r->out_cap)
+        return 1;
+    size_t cap = r->out_cap ? r->out_cap : 16384;
+    while (cap < need)
+        cap *= 2;
+    char *out = realloc(r->out, cap < OUT_MAX ? cap : OUT_MAX);
+    if (!out)
+        return 0;
+    r->out = out;
+    r->out_cap = cap < OUT_MAX ? cap : OUT_MAX;
+    return 1;
+}
+
 static void append(struct reader *r, uint32_t type, const void *a, size_t a_len, const void *b, size_t b_len)
 {
     struct cham_evdev_record h = {type, (uint32_t)(a_len + b_len)};
@@ -250,7 +275,8 @@ static void send_out(struct device *d, struct reader *r)
         memmove(r->out, r->out + n, r->out_len);
         if (!r->out_len && r->lost) {
             r->lost = 0;
-            append(r, CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
+            if (reserve(r, sizeof(struct cham_evdev_record) + sizeof d->state))
+                append(r, CHAM_EVDEV_STATE, &d->state, sizeof d->state, NULL, 0);
         }
     }
 }
@@ -264,7 +290,7 @@ static void queue_record(struct device *d, struct reader *r, uint32_t type, cons
     if (r->dead)
         return;
     int frame = type == CHAM_EVDEV_FRAME || type == CHAM_EVDEV_FRAME_GRABBED;
-    int fits = r->out_len + sizeof(struct cham_evdev_record) + a_len + b_len <= sizeof r->out;
+    int fits = reserve(r, sizeof(struct cham_evdev_record) + a_len + b_len);
     if (frame && (r->lost || !fits))
         r->lost = 1;
     else if (fits)
@@ -438,7 +464,8 @@ static void *server_main(void *arg)
             if (!r->dead)
                 continue;
             close(r->fd);
-            r->fd = 0;
+            free(r->out);
+            *r = (struct reader){0};
             d->reader_count--;
             if (d->grab == i)
                 d->grab = -1;
@@ -632,13 +659,27 @@ static void select_slot(struct device *d, struct mt *t, int slot)
     abs_value(d, ABS_MT_SLOT, slot, &t->cur_slot);
 }
 
-/* pos as fractions of the screen; the touchpad's axes are its pixels. */
+void evdev_window(uint32_t width, uint32_t height)
+{
+    g_window_w = width;
+    g_window_h = height;
+}
+
+/* pos as fractions of the screen; the touchpad's axes are its pixels. The
+ * touchpad is the app's whole window, also where the keyboard covers the
+ * desktop, so its pixels don't change with the desktop's size; an app that
+ * doesn't report the window gives fractions of the desktop. A window longer
+ * than the touchpad (the session started before the app reported its screen,
+ * so the touchpad has the size that was assumed) is scaled onto it: all of
+ * the glass reaches the touchpad, as on any touchpad smaller than its
+ * screen. */
 static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
 {
     int32_t x = (int32_t)CHAM_INPUT_X(pos), y = (int32_t)CHAM_INPUT_Y(pos);
     if (t == &g_pad) {
-        uint32_t w, h, mm_w, mm_h;
-        kms_mode_size(&w, &h);
+        uint32_t w = g_window_w, h = g_window_h, mm_w, mm_h;
+        if (!w || !h)
+            kms_mode_size(&w, &h);
         if (!w || !h) /* before the compositor's first modeset */
             kms_screen_size(&w, &h, &mm_w, &mm_h);
         pthread_mutex_lock(&g_evdev_lock);
@@ -646,6 +687,11 @@ static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
         pthread_mutex_unlock(&g_evdev_lock);
         x = (int32_t)((int64_t)x * (int32_t)w / 65536);
         y = (int32_t)((int64_t)y * (int32_t)h / 65536);
+        int32_t longer = (int32_t)(w > h ? w : h);
+        if (size > 0 && longer > size) {
+            x = (int32_t)((int64_t)x * size / longer);
+            y = (int32_t)((int64_t)y * size / longer);
+        }
         if (size > 0) {
             x = x < size ? x : size - 1;
             y = y < size ? y : size - 1;

@@ -9,6 +9,7 @@ own licence (below), not Project Chameleon's GPL.
 | `xf86drm.h` | [libdrm](https://gitlab.freedesktop.org/mesa/drm) 2.4.134 | MIT |
 | `libdrm/drm.h`, `libdrm/drm_mode.h`, `libdrm/drm_fourcc.h` | libdrm 2.4.134 (`include/drm/`, copies of the Linux kernel's UAPI headers) | MIT |
 | `gbm.h` | [Mesa](https://gitlab.freedesktop.org/mesa/mesa) 25 (`src/gbm/main/gbm.h`) | MIT |
+| `vulkan/vulkan_core.h`, `vulkan/vk_platform.h`, `vulkan/vulkan_android.h`, `vk_video/*.h` | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) vulkan-sdk-1.4.363.0 (`include/`): the NDK's own are Vulkan 1.3 | Apache-2.0 OR MIT |
 | `glvnd/libeglabi.h`, `glvnd/GLdispatchABI.h` | [libglvnd](https://gitlab.freedesktop.org/glvnd/libglvnd) 1.7.0 (`include/glvnd/`) | MIT-style (NVIDIA) |
 
 The copyright and licence notices are at the top of each file.

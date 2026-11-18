@@ -6,10 +6,45 @@
 #ifndef CHAM_SHIM_H
 #define CHAM_SHIM_H
 
+#include <dlfcn.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/types.h>
 
 #define CHAM_EXPORT __attribute__((visibility("default")))
+
+/* dlopen() for one of Android's own libraries. Loaded the plain way, such a
+ * library and all it needs sit among the program's own: there they answer to
+ * their names, so that a program asking for "libvulkan.so" gets Android's
+ * where it means Termux's Vulkan loader, and they take Termux's libraries
+ * for theirs of the same name (libz.so). Termux has a helper against that,
+ * libtermux-platform-ns.so of its libandroid-stub package: it loads Android's
+ * libraries into one linker namespace of their own per process, the one
+ * Termux's own stand-ins for Android's libraries use too. Without the helper,
+ * or with CHAMELEON_ANDROID_NAMESPACE=0, the plain way. */
+static inline void *cham_android_dlopen(const char *path)
+{
+    static uintptr_t helper; /* 0: not looked for yet, 1: none, else its platform_dlopen() */
+    uintptr_t h = __atomic_load_n(&helper, __ATOMIC_ACQUIRE);
+    if (!h) {
+        const char *use = getenv("CHAMELEON_ANDROID_NAMESPACE");
+        void *fn = NULL;
+        if (!use || use[0] != '0' || use[1]) {
+            const char *prefix = getenv("PREFIX");
+            char lib[4096];
+            snprintf(lib, sizeof lib, "%s/lib/libtermux-platform-ns.so",
+                     prefix && *prefix ? prefix : "/data/data/com.termux/files/usr");
+            void *ns = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+            fn = ns ? dlsym(ns, "platform_dlopen") : NULL;
+        }
+        h = fn ? (uintptr_t)fn : 1;
+        __atomic_store_n(&helper, h, __ATOMIC_RELEASE);
+    }
+    if (h != 1)
+        return ((void *(*)(const char *, int))h)(path, RTLD_NOW | RTLD_LOCAL);
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +70,7 @@ struct cham_bo {
     void (*release)(AHardwareBuffer *); /* for cham_bo_wrap()'s buffers */
     int base_refs;     /* cham_bo_create(): references to the dmabuf the buffer holds itself */
     int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */
+    int in_service;    /* chameleon-kernel has it (a GEM handle): its dmabuf keeps it alive there */
     struct cham_bo *next;
 };
 
@@ -98,11 +134,12 @@ CHAM_EXPORT const uint32_t *cham_formats(int *count);
 
 /* AHB -> EGLClientBuffer is done by the EGL shim with the real driver. */
 CHAM_EXPORT AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo);
-/* The Wayland app's buffer registered with chameleon-kernel (clients.c)
- * whose dmabuf `fd` refers to (any dup of it), with a reference for the
- * caller to give back with cham_client_ahb_release; NULL if none. */
-CHAM_EXPORT AHardwareBuffer *cham_client_ahb_acquire(int fd);
-CHAM_EXPORT void cham_client_ahb_release(AHardwareBuffer *b);
+/* The session's buffer whose dmabuf `fd` refers to (any dup of it): another
+ * process's gbm buffer or a Wayland app's registered one, as chameleon-kernel
+ * knows them; with a reference for the caller to give back with
+ * cham_buffer_ahb_release; NULL if none. */
+CHAM_EXPORT AHardwareBuffer *cham_buffer_ahb_acquire(int fd);
+CHAM_EXPORT void cham_buffer_ahb_release(AHardwareBuffer *b);
 
 CHAM_EXPORT void cham_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
