@@ -5,8 +5,8 @@
 <h1 align="center">Project Chameleon</h1>
 
 <p align="center">
-  <b>Experimental display for Termux Wayland compositors, aiming to be universal.</b><br>
-  The Android app is the compositor's screen, drawn by the phone's own GPU · works with KWin, including full Plasma · <code>AHardwareBuffer</code>s, no CPU copies · no root
+  <b>Makes an Android phone look like a Linux PC with a graphics card.</b><br>
+  Wayland compositors in Termux run on it as they are · full Plasma on KWin · the phone's own GPU · no root
 </p>
 
 <p align="center">
@@ -21,353 +21,235 @@
 > these changes when this branch is merged into it.
 
 <p align="center">
-  <img src="branding/mascot.gif" width="360" alt="Pixel-art chameleon next to a Wayland-style disc">
+  <img src="branding/gears.gif" width="300" alt="Two pixel-art gears, a big one and a small one, turning together">
 </p>
 
 ---
 
-Chameleon gives Linux graphics software in Termux what it expects from a PC
-with a real graphics card, backed by Android: a display, GPU buffers and a GPU
-driver. The first target is the Termux build of **KWin**, with a whole
-Plasma session on top of it:
+Linux desktop software expects a kernel with a display, a GPU and input
+devices behind standard interfaces: DRM/KMS, GBM, EGL, Vulkan, udev and
+evdev. Android has none of those for an app. Chameleon provides them in
+Termux, backed by public Android APIs, so the software above needs no
+Chameleon-specific code. That goes for any compositor with a DRM backend:
+KWin, wlroots compositors such as sway, Weston, Mutter.
 
-- KWin runs with its normal **DRM backend**, not nested inside another
-  compositor, and with no Chameleon-specific patches.
-- Rendering goes through Android's **vendor GPU driver** (Mali, Adreno, …)
-  via EGL/GLES. It doesn't use a software rasteriser.
-- Finished frames travel to an Android app as **`AHardwareBuffer`s plus
-  fences**. The pixels are never copied through the CPU.
-- Touch (as a touchscreen or a trackpad), mouse, hardware keyboards and the
-  Android on-screen keyboard are fed back into KWin. Shortcuts Android keeps
-  for itself, like Alt+Tab and Meta, need the app's optional accessibility
-  service.
+- **KWin runs on its normal DRM backend with no Chameleon-specific
+  patches**, with a whole Plasma session on top. It is not nested in
+  another compositor.
+- **The compositor and GPU apps render on the phone's own GPU driver**
+  (Mali, Adreno, …), through OpenGL ES and Vulkan.
+- **A GPU app's window reaches the compositor without a copy**, as an
+  `AHardwareBuffer`. The finished desktop frame then takes one GPU copy on
+  its way to Android's display, so the path is not zero-copy end to end.
+- **Programs that draw on the CPU work as on any Linux desktop**: `wl_shm`
+  windows and X11 apps through Xwayland are uploaded by the compositor, and
+  desktop OpenGL falls back to Mesa's software renderer.
+- **Input comes back as real devices**: touchscreen or trackpad, mouse,
+  hardware keyboards, and the Android on-screen keyboard as the desktop's
+  input method.
 
-It works by giving KWin the few things it expects from a Linux PC, a KMS
-display device, GBM buffers and an EGL driver, all backed by Android APIs.
-The same pieces are meant to carry other Wayland compositors and apps later;
-the EGL driver already renders Wayland apps on the GPU.
+## What works today
+
+Seen on a Mali-G77 phone on Android 13; the Vulkan items also on an
+Adreno 618 on Android 17:
+
+- A full Plasma 6.8 session: start, rotation, the keyboard resizing the
+  desktop, 60 and 120 Hz, screen off and on, long stretches in the
+  background, logout.
+- Qt Quick apps (plasmashell, System Settings) and Firefox on the GPU,
+  including WebGL in Firefox.
+- Vulkan programs in Wayland windows, on the phone's driver or on a driver
+  of your own below Chameleon's (Mesa's Turnip or PanVK built for Android).
+- A cursor plane, page flips timed on the panel's vsync, and a render
+  node next to the card, as on a PC.
+- Typing with the Android keyboard (Gboard, HeliBoard, AOSP), with
+  suggestions, emoji and pasted text.
+- Clipboard text both ways between Android and the desktop.
+- Screen and window recording through KWin's PipeWire screencast, when
+  PipeWire runs in the session.
+
+Not there yet: GPU rendering for X11 apps (Xwayland draws on the CPU),
+windows of Vulkan drivers other than Chameleon's, and desktop OpenGL on the
+GPU. A keyboard's autocorrection can still double a word in some apps.
+GNOME Shell (Mutter), sway and Weston have run on the same device layer
+too, but get far less testing than KWin, which every change is tried with
+on phones.
 
 ## How it works
 
-> The diagrams are interactive on GitHub: use the controls in the corner of
-> each one to zoom, pan or open it full screen.
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/architecture-dark.svg">
+    <img src="branding/architecture-light.svg" width="100%" alt="Three layers. Linux as packaged: a compositor (KWin, wlroots, Weston, Mutter), Wayland apps, Vulkan apps. Chameleon, the device layer: chameleon-kernel, libgbm, an EGL vendor, a Vulkan driver. Android, without root: the Chameleon app, the GPU driver, SurfaceFlinger. Between Linux and Chameleon are the standard interfaces DRM/KMS, GBM, EGL and GLES, Vulkan, udev and evdev, and the input method; between Chameleon and Android are AHardwareBuffer, sync fences, ASurfaceControl and AImageReader.">
+  </picture>
+</p>
 
-```mermaid
-flowchart TB
-    subgraph T["Termux"]
-        direction TB
-        CMD(["chameleon startplasma-wayland"])
-        APPS["Wayland apps<br/>Konsole, Dolphin, Firefox …"]
-        subgraph K["kwin_wayland process: Termux's KWin, no Chameleon patches, DRM backend"]
-            direction TB
-            CORE["KWin compositor<br/>scene · windows · DRM backend"]
-            GBM["libgbm.so<br/>gbm_bo = AHardwareBuffer"]
-            NODE["libchameleon.so<br/>card node (in every program of the session)"]
-            UDEV["libchameleon_udev.so<br/>udev · sysfs · /dev/input nodes (in every program)"]
-        end
-        subgraph KS["chameleon-kernel process: what the kernel would be"]
-            direction TB
-            KMS["fake KMS device<br/>per-file DRM state · page flips"]
-            INP["input thread<br/>evdev devices · text · clipboard"]
-            REG["apps' GPU buffers"]
-        end
-        GLVND["glvnd<br/>libEGL.so.1 · libGLESv2.so.2"]
-        VEND["libEGL_chameleon.so<br/>glvnd EGL vendor (KWin and apps)"]
-    end
+Only standard interfaces face upward, and one socket protocol faces
+downward, to the Chameleon app. Nothing in between knows which compositor
+is running.
 
-    subgraph A["Android"]
-        direction TB
-        DRV["vendor GPU driver<br/>Mali · Adreno · …"]
-        APP["Chameleon app<br/>SurfaceView + ASurfaceControl"]
-        SF["SurfaceFlinger → display"]
-        TOUCH["touch · mouse · keyboards"]
-    end
+| Piece | Stands in for | What it does |
+|---|---|---|
+| `chameleon-kernel` | the kernel | One process per session. Serves the card `/dev/dri/card0` with atomic modesetting, a primary and a cursor plane and vsync-timed page flips; its render node `renderD128`; the evdev input devices; and the link to the app. |
+| `libchameleon.so`, `libchameleon_udev.so` | device nodes, udev, sysfs | Preloaded into every program of the session. Opening the card, its ioctls, `/dev/input/event*`, udev listings and hotplug events all behave as on Linux and are answered by `chameleon-kernel`. |
+| `libgbm.so` | Mesa's libgbm | Every `gbm_bo` is an `AHardwareBuffer`. Its dma-buf is the one inside the gralloc handle, so the usual gbm → PRIME → framebuffer → EGL import path works unchanged. |
+| `libEGL_chameleon.so` | Mesa's EGL driver | A glvnd vendor on Android's `libEGL` and `libGLESv2`. Adds the GBM and Wayland platforms, dma-buf import and export, and the card as an `EGLDevice`. |
+| `libvulkan_chameleon.so` | Mesa's Vulkan driver | A driver for the Vulkan loader on Android's `libvulkan`. Names the card's nodes and gives programs Wayland windows. |
+| `chameleon-ime` | an on-screen keyboard | The Android keyboard as the compositor's input method (`input-method-v1`). |
+| `chameleon-init` | `systemd --user` | The session's first process. Adopts and reaps programs that detach, so none becomes an orphan of Android's init (some phones' process cleaners kill those). |
+| The Chameleon app | the monitor and the input hardware | Shows each frame through `ASurfaceControl` and sends touch, mouse, keys, keyboard text, window size and refresh rate back. |
 
-    CMD --> CORE
-    APPS <-->|Wayland| CORE
-    APPS -->|EGL / GLES| GLVND
-    APPS -.->|"window buffers<br/>(AHardwareBuffer)"| REG
-    NODE -.->|"dmabuf import"| REG
-    CORE -->|EGL / GLES| GLVND --> VEND --> DRV
-    CORE -->|buffers| GBM
-    GBM -.->|gralloc| DRV
-    CORE -->|"DRM ioctls on /dev/dri/card0"| NODE
-    NODE -->|"system call arguments<br/>(the service reads KWin's memory)"| KMS
-    KMS <==>|"Unix socket<br/>frames + fences ⇄ page flips, window size, input"| APP
-    APP --> SF
-    TOUCH --> APP
-    KMS -->|CHAM_INPUT| INP
-    INP -->|"evdev devices"| UDEV -->|"udev · libinput"| CORE
-    INP -->|"input method"| CORE
+### One frame
 
-    classDef kwin fill:#6C4CF1,stroke:#4b32b8,color:#fff
-    classDef shim fill:#22B8E6,stroke:#1789ad,color:#06222c
-    classDef android fill:#3DDC84,stroke:#2aa862,color:#06220f
-    class KMS,GBM,VEND,INP,NODE,UDEV,REG shim
-    class CORE,GLVND,APPS,CMD kwin
-    class DRV,APP,SF,TOUCH android
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="branding/frame-dark.svg">
+    <img src="branding/frame-light.svg" width="100%" alt="One frame in five steps. Render: the compositor draws into a GPU buffer. Commit: an atomic commit on the card, with a fence. Present: the app copies the frame on the GPU and hands the copy to Android. Display: shown at the panel's next vsync. Page flip: the compositor is told, timed on that vsync.">
+  </picture>
+</p>
 
-Purple is KDE/Termux software as shipped, blue is Chameleon's shim, and green
-is Android. The card, the input devices and the link to the app live in
-`chameleon-kernel`, which `chameleon` starts for the session, as the kernel
-would serve them; KWin reaches the card through its device node. The service
-and the app talk over one Unix socket: it connects to
-`$PREFIX/tmp/chameleon-0`, where a small broker from the app's APK, running in
-Termux, hands the connection to the app.
+The compositor's buffer is an `AHardwareBuffer`, and its commit carries the
+render fence. The app copies the frame on the GPU into a buffer of its own,
+releases the compositor's buffer and queues the copy with
+`ASurfaceTransaction`. The page-flip event is stamped from Android's present
+fences, so the compositor plans its next frame on the panel's real vsync.
+While the app is closed or in the background, simulated flips keep the
+session running.
+
+### Starting a session
+
+`chameleon startplasma-wayland` does this, in order:
+
+1. Runs itself below `chameleon-init`, in a D-Bus session.
+2. Starts the app's broker and `chameleon-kernel`. The app is an ordinary
+   Android app and cannot open Termux's files, so a small broker from its
+   APK listens on a socket in Termux and passes connections to the app over
+   Binder.
+3. Preloads the device layer into the session, puts Chameleon's `libgbm`,
+   EGL vendor and Vulkan driver first, and clears `DISPLAY` and
+   `WAYLAND_DISPLAY`.
+4. Runs the command. With no display variables set, a compositor finds
+   `/dev/dri/card0` in udev and picks its DRM backend by itself. Nothing in
+   plasma-workspace changes and `--drm` is never passed.
 
 <details>
-<summary><b>🦎 The Chameleon app</b>: Android side, shows frames and collects input</summary>
+<summary><b>Display</b>: the card, modes, planes and page flips</summary>
 
-- A full-screen `SurfaceView` whose `ASurfaceControl` receives KWin's buffers
-  with `ASurfaceTransaction_setBuffer`, together with KWin's acquire fence.
-- It reports the surface size and the display's current refresh rate to KWin
-  (`CONFIG`). KWin sees them as the mode of a DSI connector, and the screen
-  follows the window when it rotates or resizes (see *Screen size* below).
-  Settings choose the orientation (rotate with the phone, portrait or
-  landscape) and whether the keyboard shrinks the desktop or covers it.
-- **Page flips:** they complete like on a real display engine (and like
-  VKMS): on the first vblank after the commit, with the vblanks following
-  SurfaceFlinger's latch times. The app copies the frame meanwhile
-  (`FRAME_QUEUED`) and reports each latch (`FRAME_DONE`). A flip also waits
-  until the previous copy is done and Android has latched what it should
-  have by then. On Android 12+ (back pressure, so Android drops no frame)
-  up to two frames may wait in Android: KWin aims its commit at the vblank,
-  while Android wants the buffer a few ms before its own latch, and the
-  second frame covers that gap. Before Android 12, one.
-- **Back from the background:** Android destroys the surface while the app
-  is hidden. The app keeps its copy of the last frame and shows it again on
-  the new surface, since KWin only draws when something changes.
-- **Input:** touches are sent as direct touch or trackpad gestures (your
-  choice in settings). Mouse and hardware keys are forwarded, and the
-  on-screen keyboard comes with an extra row (Esc, Tab, sticky Ctrl/Alt,
-  arrows, Home/End, PgUp/PgDn).
-- **Works with any Termux:** the app is an ordinary app, so it installs next
-  to Termux from GitHub or F-Droid. It can't open files in Termux, so the
-  `chameleon` launcher starts a small broker from the app's own APK
-  (`app_process`, as the Termux user). The broker listens on
-  `$PREFIX/tmp/chameleon-0` and passes each connection from KWin to the app
-  over Binder; the app accepts them only from Termux's user.
+- One connector with an EDID (the phone's physical size, the app's window
+  size and the panel's refresh rate as its mode), one CRTC, a primary plane
+  and a cursor plane. The cursor is its own Android layer, so moving the
+  pointer doesn't redraw the desktop.
+- Atomic commits behave as the kernel's do: `TEST_ONLY`, `EBUSY` while a
+  flip is pending, fences in and events out. Each open file has its own DRM
+  state, released when its last copy closes, even in a process that died.
+- **Screen size:** rotating the phone, or the keyboard shrinking the
+  desktop, changes the connector's mode and sends a hotplug event, exactly
+  like a monitor whose modes changed. The compositor re-reads the connector
+  and switches. A change of refresh rate (120 to 60 Hz in battery saver) is
+  followed the same way.
+- **Back from the background:** Android destroys the app's surface while it
+  is hidden. The app keeps the last frame and shows it again on return.
+- The card and the input devices are compared line by line with a real
+  Linux 6.8 kernel (vkms, virtio-gpu, uinput) booted in QEMU, on every
+  push.
 
-Code: [`android/`](android/) · protocol: [`common/chameleon_proto.h`](common/chameleon_proto.h)
+Code: [`shim/core/`](shim/core/) · protocol: [`common/chameleon_proto.h`](common/chameleon_proto.h)
 </details>
 
 <details>
-<summary><b>🖥️ chameleon-kernel</b>: a fake KMS display device</summary>
+<summary><b>GPU</b>: buffers, OpenGL ES and Vulkan</summary>
 
-- A process `chameleon` starts before the session, like the kernel under
-  any program. `libchameleon.so`, preloaded into every program of the
-  session, makes `/dev/dri/card0` (compositors find it in udev, like any
-  GPU) a device node:
-  opening it returns a pipe that behaves like a DRM card, `stat()` says it's
-  a character device, and each DRM `ioctl` goes to the service as the system
-  call's arguments. The service reads and writes the caller's memory itself,
-  as the kernel does, and keeps each open file's state (DRM master, client
-  caps, GEM handles), released when the file's last copy closes, even in a
-  process that died.
-- It offers one connector (with an EDID: "Chameleon", the phone's physical
-  size, the app's size and refresh rate as its preferred mode), one CRTC,
-  a primary plane and a cursor plane (the pointer is its own Android
-  layer, so moving it redraws nothing), with atomic
-  modesetting, `TEST_ONLY` commits, `EBUSY` while a flip is pending, and
-  page-flip events written to the pipe, timed on the display's vsync.
-- `/dev/dri/renderD128` is the card's render node, for programs that only
-  render: every GPU buffer of the session can be shared through the card's
-  nodes by PRIME, as on a real GPU.
-- An atomic commit sends a `PRESENT` to the app with the framebuffer's
-  `AHardwareBuffer` and KWin's render fence (`IN_FENCE_FD`). If the app is closed, a simulated
-  vblank keeps KWin running.
-- It also runs the input devices, the input thread and the table of the
-  session's GPU buffers, so a KWin that dies takes none of them along.
-  `libchameleon.so` keeps a crash reporter in programs that render with
-  Android's driver, which logs the last GL/EGL calls and a symbolised
-  backtrace.
-
-Code: [`shim/core/`](shim/core/)
-</details>
-
-<details>
-<summary><b>🧱 libgbm.so</b>: GBM buffers are AHardwareBuffers</summary>
-
-- A complete `libgbm` API: every `gbm_bo` is an `AHardwareBuffer` allocated
-  through gralloc.
-- A buffer's dmabuf fd is the gralloc handle's own dmabuf, so KWin's usual
-  path (gbm → PRIME fd → `DRM_IOCTL_MODE_ADDFB2` → EGL import) works
-  unchanged.
-
-Code: [`shim/gbm/`](shim/gbm/)
-</details>
-
-<details>
-<summary><b>🎨 libEGL_chameleon.so</b>: a glvnd EGL vendor for Android's GPU driver</summary>
-
-- Termux programs link glvnd's `libEGL.so.1` / `libGLESv2.so.2`, which load
-  *vendor* libraries. Chameleon is one: glvnd asks it for displays and for
-  every EGL and GL entry point, and it hands out Android's
-  `libEGL.so` / `libGLESv2.so`, i.e. the vendor driver.
-- **In a Chameleon session**, it adds what a Mesa GBM stack provides: the GBM platform,
-  and `EGL_EXT_image_dma_buf_import`, which imports a Chameleon buffer as its
-  `AHardwareBuffer` through `EGL_NATIVE_BUFFER_ANDROID`.
-- **Driver workarounds:** it rewrites GLSL `#if GL_ext` to
-  `#if defined(GL_ext)` (Mesa tolerates the bare form; strict drivers don't).
-  It can also hide extensions and drop context attributes that a driver
-  mishandles.
-- **Wayland apps on the GPU:** under a Chameleon KWin it also takes
-  `EGL_PLATFORM_WAYLAND_KHR`. Each `wl_egl_window` renders into an
-  `AImageReader`, a real Android window surface, so the driver's buffer
-  handling works as usual; a resize asks that window for buffers of the
-  new size, as a `SurfaceView` resizes. Every frame then reaches KWin as an
-  `AHardwareBuffer`: it is registered with `chameleon-kernel`, wrapped in a
-  `zwp_linux_dmabuf_v1` buffer and committed on the app's surface. Nothing
-  is copied, and frame callbacks pace the app.
+- **Buffers:** every GPU buffer of the session is an `AHardwareBuffer`
+  with a dma-buf. Any of them can be shared through the card's nodes by
+  PRIME, also after the process that made it has gone, as on a real GPU.
+- **Wayland apps (EGL):** each `wl_egl_window` renders into an
+  `AImageReader`, a real Android window, so the driver's own buffer
+  handling applies. Every frame then goes to the compositor as a
+  `zwp_linux_dmabuf_v1` buffer, uncopied, paced by frame callbacks.
 - **Qt without a rebuild:** Android's driver speaks OpenGL ES only, while
   Termux's Qt is built for desktop OpenGL. Qt already switches to OpenGL ES
-  on EGL implementations without desktop GL, as it does for NVIDIA's. So in
-  Qt apps on its Wayland platform, the vendor reports an EGL vendor string
-  that triggers that path, and stock Qt Quick apps (plasmashell, System
-  Settings…) render on the GPU. `CHAMELEON_EGL_QT=mesa` leaves them to Mesa.
-- **Scope:** apps that need desktop OpenGL itself, X11 windows, and Wayland
-  windows under any other compositor still go to Mesa.
+  on EGL implementations without desktop GL, and the vendor triggers that
+  path, so stock Qt Quick apps (plasmashell, System Settings) render on the
+  GPU.
+- **Firefox:** finds `libgbm.so.1` and the render node, and shares WebGL
+  frames through `EGL_MESA_image_dma_buf_export`.
+- **Vulkan:** programs get the phone's driver through Chameleon's, with
+  Wayland windows built on Android's own swapchain. With
+  `CHAMELEON_VULKAN_DRIVER=/path/driver.so` and Termux's `libadrenotools`
+  package, another Android-built driver runs below it instead, which can
+  give a phone a newer Vulkan than its own driver has.
+- **Driver quirks** are worked around in the EGL vendor, not required of
+  the phone: a GLSL construct strict drivers reject, extensions that
+  misbehave, context attributes a driver mishandles.
+- **Scope:** desktop OpenGL, X11 windows and windows under a compositor
+  that isn't on Chameleon still go to Mesa.
 
-Code: [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/)
+Code: [`shim/gbm/`](shim/gbm/), [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/), [`shim/vulkan/`](shim/vulkan/)
 </details>
 
 <details>
-<summary><b>⌨️ Input</b>: from Android touch to KWin</summary>
+<summary><b>Input</b>: touch, pointer, keys and the Android keyboard</summary>
 
-- The app sends `CHAM_INPUT` messages over the same socket: touch points,
-  trackpad fingers, mouse motion, buttons and wheels, hardware keys by Linux
-  key code, and the Android keyboard's text. Positions are fractions of the
-  surface.
-- The shim serves them as evdev devices (touchscreen, keyboard, mouse,
-  touchpad, tablet), which `libchameleon_udev.so` shows through udev and
-  `/dev/input/eventN`. KWin's libinput reads them like real hardware, so
-  KDE's input settings apply.
-- The Android keyboard's text goes to `chameleon-ime`, the desktop's on-screen
-  keyboard (input method), whenever the focused app has a text field:
-  suggestions, the word being composed, emoji, any language. Elsewhere (X11
-  apps) it is typed as keys of the desktop's layout, like on a hardware
-  keyboard. The package makes it KWin's default (`$PREFIX/etc/xdg/kwinrc`);
-  System Settings > Keyboard > Virtual Keyboard lists it as "Chameleon
-  (Android keyboard)" and can choose another one or none. Weston takes it
-  from `weston.ini`:
-  `[input-method]` `path=/data/data/com.termux/files/usr/lib/chameleon/chameleon-ime`.
+- The app sends touch points, trackpad fingers, mouse motion, buttons,
+  wheels and hardware keys over the socket. `chameleon-kernel` serves them
+  as evdev devices (touchscreen, keyboard, mouse, touchpad, tablet), which
+  the compositor's libinput reads like real hardware, so the desktop's
+  input settings apply.
+- In trackpad mode the whole window is the pad, also where the keyboard
+  covers the desktop: tap to click, two-finger tap for the right button,
+  two-finger drag to scroll.
+- The Android keyboard's text goes to `chameleon-ime` whenever a text field
+  has the focus: the word being composed, suggestions, emoji, any language.
+  Enter and Backspace arrive as keys. Elsewhere (X11 apps) the text is
+  typed as keys of the desktop's layout.
+- The package makes `chameleon-ime` KWin's default virtual keyboard; System
+  Settings lists it as "Chameleon (Android keyboard)".
+- Shortcuts Android keeps for itself, such as Alt+Tab and Meta, need the
+  app's optional accessibility service.
 
-Code: [`shim/core/input.c`](shim/core/input.c), [`shim/core/evdev.c`](shim/core/evdev.c), [`shim/ime/ime.c`](shim/ime/ime.c), [`android/…/TouchInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/TouchInput.java), [`KeyInput.java`](android/app/src/main/java/io/github/harryl0l/chameleon/KeyInput.java)
+Code: [`shim/core/evdev.c`](shim/core/evdev.c), [`shim/core/input.c`](shim/core/input.c), [`shim/core/text.c`](shim/core/text.c), [`shim/ime/`](shim/ime/), [`shim/udev/`](shim/udev/)
 </details>
 
 <details>
-<summary><b>🔄 Screen size</b>: rotation and the keyboard resize the desktop</summary>
+<summary><b>Clipboard</b>: copy on one side, paste on the other</summary>
 
-- Rotating the phone, or opening the keyboard with *Shrink the desktop above
-  the keyboard* on, changes the app's surface size, and the app sends a new
-  `CONFIG`.
-- The fake display behaves like a monitor whose modes changed: the
-  connector's one mode becomes the window's size and the display's refresh
-  rate, and the card sends a hotplug uevent (`HOTPLUG=1`) to udev monitors.
-- KWin re-reads the connector, as it does when a monitor is plugged in or
-  its modes change, finds its mode gone and switches to the new one, then
-  lays out panels and windows for the new screen. Nothing here talks to
-  KWin directly.
-- The refresh rate is followed the same way: when battery saver drops the
-  display from 120 Hz to 60 Hz (or back), the mode changes with it.
-- The EDID stays the one of the first size, so KWin keeps seeing the same
-  monitor (its scale and settings stay). Until KWin has switched, the app
-  scales the frame to fit and keeps its aspect ratio.
-  `CHAMELEON_RESIZE=0` keeps KWin's screen at its first size.
-
-```mermaid
-sequenceDiagram
-    participant A as Chameleon app
-    participant S as chameleon-kernel
-    participant U as libchameleon_udev.so (KWin's udev monitor)
-    participant K as KWin
-    A->>S: CONFIG 2340x1080 (rotated)
-    Note over S: connector mode = 2340x1080
-    S->>U: uevent: card0 change, HOTPLUG=1
-    U->>K: udev monitor readable
-    K->>S: GETCONNECTOR: one mode, 2340x1080
-    K->>S: atomic modeset (fake KMS device)
-    S->>A: PRESENT 2340x1080 frames
-```
-
-Code: [`shim/core/kms.c`](shim/core/kms.c), [`shim/udev/udev.c`](shim/udev/udev.c), [`presenter.cpp`](android/app/src/main/cpp/presenter.cpp) (`place()`)
-</details>
-
-<details>
-<summary><b>📋 Clipboard</b>: copy on one side, paste on the other</summary>
-
-- Text copied in a desktop app can be pasted in Android apps, and the other
+- Text copied in a desktop app can be pasted in Android apps and the other
   way round (*Clipboard sharing* in the app's settings, on by default).
-- On the same Wayland connection as input, the shim joins KWin's clipboard
-  the way a clipboard manager does, with `ext_data_control_v1` (KWin 6.4 and
-  later). X11 apps share it through Xwayland as usual.
-- The text itself only travels through pipes, never through the shim: a
-  desktop copy is written by the copying app into a pipe whose other end
-  goes to the Chameleon app (`CLIPBOARD_DATA`), and a desktop paste of
-  Android's text gets a pipe the Chameleon app writes into
-  (`CLIPBOARD_REQUEST`).
-- Android lets only the app in front read its clipboard, so new Android text
-  is offered (`CLIPBOARD_OFFER`) when Chameleon gets the focus or while it
-  has it. The clip itself is only read when it changed, so Android doesn't
-  keep showing "pasted from your clipboard". Desktop text reaches Android at
-  any time.
-- Only text is shared; Android images and files stay on Android.
-- Passwords stay hidden both ways: a desktop password manager's copy
-  (marked with `x-kde-passwordManagerHint`, e.g. KeePassXC) is marked
-  sensitive on Android, which hides it in its "copied" preview, and text
-  Android apps mark sensitive gets that hint on the desktop, which keeps it
-  out of Klipper's history.
+- `chameleon-kernel` joins the compositor's clipboard as a clipboard
+  manager does, with `ext_data_control_v1`. X11 apps share it through
+  Xwayland.
+- The text travels through pipes between the desktop app and the Chameleon
+  app, never through `chameleon-kernel`.
+- Android lets only the app in front read its clipboard, so Android text is
+  offered when Chameleon has the focus. Desktop text reaches Android at any
+  time.
+- Only text is shared. Passwords stay hidden both ways: a desktop password
+  manager's copy is marked sensitive on Android, and Android's sensitive
+  text stays out of Klipper's history.
 
 Code: [`shim/core/clipboard.c`](shim/core/clipboard.c), [`ClipboardShare.java`](android/app/src/main/java/io/github/harryl0l/chameleon/ClipboardShare.java)
 </details>
 
-### One frame, end to end
+<details>
+<summary><b>When something goes wrong</b>: what Chameleon reports</summary>
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant K as KWin
-    participant S as libchameleon + EGL vendor
-    participant G as GPU driver
-    participant A as Chameleon app
-    participant F as SurfaceFlinger
+- The app's status line says when the desktop's service has stopped
+  answering, when the compositor is busy or stuck, and when the session
+  still runs but its service is gone.
+- The terminal says when the app's window came back and how fast the
+  compositor answered, and each program says once when it lost the card.
+- A crash in a program that renders with Android's driver logs the last
+  GL and EGL calls and a symbolised backtrace.
+- Every 5 seconds the service logs how many frames were committed,
+  presented and shown on the vsync.
 
-    K->>S: render into a gbm buffer (an AHardwareBuffer)
-    S->>G: GLES draw calls (EGLImage of the buffer)
-    K->>S: atomic commit (FB_ID, IN_FENCE_FD = render fence)
-    S->>A: PRESENT(buffer, render fence)
-    A->>G: copy into the app's own buffer (GPU blit, waits on the fence)
-    A->>S: RELEASE(buffer, blit fence): KWin may reuse it
-    A->>F: ASurfaceTransaction_setBuffer(copy, blit fence)
-    A->>S: FRAME_QUEUED(frame)
-    S-->>K: next vblank: DRM page-flip event → KWin schedules the next frame
-    F-->>A: on commit: frame latched
-    A->>S: FRAME_DONE(frame, latch time): the vblank grid's phase
-```
-
-### Launch flow
-
-```mermaid
-flowchart LR
-    U(["chameleon startplasma-wayland"]) --> P["LD_PRELOAD = libchameleon.so, libchameleon_udev.so<br/>unset DISPLAY, WAYLAND_DISPLAY<br/>+ D-Bus session + chameleon-kernel"]
-    P --> SP["startplasma-wayland"]
-    SP --> W["kwin_wayland_wrapper --xwayland"]
-    W --> R["kwin_wayland: finds /dev/dri/card0 in udev,<br/>picks its DRM backend"]
-    SP --> PS["plasmashell, apps …<br/>(same device layer, Chameleon EGL vendor)"]
-```
-
-Every program in the session sees the same device layer, so nothing picks
-out KWin, and the same works for `chameleon weston` or `chameleon sway`.
-Nothing in plasma-workspace changes, and you never pass `--drm` yourself:
-with neither `WAYLAND_DISPLAY` nor `DISPLAY` set, a compositor picks its
-DRM backend.
+</details>
 
 ## What a phone needs
 
-Chameleon uses only public Android APIs and the phone's own GPU driver
-(through `/system/lib64/libEGL.so` / `libGLESv2.so`); no root, no access to
-`/dev/dri`, no Vulkan and no desktop OpenGL. What the driver must offer:
+Chameleon uses only public Android APIs and the phone's own GPU driver. No
+root and no access to the real `/dev/dri`. Vulkan is optional: without it
+everything else works the same.
 
 **System**
 
@@ -401,68 +283,69 @@ Chameleon uses only public Android APIs and the phone's own GPU driver
 | `GL_EXT_read_format_bgra` | required | KWin's screenshots / read-backs |
 | `GL_OES_EGL_image_external` | optional | external-only buffer formats |
 
-Qt, GTK and other apps need nothing beyond this: Qt built for desktop OpenGL
-is steered onto OpenGL ES automatically.
+**Vulkan** (optional)
 
-Run `chameleon-probe` on the phone to check all of it. It lists every
-extension above as PASS / FAIL / WARN, allocates and renders into an
-`AHardwareBuffer`, passes it across a socket, and renders an `AImageReader`
-frame. Driver quirks found along the way (a GLSL construct the driver
-rejects, an extension that misbehaves) are worked around in the EGL vendor
-rather than required of the phone.
+| Requirement | Needed for |
+|---|---|
+| A Vulkan driver with `VK_KHR_android_surface` and `VK_KHR_swapchain` | Vulkan programs and their windows |
+| `libadrenotools` from Termux, Android 9 or newer | only for a GPU driver of your own below Chameleon's |
+
+Qt, GTK and other apps need nothing beyond this.
+
+Run `chameleon-probe` on the phone to check it. It lists every EGL and
+OpenGL ES item above as PASS, FAIL or WARN, renders into an
+`AHardwareBuffer`, passes it across a socket and renders an `AImageReader`
+frame.
 
 ## Getting started
 
-**Requirements:** see [What a phone needs](#what-a-phone-needs), plus Termux
-(from [GitHub](https://github.com/termux/termux-app/releases) or
-[F-Droid](https://f-droid.org/packages/com.termux/)) with KWin installed.
+You need Termux (from [GitHub](https://github.com/termux/termux-app/releases)
+or [F-Droid](https://f-droid.org/packages/com.termux/)) with KWin installed,
+and a phone that meets the list above.
 
 1. Download the `chameleon-<commit>` artifact from the latest
-   [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml) and unzip it.
-2. Install `chameleon.apk` and open **Chameleon**. If a Chameleon app from
-   v0.1.0 or an earlier development build is installed, uninstall it first:
-   those were signed with Termux's public test key, and Android can't update
-   them to this version.
-3. In Termux, install the package, then start a session (run
-   `termux-setup-storage` once first, so Termux can read `/sdcard`):
+   [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml)
+   and unzip it.
+2. Install `chameleon.apk` and open **Chameleon**. Uninstall an older
+   Chameleon app first if Android refuses the update: builds signed with a
+   different key can't replace each other.
+3. In Termux, install the package (run `termux-setup-storage` once first, so
+   Termux can read `/sdcard`):
 
    ```sh
    apt install /sdcard/Download/chameleon-*/chameleon_*_aarch64.deb
    ```
 
-   Then start either KWin with a terminal:
+4. Start KWin with a terminal, or a full Plasma session:
 
    ```sh
    chameleon kwin_wayland konsole
-   ```
-
-   or a full Plasma session:
-
-   ```sh
    chameleon startplasma-wayland
    ```
 
-   Without the package, the artifact's `chameleon/` folder works too. Copy it
-   into Termux (not `/sdcard`, which is `noexec`), run
-   `chmod +x chameleon/chameleon* chameleon/bin/*`, then
-   `chameleon/chameleon --install` to put `chameleon` in `$PATH`.
+5. Switch to the app. Tap the Chameleon icon (drag it anywhere) for its
+   buttons: the keyboard, and the settings, where you choose direct touch
+   or trackpad, the orientation, and whether the keyboard shrinks the
+   desktop or covers it.
 
-4. Switch to the app. Tap the Chameleon icon (drag it anywhere) for its
-   buttons: ⌨️ opens the keyboard, and ⚙️ opens the settings: **direct touch** or **trackpad** (tap to click, two-finger tap for right
-   click, two-finger drag to scroll, long-press or tap-and-drag to hold, e.g. to
-   move a window).
+Open the app before starting the session, or within 30 seconds: the screen
+takes its size from the app's first report.
 
 **Smoothness:** some phones slow down apps that aren't on the maker's game
-list (realme's *Games*, for example). Add both **Chameleon** and **Termux**
-(KWin runs in Termux) there: on a realme phone that took dragging a window
-at 120 Hz from 40-80 to about 100 frames per second. The shim logs its
-frame counts every 5 s.
+list. Adding both **Chameleon** and **Termux** there can help.
 
-**Optional:** `chameleon-vendor-install` registers the EGL vendor with glvnd
-for all Termux programs (`--remove` undoes it; removing the package does too).
+**A GPU driver of your own:** install Termux's `libadrenotools` and put the
+driver's path in front, for one program or a whole session:
 
-The package also installs `chameleon-probe`, which checks a device's EGL,
-AHardwareBuffer and AImageReader support.
+```sh
+CHAMELEON_VULKAN_DRIVER=$HOME/drivers/turnip.so chameleon startplasma-wayland
+```
+
+The driver must be an Android build (the kind emulators load), not a Linux
+one. If it can't be loaded, Chameleon says why and uses the phone's driver.
+
+More switches and the details of each piece are in
+[`shim/README.md`](shim/README.md).
 
 ## Repository layout
 
@@ -487,42 +370,49 @@ AHardwareBuffer and AImageReader support.
 ## Building
 
 Everything builds on GitHub Actions ([`build.yml`](.github/workflows/build.yml)).
-Each push produces one artifact: the APK, the Termux package
-(`chameleon_<version>_aarch64.deb`, built by
-[`packaging/build-deb.sh`](packaging/build-deb.sh)), the same files as a
-plain `chameleon/` folder, and the probe. It also runs the host tests, and
-the conformance tests, which compare Chameleon's card and input devices with
-a real Linux 6.8 kernel's (vkms, uinput) booted in QEMU.
+Each push produces one artifact with the APK, the Termux package, the same
+files as a plain `chameleon/` folder, and the probe. It also runs the host
+tests and the conformance tests.
 
 Locally:
 
 ```sh
-gradle -p android assembleRelease                                     # the app (assembleDebug: debuggable)
+gradle -p android assembleRelease                                     # the app
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
-packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
-shim/test/run-host-test.sh     # needs libdrm-dev libwayland-dev libegl-dev libgles-dev libudev-dev libinput-dev
-shim/test/run-conformance.sh   # also needs qemu-system-x86, busybox-static, cpio, zstd
+packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/         # the Termux package
+shim/test/run-host-test.sh     # host tests
+shim/test/run-conformance.sh   # against a real kernel in QEMU
 ```
+
+The host tests need `libdrm-dev libwayland-dev libegl-dev libgles-dev
+libudev-dev libinput-dev libvulkan-dev mesa-vulkan-drivers
+vulkan-validationlayers vulkan-tools`; the conformance tests also need
+`qemu-system-x86 busybox-static cpio zstd`.
 
 ## Roadmap
 
-- [x] Presenter app with display-accurate frame pacing (one GPU copy of the desktop frame; app windows zero-copy)
-- [x] KWin without Chameleon patches on a fake KMS device, rendering on the vendor GPU driver
-- [x] Touch, trackpad, mouse and keyboard input
-- [x] EGL/GLES as a glvnd vendor; `chameleon <session>` launcher
-- [x] GPU rendering for Wayland apps (Wayland platform in the EGL vendor)
-- [x] Screen resize and rotation (keyboard-aware resizing)
+- [x] KWin without Chameleon patches on a KMS card served by a per-session kernel service
+- [x] OpenGL ES for the compositor and Wayland apps on the phone's driver
+- [x] Touch, trackpad, mouse, keyboards and the Android keyboard
+- [x] Screen resize, rotation and refresh-rate changes
 - [x] Clipboard sharing with Android
-- [ ] Xwayland acceleration
+- [x] Render node and buffer sharing between any programs of the session
+- [x] Firefox acceleration
+- [x] Cursor plane and vsync-timed page flips
+- [x] Screen recording through PipeWire
+- [x] Vulkan with Wayland windows, on the phone's driver or your own
+- [ ] Vulkan for X11 windows, and GPU rendering in Xwayland (glamor)
+- [ ] Windows of any other GPU driver
+- [ ] A release
 
 ## Notes
 
 - Not affiliated with KDE, Termux or Google. The "W" disc in the logo is a
   stylised nod to Wayland, not the official Wayland logo.
 - Licence: GPL-2.0-or-later, like KWin, whose process `libchameleon.so`
-  runs in: each source file says so (`SPDX-License-Identifier`), and
-  [LICENSE](LICENSE) holds the GPL version 2 text, which GitHub labels
-  "GPL-2.0" (it reads only that text, the same for both). `shim/include/` vendors MIT-licensed headers
-  from libdrm, Mesa (`gbm.h`) and libglvnd, which keep their own licences
+  runs in. Each source file says so (`SPDX-License-Identifier`), and
+  [LICENSE](LICENSE) holds the GPL version 2 text.
+- `shim/include/` holds unmodified headers from libdrm, Mesa (`gbm.h`),
+  libglvnd and Khronos (Vulkan), which keep their own licences
   ([sources and versions](shim/include/README.md)).
