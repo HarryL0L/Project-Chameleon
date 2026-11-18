@@ -120,6 +120,50 @@ static void *open_card(void *path)
     return (void *)(intptr_t)open(path, O_RDWR | O_CLOEXEC);
 }
 
+/* The session started before the app reported its screen: the card's screen
+ * and the touchpad have the assumed size (1080x1920), and the app's window,
+ * reported later, is longer. All of the glass must still reach the touchpad. */
+static int late_app(int c, pthread_t *opener)
+{
+    printf("an app that reports after the session started\n");
+    void *opened;
+    pthread_join(*opener, &opened); /* returns once the service stops waiting */
+    CHECK((int)(intptr_t)opened >= 0, "the card opens without the app's report");
+    struct cham_msg window = {CHAM_WINDOW, 0, 1080 | (uint64_t)2400 << 32, 0};
+    struct cham_msg surface = {CHAM_CONFIG, 0, 1080 | (uint64_t)2400 << 32, 60000};
+    cham_send(c, &window, -1);
+    cham_send(c, &surface, -1);
+    int pad = open("/dev/input/event3", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    struct input_absinfo pad_y = {0};
+    CHECK(pad >= 0 && ioctl(pad, EVIOCGABS(ABS_MT_POSITION_Y), &pad_y) == 0 && pad_y.maximum == 1919,
+          "touchpad: axes of the assumed screen (max %d, want 1919)", pad_y.maximum);
+    /* (0.5, 0.9) of the window, then its far corner */
+    const uint64_t at[] = {CHAM_INPUT_POS(32768, 58982), CHAM_INPUT_POS(65535, 65535)};
+    const int want[][2] = {{432, 1727}, {863, 1919}};
+    for (int i = 0; i < 2; i++) {
+        send_input(c, i ? CHAM_INPUT_PAD_MOTION : CHAM_INPUT_PAD_DOWN, 3, at[i]);
+        send_input(c, CHAM_INPUT_PAD_FRAME, 0, 0);
+        int x = -1, y = -1;
+        struct pollfd pp = {pad, POLLIN, 0};
+        struct input_event pe;
+        while (pad >= 0 && poll(&pp, 1, 1000) == 1 && read(pad, &pe, sizeof pe) == sizeof pe &&
+               !(pe.type == EV_SYN && pe.code == SYN_REPORT && x >= 0)) {
+            if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_X)
+                x = pe.value;
+            if (pe.type == EV_ABS && pe.code == ABS_MT_POSITION_Y)
+                y = pe.value;
+        }
+        CHECK(x == want[i][0] && y == want[i][1], "touchpad: the window's %s is at %d,%d (want %d,%d)",
+              i ? "far corner" : "(0.5, 0.9)", x, y, want[i][0], want[i][1]);
+    }
+    if (pad >= 0)
+        close(pad);
+    close(c);
+    close((int)(intptr_t)opened);
+    printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+    return failures != 0;
+}
+
 int main(void)
 {
     const char *dev_path = getenv("CHAMELEON_DRM_PATH");
@@ -140,6 +184,8 @@ int main(void)
     struct pollfd p = {l, POLLIN, 0};
     CHECK(poll(&p, 1, 5000) == 1, "shim connects to the presenter");
     int c = accept(l, NULL, NULL);
+    if (getenv("EVDEV_TEST_LATE_APP"))
+        return late_app(c, &opener);
     /* The app's first report, with the keyboard up: its whole window, then
      * the surface the keyboard leaves for the desktop. */
     struct cham_msg window = {CHAM_WINDOW, 0, 1080 | (uint64_t)2400 << 32, 0};

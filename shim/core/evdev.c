@@ -668,7 +668,11 @@ void evdev_window(uint32_t width, uint32_t height)
 /* pos as fractions of the screen; the touchpad's axes are its pixels. The
  * touchpad is the app's whole window, also where the keyboard covers the
  * desktop, so its pixels don't change with the desktop's size; an app that
- * doesn't report the window gives fractions of the desktop. */
+ * doesn't report the window gives fractions of the desktop. A window longer
+ * than the touchpad (the session started before the app reported its screen,
+ * so the touchpad has the size that was assumed) is scaled onto it: all of
+ * the glass reaches the touchpad, as on any touchpad smaller than its
+ * screen. */
 static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
 {
     int32_t x = (int32_t)CHAM_INPUT_X(pos), y = (int32_t)CHAM_INPUT_Y(pos);
@@ -683,6 +687,11 @@ static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
         pthread_mutex_unlock(&g_evdev_lock);
         x = (int32_t)((int64_t)x * (int32_t)w / 65536);
         y = (int32_t)((int64_t)y * (int32_t)h / 65536);
+        int32_t longer = (int32_t)(w > h ? w : h);
+        if (size > 0 && longer > size) {
+            x = (int32_t)((int64_t)x * size / longer);
+            y = (int32_t)((int64_t)y * size / longer);
+        }
         if (size > 0) {
             x = x < size ? x : size - 1;
             y = y < size ? y : size - 1;
