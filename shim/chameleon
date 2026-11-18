@@ -139,6 +139,13 @@ export CHAMELEON_SOCKET=${CHAMELEON_SOCKET:-$PREFIX/tmp/chameleon-0}
 CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
     /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET" \
     >"$XDG_RUNTIME_DIR/chameleon-broker.log" 2>&1 &
+# CHAMELEON_SCREENS=2: the card gets a second screen, the app's second window
+# (a process of its own there), which a broker of its own serves.
+if [ "${CHAMELEON_SCREENS:-1}" = 2 ]; then
+    CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
+        /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET.2" 2 \
+        >"$XDG_RUNTIME_DIR/chameleon-broker2.log" 2>&1 &
+fi
 
 # The card, the input devices and the link to the app, as the kernel would
 # be (shim/core/main.c): it answers before the command starts, and exits

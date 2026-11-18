@@ -4,7 +4,10 @@
  * chameleon-kernel (card.c serves it to every process).
  *
  * One connector (DSI-1, the Chameleon app's surface) -> one encoder -> one
- * CRTC -> one primary plane. Everything is answered at the ioctl level, so
+ * CRTC -> a primary and a cursor plane. With CHAMELEON_SCREENS=2 there is a
+ * second such set (DSI-2), a second window of the app, whose connector reads
+ * disconnected until that window is open: a monitor plugged in and out.
+ * Everything is answered at the ioctl level, so
  * the real libdrm on top of it behaves as with a kernel driver. An atomic
  * commit that puts a framebuffer on the plane becomes a PRESENT to the app;
  * the app's FRAME_DONE becomes the page-flip event.
@@ -49,6 +52,9 @@
 #define ID_PLANE 34
 #define ID_EDID_BLOB 35
 #define ID_CURSOR 36 /* the cursor plane, offered with an app that shows it (link_app_cursor) */
+/* A further screen's objects: these ids + ID_STEP for each screen before it. */
+#define ID_STEP 10
+#define SCREEN_ID(screen, id) ((id) + (uint32_t)(screen) * ID_STEP)
 
 enum {
     P_CONN_CRTC_ID = 100,
@@ -123,13 +129,18 @@ struct plane_state {
     uint32_t crtc_w, crtc_h;
 };
 
-struct kms_state {
+/* What an atomic commit changes, per screen. */
+struct screen_state {
     uint32_t conn_crtc;
     uint64_t dpms;
     uint64_t active;
     uint32_t mode_blob;
     struct plane_state primary, cursor;
     int64_t in_fence;
+};
+
+struct kms_state {
+    struct screen_state sc[CHAM_SCREENS];
 };
 
 struct fb {
@@ -149,14 +160,28 @@ struct blob {
     struct blob *next;
 };
 
-static struct kms_state g_state = {.in_fence = -1};
-static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
-static int g_plane_shown;           /* ...and it is on the screen (the active CRTC, an app that can show it) */
-static int g_plane_on, g_plane_partial; /* ...on the active CRTC; covering part of it */
-static struct cham_bo *g_cursor_bo; /* the cursor plane's buffer; holds a ref */
-static int g_has_cursor;            /* the card has a cursor plane */
-static int g_screen_off;            /* The compositor turned its screen off (idle, DPMS) */
-static int g_screen_was_on;         /* ...after it had been on */
+/* A screen: its connector and what its planes show. */
+struct screen {
+    int connected;               /* its window exists (the first's always does) */
+    struct cham_bo *plane_bo;    /* what's on screen; holds a ref */
+    int plane_shown;             /* ...and it is on the screen (the active CRTC, an app that can show it) */
+    int plane_on, plane_partial; /* ...on the active CRTC; covering part of it */
+    struct cham_bo *cursor_bo;   /* the cursor plane's buffer; holds a ref */
+    int off;                     /* the compositor turned its screen off (idle, DPMS) */
+    int was_on;                  /* ...after it had been on */
+    struct drm_mode_modeinfo mode;
+    uint32_t mode_mhz;
+    uint8_t edid[128];
+    struct blob edid_blob;
+    uint32_t width, height, mm_width, mm_height;
+    int in_fence;                /* our copy of the commit's IN_FENCE_FD, under g_lock */
+    int cursor_fence;            /* ...the cursor plane's */
+};
+
+static struct kms_state g_state = {{{.in_fence = -1}, {.in_fence = -1}}};
+static struct screen g_sc[CHAM_SCREENS] = {{.in_fence = -1, .cursor_fence = -1}, {.in_fence = -1, .cursor_fence = -1}};
+static int g_screens = 1;           /* how many the card has (CHAMELEON_SCREENS) */
+static int g_has_cursor;            /* the card has cursor planes */
 static struct fb *g_fbs;
 static struct blob *g_blobs;
 static uint32_t g_next_object_id = 1000;
@@ -166,17 +191,25 @@ static struct fake_fd *g_master;    /* the file that is DRM master, if any */
 static uint32_t g_next_magic = 1;
 static int g_unique_set;            /* SET_VERSION 1.1 named the master (GET_UNIQUE) */
 
-static struct drm_mode_modeinfo g_mode;
-static uint32_t g_mode_mhz;
-static uint8_t g_edid[128];
-static struct blob g_edid_blob = {.id = ID_EDID_BLOB, .length = sizeof g_edid, .data = g_edid};
-static uint32_t g_screen_width, g_screen_height, g_mm_width, g_mm_height;
+
+/* Which screen an object belongs to (-1: none), and its id on the first
+ * screen, by which the rest of this file knows what it is. */
+static int obj_screen(uint32_t *obj)
+{
+    for (int i = 0; i < g_screens; i++) {
+        if (*obj >= SCREEN_ID(i, ID_CONNECTOR) && *obj <= SCREEN_ID(i, ID_CURSOR)) {
+            *obj -= (uint32_t)i * ID_STEP;
+            return i;
+        }
+    }
+    return -1;
+}
 
 /* ---- setup ---- */
 
-static void make_mode(uint32_t w, uint32_t h, uint32_t mhz)
+static void make_mode(struct screen *sc, uint32_t w, uint32_t h, uint32_t mhz)
 {
-    struct drm_mode_modeinfo *m = &g_mode;
+    struct drm_mode_modeinfo *m = &sc->mode;
     memset(m, 0, sizeof *m);
     m->hdisplay = (uint16_t)w;
     m->hsync_start = (uint16_t)(w + 48);
@@ -191,24 +224,26 @@ static void make_mode(uint32_t w, uint32_t h, uint32_t mhz)
     m->flags = DRM_MODE_FLAG_PHSYNC | DRM_MODE_FLAG_PVSYNC;
     m->type = DRM_MODE_TYPE_PREFERRED | DRM_MODE_TYPE_DRIVER;
     snprintf(m->name, sizeof m->name, "%ux%u", w, h);
-    g_mode_mhz = mhz;
+    sc->mode_mhz = mhz;
 }
 
 /* An EDID 1.4 base block for the panel: vendor "CML" (not a registered PNP
- * ID), name "Chameleon", physical size, sRGB, and g_mode as the preferred
- * detailed timing. */
-static void make_edid(uint32_t mm_w, uint32_t mm_h)
+ * ID), name "Chameleon" (a further screen: with its number, and its own
+ * product code, so it is another monitor), physical size, sRGB, and its mode
+ * as the preferred detailed timing. */
+static void make_edid(struct screen *sc, uint32_t mm_w, uint32_t mm_h)
 {
+    int index = (int)(sc - g_sc);
     static const uint8_t header[] = {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
     static const uint8_t srgb[] = {0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54};
-    const struct drm_mode_modeinfo *m = &g_mode;
-    uint8_t *e = g_edid;
-    memset(e, 0, sizeof g_edid);
+    const struct drm_mode_modeinfo *m = &sc->mode;
+    uint8_t *e = sc->edid;
+    memset(e, 0, sizeof sc->edid);
     memcpy(e, header, sizeof header);
     uint16_t vendor = (uint16_t)(('C' - '@') << 10 | ('M' - '@') << 5 | ('L' - '@'));
     e[8] = (uint8_t)(vendor >> 8);
     e[9] = (uint8_t)vendor;
-    e[10] = 1;                /* product code */
+    e[10] = (uint8_t)(1 + index); /* product code */
     e[17] = 2026 - 1990;      /* model year */
     e[18] = 1, e[19] = 4;     /* EDID 1.4 */
     e[20] = 0x80;             /* digital input */
@@ -236,10 +271,12 @@ static void make_edid(uint32_t mm_w, uint32_t mm_h)
     t[14] = (uint8_t)((mm_w >> 8) << 4 | (mm_h >> 8));
     t[17] = 0x1e;             /* digital separate sync, +hsync +vsync */
 
-    static const char name[13] = "Chameleon\n   ";
+    char name[14] = "Chameleon\n   ";
+    if (index)
+        snprintf(name, sizeof name, "Chameleon %c\n ", (char)('1' + index));
     uint8_t *d = e + 72;      /* display name */
     d[3] = 0xfc;
-    memcpy(d + 5, name, sizeof name);
+    memcpy(d + 5, name, 13);
     e[90 + 3] = e[108 + 3] = 0x10; /* unused descriptors */
 
     uint8_t sum = 0;
@@ -248,12 +285,36 @@ static void make_edid(uint32_t mm_w, uint32_t mm_h)
     e[127] = (uint8_t)-sum;
 }
 
+/* The screen's size as first seen (the app's whole window), which its
+ * physical size and EDID keep. */
+static void set_size(struct screen *sc, uint32_t w, uint32_t h)
+{
+    /* Physical size decides KWin's default scale; phones are ~400 dpi. */
+    const char *dpi_env = getenv("CHAMELEON_DPI");
+    double dpi = dpi_env ? atof(dpi_env) : 400.0;
+    if (dpi < 50)
+        dpi = 400.0;
+    sc->width = w;
+    sc->height = h;
+    sc->mm_width = (uint32_t)(w * 25.4 / dpi + 0.5);
+    sc->mm_height = (uint32_t)(h * 25.4 / dpi + 0.5);
+    make_edid(sc, sc->mm_width, sc->mm_height);
+}
+
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 static void kms_init(void)
 {
     uint32_t w = 0, h = 0, mhz = 0, win_w = 0, win_h = 0;
-    link_start();
+    const char *screens = getenv("CHAMELEON_SCREENS");
+    if (screens && atoi(screens) >= 2) {
+        g_screens = CHAM_SCREENS;
+        cham_log("the card has a second screen: open it from the Chameleon app's menu");
+    }
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        g_sc[i].edid_blob = (struct blob){.id = SCREEN_ID(i, ID_EDID_BLOB), .length = sizeof g_sc[i].edid,
+                                          .data = g_sc[i].edid};
+    link_start(g_screens);
     const char *wait = getenv("CHAMELEON_WAIT");
     int timeout_ms = (wait ? atoi(wait) : 30) * 1000;
     cham_log("waiting up to %d s for the Chameleon app to report its screen", timeout_ms / 1000);
@@ -267,7 +328,7 @@ static void kms_init(void)
         mhz = (uint32_t)(hz * 1000);
         cham_log("no app yet; using %ux%u @ %.2f Hz (set CHAMELEON_MODE=WxH@Hz to change)", w, h, hz);
     }
-    make_mode(w, h, mhz);
+    make_mode(&g_sc[0], w, h, mhz);
     /* A cursor plane, as GPUs have, if the app can show one (an older app
      * leaves the compositor drawing its pointer into its frames). */
     g_has_cursor = link_app_cursor();
@@ -275,17 +336,8 @@ static void kms_init(void)
      * above the keyboard. */
     if (win_w && win_h)
         w = win_w, h = win_h;
-
-    /* Physical size decides KWin's default scale; phones are ~400 dpi. */
-    const char *dpi_env = getenv("CHAMELEON_DPI");
-    double dpi = dpi_env ? atof(dpi_env) : 400.0;
-    if (dpi < 50)
-        dpi = 400.0;
-    g_screen_width = w;
-    g_screen_height = h;
-    g_mm_width = (uint32_t)(w * 25.4 / dpi + 0.5);
-    g_mm_height = (uint32_t)(h * 25.4 / dpi + 0.5);
-    make_edid(g_mm_width, g_mm_height);
+    set_size(&g_sc[0], w, h);
+    g_sc[0].connected = 1;
 }
 
 void kms_init_once(void)
@@ -295,17 +347,47 @@ void kms_init_once(void)
 
 #define REFRESH_SLACK_MHZ 1000 /* the display's rate wobbles a little */
 
-int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+int kms_panel(int screen, uint32_t width, uint32_t height, uint32_t refresh_mhz)
 {
     kms_init_once();
+    if (screen >= g_screens)
+        return 0;
     pthread_mutex_lock(&g_lock);
-    int changed = width != g_mode.hdisplay || height != g_mode.vdisplay ||
-                  abs((int32_t)refresh_mhz - (int32_t)g_mode_mhz) > REFRESH_SLACK_MHZ;
+    struct screen *sc = &g_sc[screen];
+    int changed = !sc->connected || width != sc->mode.hdisplay || height != sc->mode.vdisplay ||
+                  abs((int32_t)refresh_mhz - (int32_t)sc->mode_mhz) > REFRESH_SLACK_MHZ;
     if (changed) {
-        make_mode(width, height, refresh_mhz);
-        cham_log("connector mode now %ux%u @ %.2f Hz", width, height, refresh_mhz / 1000.0);
+        make_mode(sc, width, height, refresh_mhz);
+        if (screen)
+            cham_log("screen %d: connector mode now %ux%u @ %.2f Hz", screen + 1, width, height,
+                     refresh_mhz / 1000.0);
+        else
+            cham_log("connector mode now %ux%u @ %.2f Hz", width, height, refresh_mhz / 1000.0);
+    }
+    if (!sc->connected) { /* a further screen's window appeared: its monitor is plugged in */
+        uint32_t w = 0, h = 0;
+        link_window_locked(screen, &w, &h);
+        if (!w || !h)
+            w = width, h = height;
+        set_size(sc, w, h);
+        sc->connected = 1;
+        cham_log("screen %d: connected (window %ux%u)", screen + 1, w, h);
     }
     pthread_mutex_unlock(&g_lock);
+    return changed;
+}
+
+int kms_unplug(int screen)
+{
+    kms_init_once();
+    if (screen <= 0 || screen >= g_screens)
+        return 0;
+    pthread_mutex_lock(&g_lock);
+    int changed = g_sc[screen].connected;
+    g_sc[screen].connected = 0;
+    pthread_mutex_unlock(&g_lock);
+    if (changed)
+        cham_log("screen %d: disconnected", screen + 1);
     return changed;
 }
 
@@ -350,13 +432,16 @@ static struct blob *blob_find(uint32_t id)
 
 static uint64_t prop_value(uint32_t obj, uint32_t prop)
 {
-    const struct kms_state *s = &g_state;
+    int screen = obj_screen(&obj);
+    if (screen < 0)
+        return 0;
+    const struct screen_state *s = &g_state.sc[screen];
     const struct plane_state *p = obj == ID_CURSOR ? &s->cursor : &s->primary;
     switch (prop) {
     case P_CONN_CRTC_ID: return s->conn_crtc;
     case P_CONN_DPMS: return s->dpms;
     case P_CONN_NON_DESKTOP: return 0;
-    case P_CONN_EDID: return ID_EDID_BLOB;
+    case P_CONN_EDID: return g_sc[screen].connected ? SCREEN_ID(screen, ID_EDID_BLOB) : 0;
     case P_CRTC_ACTIVE: return s->active;
     case P_CRTC_MODE_ID: return s->mode_blob;
     case P_PLANE_TYPE: return obj == ID_CURSOR ? 2 : 1; /* Cursor, Primary */
@@ -377,6 +462,8 @@ static uint64_t prop_value(uint32_t obj, uint32_t prop)
 
 static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *count)
 {
+    if (obj_screen(&obj) < 0)
+        return NULL;
     switch (obj) {
     case ID_CONNECTOR:
         *type = DRM_MODE_OBJECT_CONNECTOR;
@@ -401,8 +488,13 @@ static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *coun
 
 static int get_resources(const struct fake_fd *f, struct drm_mode_card_res *r)
 {
-    static const uint32_t crtcs[] = {ID_CRTC}, conns[] = {ID_CONNECTOR}, encs[] = {ID_ENCODER};
-    uint32_t n = 0;
+    uint32_t crtcs[CHAM_SCREENS], conns[CHAM_SCREENS], encs[CHAM_SCREENS];
+    for (int i = 0; i < g_screens; i++) {
+        crtcs[i] = SCREEN_ID(i, ID_CRTC);
+        conns[i] = SCREEN_ID(i, ID_CONNECTOR);
+        encs[i] = SCREEN_ID(i, ID_ENCODER);
+    }
+    uint32_t n = 0, screens = (uint32_t)g_screens;
     for (const struct fb *fb = g_fbs; fb; fb = fb->next) { /* the file's own */
         if (fb->owner != f)
             continue;
@@ -413,9 +505,9 @@ static int get_resources(const struct fake_fd *f, struct drm_mode_card_res *r)
     r->count_fbs = n;
     r->min_width = r->min_height = 1;
     r->max_width = r->max_height = 16384;
-    if (put_ids(r->crtc_id_ptr, &r->count_crtcs, crtcs, 1) ||
-        put_ids(r->encoder_id_ptr, &r->count_encoders, encs, 1) ||
-        put_ids(r->connector_id_ptr, &r->count_connectors, conns, 1))
+    if (put_ids(r->crtc_id_ptr, &r->count_crtcs, crtcs, screens) ||
+        put_ids(r->encoder_id_ptr, &r->count_encoders, encs, screens) ||
+        put_ids(r->connector_id_ptr, &r->count_connectors, conns, screens))
         return -EFAULT;
     return 0;
 }
@@ -443,48 +535,57 @@ static int put_props(const struct fake_fd *f, uint32_t obj, const uint32_t *prop
 
 static int get_connector(struct fake_fd *f, struct drm_mode_get_connector *c)
 {
-    if (c->connector_id != ID_CONNECTOR)
+    uint32_t kind = c->connector_id;
+    int screen = obj_screen(&kind);
+    if (screen < 0 || kind != ID_CONNECTOR)
         return -ENOENT;
-    static const uint32_t enc = ID_ENCODER;
+    const struct screen *sc = &g_sc[screen];
+    const uint32_t enc = SCREEN_ID(screen, ID_ENCODER);
     /* Encoders and modes: all of them if they fit, else none. */
     if (c->count_encoders >= 1 && copy_to_user(c->encoders_ptr, &enc, sizeof enc))
         return -EFAULT;
     c->count_encoders = 1;
     c->connector_type = DRM_MODE_CONNECTOR_DSI;
-    c->connector_type_id = 1;
-    c->connection = 1; /* DRM_MODE_CONNECTED */
-    c->mm_width = g_mm_width;
-    c->mm_height = g_mm_height;
+    c->connector_type_id = (uint32_t)screen + 1;
+    c->connection = sc->connected ? 1 : 2; /* DRM_MODE_CONNECTED, DRM_MODE_DISCONNECTED */
+    c->mm_width = sc->connected ? sc->mm_width : 0;
+    c->mm_height = sc->connected ? sc->mm_height : 0;
     c->subpixel = 1; /* DRM_MODE_SUBPIXEL_UNKNOWN */
-    if (c->count_modes >= 1 && copy_to_user(c->modes_ptr, &g_mode, sizeof g_mode))
+    uint32_t modes = sc->connected ? 1 : 0; /* nothing plugged in: no modes */
+    if (modes && c->count_modes >= 1 && copy_to_user(c->modes_ptr, &sc->mode, sizeof sc->mode))
         return -EFAULT;
-    c->count_modes = 1;
-    c->encoder_id = g_state.conn_crtc ? ID_ENCODER : 0; /* the one it drives now */
-    return put_props(f, ID_CONNECTOR, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
+    c->count_modes = modes;
+    c->encoder_id = g_state.sc[screen].conn_crtc ? enc : 0; /* the one it drives now */
+    return put_props(f, c->connector_id, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
                      c->prop_values_ptr, &c->count_props);
 }
 
 static int get_encoder(struct drm_mode_get_encoder *e)
 {
-    if (e->encoder_id != ID_ENCODER)
+    uint32_t kind = e->encoder_id;
+    int screen = obj_screen(&kind);
+    if (screen < 0 || kind != ID_ENCODER)
         return -ENOENT;
     e->encoder_type = DRM_MODE_ENCODER_DSI;
-    e->crtc_id = g_state.conn_crtc;
-    e->possible_crtcs = 1;
+    e->crtc_id = g_state.sc[screen].conn_crtc;
+    e->possible_crtcs = 1u << screen; /* its own CRTC */
     e->possible_clones = 0;
     return 0;
 }
 
 static int get_crtc(struct drm_mode_crtc *c)
 {
-    if (c->crtc_id != ID_CRTC)
+    uint32_t kind = c->crtc_id;
+    int screen = obj_screen(&kind);
+    if (screen < 0 || kind != ID_CRTC)
         return -ENOENT;
-    c->fb_id = g_state.primary.fb;
-    c->x = g_state.primary.src_x >> 16;
-    c->y = g_state.primary.src_y >> 16;
+    const struct screen_state *s = &g_state.sc[screen];
+    c->fb_id = s->primary.fb;
+    c->x = s->primary.src_x >> 16;
+    c->y = s->primary.src_y >> 16;
     c->gamma_size = 0;
     /* A CRTC with a mode is enabled, active or not (DPMS off keeps it). */
-    struct blob *b = blob_find(g_state.mode_blob);
+    struct blob *b = blob_find(s->mode_blob);
     c->mode_valid = b && b->length == sizeof(struct drm_mode_modeinfo);
     if (c->mode_valid)
         memcpy(&c->mode, b->data, sizeof c->mode);
@@ -495,9 +596,14 @@ static int get_crtc(struct drm_mode_crtc *c)
 
 static int get_plane_resources(const struct fake_fd *f, struct drm_mode_get_plane_res *r)
 {
-    static const uint32_t planes[] = {ID_PLANE, ID_CURSOR};
+    uint32_t planes[2 * CHAM_SCREENS], n = 0;
+    for (int i = 0; i < g_screens; i++) {
+        planes[n++] = SCREEN_ID(i, ID_PLANE);
+        if (g_has_cursor)
+            planes[n++] = SCREEN_ID(i, ID_CURSOR);
+    }
     /* The primary and cursor planes: listed only for universal-planes clients. */
-    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? 1u + (g_has_cursor != 0) : 0u);
+    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? n : 0u);
 }
 
 /* The plane's formats: what gbm allocates (RGBA and BGRA Android buffers),
@@ -516,13 +622,15 @@ static int plane_has_format(uint32_t format)
 
 static int get_plane(struct drm_mode_get_plane *p)
 {
-    if (p->plane_id != ID_PLANE && (p->plane_id != ID_CURSOR || !g_has_cursor))
+    uint32_t kind = p->plane_id;
+    int screen = obj_screen(&kind);
+    if (screen < 0 || (kind != ID_PLANE && (kind != ID_CURSOR || !g_has_cursor)))
         return -ENOENT;
-    const struct plane_state *ps = p->plane_id == ID_CURSOR ? &g_state.cursor : &g_state.primary;
+    const struct plane_state *ps = kind == ID_CURSOR ? &g_state.sc[screen].cursor : &g_state.sc[screen].primary;
     const uint32_t n = sizeof k_plane_formats / sizeof k_plane_formats[0];
     p->crtc_id = ps->crtc;
     p->fb_id = ps->fb;
-    p->possible_crtcs = 1;
+    p->possible_crtcs = 1u << screen; /* its own CRTC */
     p->gamma_size = 0;
     if (p->count_format_types >= n && copy_to_user(p->format_type_ptr, k_plane_formats, sizeof k_plane_formats))
         return -EFAULT;
@@ -536,7 +644,8 @@ static int obj_get_properties(const struct fake_fd *f, struct drm_mode_obj_get_p
 {
     uint32_t type, n;
     const uint32_t *props = object_props(o->obj_id, &type, &n);
-    if (o->obj_id == ID_ENCODER && (!o->obj_type || o->obj_type == DRM_MODE_OBJECT_ENCODER))
+    uint32_t kind = o->obj_id;
+    if (obj_screen(&kind) >= 0 && kind == ID_ENCODER && (!o->obj_type || o->obj_type == DRM_MODE_OBJECT_ENCODER))
         return -EINVAL; /* an object without properties */
     if (!props || (o->obj_type && o->obj_type != type))
         return -ENOENT;
@@ -577,7 +686,10 @@ static int get_property(struct drm_mode_get_property *p)
 
 static int get_blob(struct drm_mode_get_blob *g)
 {
-    struct blob *b = g->blob_id == ID_EDID_BLOB ? &g_edid_blob : blob_find(g->blob_id);
+    struct blob *b = blob_find(g->blob_id);
+    for (int i = 0; i < g_screens; i++)
+        if (g->blob_id == SCREEN_ID(i, ID_EDID_BLOB) && g_sc[i].connected)
+            b = &g_sc[i].edid_blob;
     if (!b)
         return -ENOENT;
     if (g->length == b->length && copy_to_user(g->data, b->data, b->length)) /* only an exact fit */
@@ -611,12 +723,20 @@ static int create_blob(struct fake_fd *f, struct drm_mode_create_blob *c)
     return 0;
 }
 
-/* Frees the blobs the client destroyed that the CRTC no longer uses. */
+static int blob_in_use(uint32_t id)
+{
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        if (g_state.sc[i].mode_blob == id)
+            return 1;
+    return 0;
+}
+
+/* Frees the blobs the client destroyed that no CRTC uses any more. */
 static void free_destroyed_blobs(void)
 {
     for (struct blob **p = &g_blobs; *p;) {
         struct blob *b = *p;
-        if (b->destroyed && b->id != g_state.mode_blob) {
+        if (b->destroyed && !blob_in_use(b->id)) {
             *p = b->next;
             free(b->data);
             free(b);
@@ -717,13 +837,21 @@ static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
     return 0;
 }
 
-/* Frees the framebuffers no file holds that the plane doesn't show either
- * (the kernel's last reference going). */
+static int fb_on_plane(uint32_t id)
+{
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        if (g_state.sc[i].primary.fb == id || g_state.sc[i].cursor.fb == id)
+            return 1;
+    return 0;
+}
+
+/* Frees the framebuffers no file holds that no plane shows either (the
+ * kernel's last reference going). */
 static void free_unused_fbs(void)
 {
     for (struct fb **p = &g_fbs; *p;) {
         struct fb *fb = *p;
-        if (!fb->owner && fb->id != g_state.primary.fb && fb->id != g_state.cursor.fb) {
+        if (!fb->owner && !fb_on_plane(fb->id)) {
             *p = fb->next;
             bo_unref_locked(fb->bo);
             free(fb);
@@ -737,24 +865,28 @@ static void free_unused_fbs(void)
  * file closing): the kernel takes it off the plane; the CRTC stays on. */
 static void plane_drop_fb(uint32_t id)
 {
-    if (id && g_state.cursor.fb == id) {
-        g_state.cursor.fb = 0;
-        g_state.cursor.crtc = 0;
-        if (g_cursor_bo)
-            bo_unref_locked(g_cursor_bo);
-        g_cursor_bo = NULL;
-        link_cursor_locked(&(struct link_cursor){.fence = -1}); /* hidden, */
-        if (g_plane_shown)
-            link_present_locked(NULL, -1, 0); /* now, without a page flip */
+    for (int i = 0; id && i < g_screens; i++) {
+        struct screen_state *s = &g_state.sc[i];
+        struct screen *sc = &g_sc[i];
+        if (s->cursor.fb == id) {
+            s->cursor.fb = 0;
+            s->cursor.crtc = 0;
+            if (sc->cursor_bo)
+                bo_unref_locked(sc->cursor_bo);
+            sc->cursor_bo = NULL;
+            link_cursor_locked(i, &(struct link_cursor){.fence = -1}); /* hidden, */
+            if (sc->plane_shown)
+                link_present_locked(i, NULL, -1, 0); /* now, without a page flip */
+        }
+        if (s->primary.fb != id)
+            continue;
+        s->primary.fb = 0;
+        s->primary.crtc = 0;
+        if (sc->plane_bo)
+            bo_unref_locked(sc->plane_bo);
+        sc->plane_bo = NULL;
+        sc->plane_shown = sc->plane_on = 0;
     }
-    if (!id || g_state.primary.fb != id)
-        return;
-    g_state.primary.fb = 0;
-    g_state.primary.crtc = 0;
-    if (g_plane_bo)
-        bo_unref_locked(g_plane_bo);
-    g_plane_bo = NULL;
-    g_plane_shown = g_plane_on = 0;
 }
 
 /* The file lets go of its framebuffer. RMFB also takes it off the plane;
@@ -813,9 +945,6 @@ static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
     return 0;
 }
 
-static int g_in_fence = -1; /* our copy of the commit's IN_FENCE_FD, under g_lock */
-static int g_cursor_fence = -1; /* ...the cursor plane's */
-
 /* ---- atomic ---- */
 
 /* sync_file_get_fence() takes sync files only. The host tests' fences are
@@ -839,14 +968,21 @@ static int is_sync_file(int fd)
 #endif
 }
 
-/* Sets a property in `s`; *touched gets the objects it changes (1 primary
- * plane, 2 cursor plane, 4 CRTC, 8 connector). */
-static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v, int *touched)
+/* Sets a property in `state`; the object's screen gets in `touched` what it
+ * changes (1 primary plane, 2 cursor plane, 4 CRTC, 8 connector). A screen's
+ * connector and planes go on its own CRTC only. */
+static int set_prop(struct kms_state *state, uint32_t obj, uint32_t prop, uint64_t v, int *all_touched)
 {
+    int screen = obj_screen(&obj);
+    if (screen < 0)
+        return -ENOENT;
+    struct screen_state *s = &state->sc[screen];
+    int *touched = &all_touched[screen];
+    const uint32_t crtc = SCREEN_ID(screen, ID_CRTC);
     switch (obj) {
     case ID_CONNECTOR:
         *touched |= 8;
-        if (prop == P_CONN_CRTC_ID && (v == 0 || v == ID_CRTC)) {
+        if (prop == P_CONN_CRTC_ID && (v == 0 || v == crtc)) {
             s->conn_crtc = (uint32_t)v;
             return 0;
         }
@@ -875,7 +1011,7 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
             p->fb = (uint32_t)v; /* checked to exist by prop_value_ok */
             return 0;
         case P_PLANE_CRTC_ID:
-            if (v != 0 && v != ID_CRTC)
+            if (v != 0 && v != crtc)
                 return -EINVAL;
             p->crtc = (uint32_t)v;
             return 0;
@@ -890,7 +1026,7 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         case P_IN_FENCE_FD: {
             /* As drm_atomic_plane_set_property: one fence per plane and
              * commit, -1 for none, else a sync file. */
-            int *fence = cursor ? &g_cursor_fence : &g_in_fence;
+            int *fence = cursor ? &g_sc[screen].cursor_fence : &g_sc[screen].in_fence;
             if (*fence >= 0)
                 return -EINVAL;
             if (v == (uint64_t)-1)
@@ -932,52 +1068,55 @@ static int prop_value_ok(uint32_t prop, uint64_t v)
             return 1;
         if (d->values[0] == DRM_MODE_OBJECT_FB)
             return fb_find((uint32_t)v) != NULL;
-        return d->values[0] == DRM_MODE_OBJECT_CRTC && v == ID_CRTC;
+        uint32_t kind = (uint32_t)v;
+        return d->values[0] == DRM_MODE_OBJECT_CRTC && v <= UINT32_MAX && obj_screen(&kind) >= 0 && kind == ID_CRTC;
     }
     return v < (uint64_t)d->nenums; /* enum values are 0..n-1 */
 }
 
-static const struct drm_mode_modeinfo *state_mode(const struct kms_state *s)
+static const struct drm_mode_modeinfo *state_mode(const struct screen_state *s)
 {
     struct blob *b = s->mode_blob ? blob_find(s->mode_blob) : NULL;
     return b ? b->data : NULL;
 }
 
-/* Refresh rate of a mode in mHz (KWin's custom modes follow the display). */
-static uint32_t mode_mhz(const struct drm_mode_modeinfo *m)
+/* Refresh rate of a mode in mHz (KWin's custom modes follow the display);
+ * without one, the screen's own. */
+static uint32_t mode_mhz(const struct drm_mode_modeinfo *m, const struct screen *sc)
 {
     uint64_t pixels = m ? (uint64_t)m->htotal * m->vtotal : 0;
-    return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : g_mode_mhz;
+    return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : sc->mode_mhz;
 }
 
 void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height)
 {
     kms_init_once();
-    *width = g_screen_width;
-    *height = g_screen_height;
-    *mm_width = g_mm_width;
-    *mm_height = g_mm_height;
+    *width = g_sc[0].width; /* the first screen: the input devices are its window's */
+    *height = g_sc[0].height;
+    *mm_width = g_sc[0].mm_width;
+    *mm_height = g_sc[0].mm_height;
 }
 
 void kms_mode_size(uint32_t *width, uint32_t *height)
 {
     pthread_mutex_lock(&g_lock);
-    const struct drm_mode_modeinfo *m = state_mode(&g_state);
+    const struct drm_mode_modeinfo *m = state_mode(&g_state.sc[0]);
     *width = m ? m->hdisplay : 0;
     *height = m ? m->vdisplay : 0;
     pthread_mutex_unlock(&g_lock);
 }
 
-struct cham_bo *kms_screen_bo_locked(void)
+struct cham_bo *kms_screen_bo_locked(int screen)
 {
+    struct screen *sc = &g_sc[screen];
     /* for the app connected now: it may show a partial plane the last one couldn't */
-    g_plane_shown = g_plane_on && (!g_plane_partial || link_shows_planes_locked());
-    return g_plane_shown ? g_plane_bo : NULL;
+    sc->plane_shown = sc->plane_on && (!sc->plane_partial || link_shows_planes_locked(screen));
+    return sc->plane_shown ? sc->plane_bo : NULL;
 }
 
-int kms_screen_off_locked(void)
+int kms_screen_off_locked(int screen)
 {
-    return g_screen_off;
+    return g_sc[screen].off;
 }
 
 /* A commit's four lists. The kernel reads them entry by entry with
@@ -1084,7 +1223,8 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
         return -EINVAL;
 
     struct kms_state s = g_state;
-    s.in_fence = -1;
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        s.sc[i].in_fence = -1;
     /* A refused real commit is a bug somewhere; say why (tests fail often). */
     static int refusals;
 #define REFUSE(err, ...)                                                                 \
@@ -1099,7 +1239,7 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
     struct commit_lists lists, *l = &lists; /* ~7 KB on the caller's thread */
     read_lists(a, l);
     uint64_t k = 0;
-    int touched = 0;
+    int touched[CHAM_SCREENS] = {0};
     for (uint32_t i = 0; i < a->count_objs; i++) {
         uint32_t obj, count, type, nprops;
         if (list_u32(l, l->objs, a->objs_ptr, i, &obj))
@@ -1123,146 +1263,186 @@ static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
                 v = l->values[k];
             else if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
                 return -EFAULT;
-            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, &touched) : -EINVAL;
+            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, touched) : -EINVAL;
             if (ret)
                 REFUSE(ret, "object %u property %u = %llu", obj, prop, (unsigned long long)v);
         }
     }
 
-    /* As prepare_signaling: an event is some CRTC's, and a commit has the
-     * CRTC when it sets a property of it or of a plane or connector that is
-     * or was on it. */
-    int has_crtc = (touched & 4) || ((touched & 8) && (s.conn_crtc || g_state.conn_crtc)) ||
-                   ((touched & 1) && (s.primary.crtc || g_state.primary.crtc)) ||
-                   ((touched & 2) && (s.cursor.crtc || g_state.cursor.crtc));
-    if ((a->flags & DRM_MODE_PAGE_FLIP_EVENT) && !has_crtc)
+    /* Each screen is checked as the one CRTC it is; a commit may carry
+     * several (a compositor's modesets do). */
+    const struct drm_mode_modeinfo *mode[CHAM_SCREENS], *old_mode[CHAM_SCREENS];
+    int on[CHAM_SCREENS], modeset[CHAM_SCREENS], has_crtc[CHAM_SCREENS], any_crtc = 0, any_touched = 0;
+    for (int i = 0; i < g_screens; i++) {
+        const struct screen_state *n = &s.sc[i], *o = &g_state.sc[i];
+        /* As prepare_signaling: an event is some CRTC's, and a commit has the
+         * CRTC when it sets a property of it or of a plane or connector that
+         * is or was on it. */
+        has_crtc[i] = (touched[i] & 4) || ((touched[i] & 8) && (n->conn_crtc || o->conn_crtc)) ||
+                      ((touched[i] & 1) && (n->primary.crtc || o->primary.crtc)) ||
+                      ((touched[i] & 2) && (n->cursor.crtc || o->cursor.crtc));
+        any_crtc |= has_crtc[i];
+        any_touched |= touched[i];
+    }
+    if ((a->flags & DRM_MODE_PAGE_FLIP_EVENT) && !any_crtc)
         REFUSE(-EINVAL, "page-flip event without a CRTC in the commit");
 
-    const struct drm_mode_modeinfo *mode = state_mode(&s);
-    const struct drm_mode_modeinfo *old_mode = state_mode(&g_state);
-    int on = s.active && mode;
-    if (mode && (!mode->hdisplay || !mode->vdisplay || mode->hdisplay > 16384 || mode->vdisplay > 16384))
-        REFUSE(-EINVAL, "mode %ux%u", mode->hdisplay, mode->vdisplay);
-    if (s.active && !mode)
-        REFUSE(-EINVAL, "active CRTC without a mode");
-    int modeset = s.active != g_state.active || (!mode != !old_mode) ||
-                  (mode && old_mode && memcmp(mode, old_mode, sizeof *mode));
-    if (modeset && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
-        REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
-    /* The primary plane may go anywhere, as vkms's (can_position): bigger
-     * than the CRTC (KWin's first commit after a mode change can still carry
-     * the previous frame's size) it is clipped; smaller (KWin scanning out
-     * a window, or something alone on an empty screen) the rest is black.
-     * It may be scaled, as on displays that scale. */
-    const struct plane_state *pp = &s.primary, *cp = &s.cursor;
-    if ((pp->fb && !pp->crtc) || (cp->fb && !cp->crtc))
-        REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
-    if ((pp->crtc && !pp->fb) || (cp->crtc && !cp->fb))
-        REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
-    /* Both planes, as drm_atomic_plane_check: no overflow, the source inside
-     * the framebuffer. The cursor plane, as vkms's: any size and position
-     * (off the screen too), part of its framebuffer, no scaling (the helper's
-     * check with DRM_PLANE_NO_SCALING). */
-    int bad = plane_bounds(pp);
-    if (bad)
-        REFUSE(bad, "primary plane at %d,%d size %ux%u: %s", pp->crtc_x, pp->crtc_y, pp->crtc_w, pp->crtc_h,
-               bad == -ERANGE ? "too big" : "source outside its framebuffer");
-    bad = plane_bounds(cp);
-    if (bad)
-        REFUSE(bad, "cursor at %d,%d size %ux%u: %s", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h,
-               bad == -ERANGE ? "too big" : "source outside its framebuffer");
-    if (cp->fb && (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16))
-        REFUSE(-ERANGE, "cursor scaled");
+    for (int i = 0; i < g_screens; i++) {
+        const struct screen_state *n = &s.sc[i], *o = &g_state.sc[i];
+        mode[i] = state_mode(n);
+        old_mode[i] = state_mode(o);
+        on[i] = n->active && mode[i];
+        if (mode[i] && (!mode[i]->hdisplay || !mode[i]->vdisplay || mode[i]->hdisplay > 16384 ||
+                        mode[i]->vdisplay > 16384))
+            REFUSE(-EINVAL, "mode %ux%u", mode[i]->hdisplay, mode[i]->vdisplay);
+        if (n->active && !mode[i])
+            REFUSE(-EINVAL, "active CRTC without a mode");
+        modeset[i] = n->active != o->active || (!mode[i] != !old_mode[i]) ||
+                     (mode[i] && old_mode[i] && memcmp(mode[i], old_mode[i], sizeof *mode[i]));
+        if (modeset[i] && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
+            REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
+        /* The primary plane may go anywhere, as vkms's (can_position): bigger
+         * than the CRTC (KWin's first commit after a mode change can still carry
+         * the previous frame's size) it is clipped; smaller (KWin scanning out
+         * a window, or something alone on an empty screen) the rest is black.
+         * It may be scaled, as on displays that scale. */
+        const struct plane_state *pp = &n->primary, *cp = &n->cursor;
+        if ((pp->fb && !pp->crtc) || (cp->fb && !cp->crtc))
+            REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
+        if ((pp->crtc && !pp->fb) || (cp->crtc && !cp->fb))
+            REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
+        /* Both planes, as drm_atomic_plane_check: no overflow, the source inside
+         * the framebuffer. The cursor plane, as vkms's: any size and position
+         * (off the screen too), part of its framebuffer, no scaling (the helper's
+         * check with DRM_PLANE_NO_SCALING). */
+        int bad = plane_bounds(pp);
+        if (bad)
+            REFUSE(bad, "primary plane at %d,%d size %ux%u: %s", pp->crtc_x, pp->crtc_y, pp->crtc_w, pp->crtc_h,
+                   bad == -ERANGE ? "too big" : "source outside its framebuffer");
+        bad = plane_bounds(cp);
+        if (bad)
+            REFUSE(bad, "cursor at %d,%d size %ux%u: %s", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h,
+                   bad == -ERANGE ? "too big" : "source outside its framebuffer");
+        if (cp->fb && (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16))
+            REFUSE(-ERANGE, "cursor scaled");
+    }
     if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-        if (!s.active && !g_state.active) /* an event for turning it off is fine */
-            REFUSE(-EINVAL, "page-flip event with the CRTC off");
-        if (link_flip_pending_locked())
-            return -EBUSY;
+        for (int i = 0; i < g_screens; i++) /* an event for turning it off is fine */
+            if (has_crtc[i] && !s.sc[i].active && !g_state.sc[i].active)
+                REFUSE(-EINVAL, "page-flip event with the CRTC off");
+        for (int i = 0; i < g_screens; i++)
+            if (has_crtc[i] && link_flip_pending_locked(i))
+                return -EBUSY;
     }
 #undef REFUSE
     if (a->flags & DRM_MODE_ATOMIC_TEST_ONLY)
         return 0;
 
-    /* Commit. The kernel doesn't take ownership of IN_FENCE_FD either. */
-    int in_fence = (int)s.in_fence;
-    s.in_fence = -1;
-    struct fb *fb = pp->fb ? fb_find(pp->fb) : NULL;
-    struct cham_bo *bo = fb ? fb->bo : NULL;
-    if (bo)
-        bo_ref_locked(bo);
-    if (g_plane_bo)
-        bo_unref_locked(g_plane_bo);
-    g_plane_bo = bo;
-    /* A compositor draws a new cursor image into another buffer (the shown
-     * one is being scanned out), so a new framebuffer is a new image. */
-    int cursor_new = cp->fb != g_state.cursor.fb;
-    struct fb *cfb = cp->fb ? fb_find(cp->fb) : NULL;
-    struct cham_bo *cbo = cfb ? cfb->bo : NULL;
-    if (cbo)
-        bo_ref_locked(cbo);
-    if (g_cursor_bo)
-        bo_unref_locked(g_cursor_bo);
-    g_cursor_bo = cbo;
-    int new_size = modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
-                                       mode->vdisplay != old_mode->vdisplay);
+    /* Commit, each screen the commit has (one without any object: all, which
+     * shows what they show again). The kernel doesn't take ownership of
+     * IN_FENCE_FD either. */
+    int cursor_new[CHAM_SCREENS], new_size[CHAM_SCREENS], in_fence[CHAM_SCREENS];
+    for (int i = 0; i < g_screens; i++) {
+        struct screen *sc = &g_sc[i];
+        const struct screen_state *n = &s.sc[i];
+        in_fence[i] = (int)n->in_fence;
+        s.sc[i].in_fence = -1;
+        struct fb *fb = n->primary.fb ? fb_find(n->primary.fb) : NULL;
+        struct cham_bo *bo = fb ? fb->bo : NULL;
+        if (bo)
+            bo_ref_locked(bo);
+        if (sc->plane_bo)
+            bo_unref_locked(sc->plane_bo);
+        sc->plane_bo = bo;
+        /* A compositor draws a new cursor image into another buffer (the shown
+         * one is being scanned out), so a new framebuffer is a new image. */
+        cursor_new[i] = n->cursor.fb != g_state.sc[i].cursor.fb;
+        struct fb *cfb = n->cursor.fb ? fb_find(n->cursor.fb) : NULL;
+        struct cham_bo *cbo = cfb ? cfb->bo : NULL;
+        if (cbo)
+            bo_ref_locked(cbo);
+        if (sc->cursor_bo)
+            bo_unref_locked(sc->cursor_bo);
+        sc->cursor_bo = cbo;
+        new_size[i] = modeset[i] && mode[i] && (!old_mode[i] || mode[i]->hdisplay != old_mode[i]->hdisplay ||
+                                                mode[i]->vdisplay != old_mode[i]->vdisplay);
+    }
     g_state = s;
     free_destroyed_blobs(); /* the old mode's too, if the compositor destroyed it */
     free_unused_fbs(); /* a closed framebuffer the plane just let go of */
 
-    if (new_size)
-        cham_log("the compositor set mode %ux%u", mode->hdisplay, mode->vdisplay);
-    /* Off after having been on: the compositor's DPMS off (CRTC inactive, mode
-     * cleared) or the DPMS property; e.g. Plasma's power management after a
-     * while without input. */
-    if (on && s.dpms == 0)
-        g_screen_was_on = 1;
-    int screen_off = g_screen_was_on && !(on && s.dpms == 0);
-    if (screen_off != g_screen_off) {
-        cham_log("the compositor turned its screen %s", screen_off ? "off" : "on");
-        link_screen_off_locked(screen_off);
-    }
-    g_screen_off = screen_off;
-
     uint64_t frame = ++g_frame;
-    int presented = 0;
-    /* An app that can't show a plane covering part of the screen keeps the
-     * frame it shows until a whole one comes. */
-    struct link_plane lp = {.plain = 1};
-    int partial = bo && on && plane_geometry(pp, fb, mode, &lp);
-    link_plane_locked(&lp);
-    g_plane_on = bo && on && s.dpms == 0;
-    g_plane_partial = partial;
-    g_plane_shown = g_plane_on && (!partial || link_shows_planes_locked());
-    if (g_has_cursor) {
-        /* The app shows it over the frame, from the next present on. */
-        struct link_cursor c = {.fence = -1};
-        if (cbo && on && s.dpms == 0)
-            c = (struct link_cursor){cbo, cursor_new, g_state.cursor.crtc_x, g_state.cursor.crtc_y,
-                                     g_state.cursor.src_x >> 16, g_state.cursor.src_y >> 16, g_state.cursor.crtc_w,
-                                     g_state.cursor.crtc_h, g_cursor_fence};
-        else if (g_cursor_fence >= 0)
-            close(g_cursor_fence);
-        g_cursor_fence = -1; /* the link's now */
-        link_cursor_locked(&c);
+    for (int i = 0; i < g_screens; i++) {
+        struct screen *sc = &g_sc[i];
+        const struct screen_state *n = &g_state.sc[i];
+        if (!touched[i] && any_touched)
+            continue; /* not in this commit */
+        if (new_size[i]) {
+            if (i)
+                cham_log("screen %d: the compositor set mode %ux%u", i + 1, mode[i]->hdisplay, mode[i]->vdisplay);
+            else
+                cham_log("the compositor set mode %ux%u", mode[i]->hdisplay, mode[i]->vdisplay);
+        }
+        /* Off after having been on: the compositor's DPMS off (CRTC inactive, mode
+         * cleared) or the DPMS property; e.g. Plasma's power management after a
+         * while without input. */
+        if (on[i] && n->dpms == 0)
+            sc->was_on = 1;
+        int screen_off = sc->was_on && !(on[i] && n->dpms == 0);
+        if (screen_off != sc->off) {
+            if (i)
+                cham_log("screen %d: the compositor turned it %s", i + 1, screen_off ? "off" : "on");
+            else
+                cham_log("the compositor turned its screen %s", screen_off ? "off" : "on");
+            link_screen_off_locked(i, screen_off);
+        }
+        sc->off = screen_off;
+
+        int presented = 0;
+        struct cham_bo *bo = sc->plane_bo, *cbo = sc->cursor_bo;
+        struct fb *fb = n->primary.fb ? fb_find(n->primary.fb) : NULL;
+        /* An app that can't show a plane covering part of the screen keeps the
+         * frame it shows until a whole one comes. */
+        struct link_plane lp = {.plain = 1};
+        int partial = bo && on[i] && plane_geometry(&n->primary, fb, mode[i], &lp);
+        link_plane_locked(i, &lp);
+        sc->plane_on = bo && on[i] && n->dpms == 0;
+        sc->plane_partial = partial;
+        sc->plane_shown = sc->plane_on && (!partial || link_shows_planes_locked(i));
+        if (g_has_cursor) {
+            /* The app shows it over the frame, from the next present on. */
+            struct link_cursor c = {.fence = -1};
+            if (cbo && on[i] && n->dpms == 0)
+                c = (struct link_cursor){cbo, cursor_new[i], n->cursor.crtc_x, n->cursor.crtc_y,
+                                         n->cursor.src_x >> 16, n->cursor.src_y >> 16, n->cursor.crtc_w,
+                                         n->cursor.crtc_h, sc->cursor_fence};
+            else if (sc->cursor_fence >= 0)
+                close(sc->cursor_fence);
+            sc->cursor_fence = -1; /* the link's now */
+            link_cursor_locked(i, &c);
+        }
+        /* A commit of the cursor alone leaves the frame on screen as it is (the
+         * app needn't copy it again). */
+        int cursor_only = (touched[i] & 3) == 2 && !modeset[i];
+        if (sc->plane_shown)
+            presented = link_present_locked(i, cursor_only ? NULL : bo, in_fence[i], frame);
+        if ((a->flags & DRM_MODE_PAGE_FLIP_EVENT) && (has_crtc[i] || !any_touched))
+            link_queue_flip_locked(i, a->user_data, SCREEN_ID(i, ID_CRTC), f->event_wfd, frame, presented,
+                                   mode_mhz(mode[i], sc));
     }
-    /* A commit of the cursor alone leaves the frame on screen as it is (the
-     * app needn't copy it again). */
-    int cursor_only = (touched & 3) == 2 && !modeset;
-    if (g_plane_shown)
-        presented = link_present_locked(cursor_only ? NULL : bo, in_fence, frame);
-    if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
-        link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, mode_mhz(mode));
     return 0;
 }
 
 static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
 {
     int ret = commit(f, a);
-    if (g_in_fence >= 0)
-        close(g_in_fence); /* the caller's fence stays the caller's */
-    if (g_cursor_fence >= 0)
-        close(g_cursor_fence);
-    g_in_fence = g_cursor_fence = -1;
+    for (struct screen *sc = g_sc; sc < g_sc + CHAM_SCREENS; sc++) {
+        if (sc->in_fence >= 0)
+            close(sc->in_fence); /* the caller's fence stays the caller's */
+        if (sc->cursor_fence >= 0)
+            close(sc->cursor_fence);
+        sc->in_fence = sc->cursor_fence = -1;
+    }
     return ret;
 }
 

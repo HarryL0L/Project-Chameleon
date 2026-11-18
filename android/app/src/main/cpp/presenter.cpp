@@ -95,6 +95,7 @@ int64_t g_displayed = -1;   // buffer id currently latched on g_sc
 float g_frame_rate_vote = 0; // Hz; applied to g_sc on the next transaction
 bool g_vote_dirty = false;
 bool g_copy_mode = false;    // negotiated per connection via HELLO
+bool g_second_screen = false; // the producer's card has a second screen (CHAM_HELLO_SCREENS)
 bool g_screen_off = false;   // the producer turned its screen off (CHAM_SCREEN)
 // Android's text is the desktop's clipboard: its CHAM_CLIPBOARD_OFFER (a), or
 // -1 since the desktop copied. Offered again to each producer that connects.
@@ -963,6 +964,7 @@ void serve(int client, int arrivals)
             }
             set_mismatch("");
             g_copy_mode = (msg.b & CHAM_HELLO_COPY) != 0;
+            g_second_screen = (msg.b & CHAM_HELLO_SCREENS) != 0;
             LOGI("producer protocol v%llu%s", (unsigned long long)msg.a, g_copy_mode ? ", copy mode" : "");
             if (g_clip_offer >= 0)
                 send_locked(CHAM_CLIPBOARD_OFFER, 0, (uint64_t)g_clip_offer, 0);
@@ -1285,6 +1287,15 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeStatus(JNIEnv *env, jc
         }
     }
     return env->NewStringUTF(status.c_str());
+}
+
+// The connected producer's card has a second screen: a further window of the
+// app (ScreenActivity) can be it.
+JNIEXPORT jboolean JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSecondScreen(JNIEnv *, jclass)
+{
+    std::lock_guard<std::mutex> lock(g_lock);
+    return g_client >= 0 && g_second_screen;
 }
 
 // A producer was connected, and none has been for 3 s. If the session still

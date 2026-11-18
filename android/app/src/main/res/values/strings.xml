@@ -4,6 +4,8 @@
     <string name="menu">Chameleon menu</string>
     <string name="keyboard">Keyboard</string>
     <string name="settings">Settings</string>
+    <string name="second_screen">Second screen</string>
+    <string name="screen2">Chameleon 2</string>
     <string name="settings_title">Chameleon settings</string>
     <string name="touch_input">Touch</string>
     <string name="input_mode">Input mode</string>

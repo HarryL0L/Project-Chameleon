@@ -26,6 +26,7 @@ public final class BrokerLink extends BroadcastReceiver {
     private static IBinder sRegistered;      // the broker we registered with
     private static boolean sConnected;       // it has passed us a connection
     private static PackageManager sPackages;
+    private static String sAction = Broker.ACTION; // of this process's screen
 
     /** Receives the shim's connections; only Termux's user may send them. */
     private static final Binder sConnections = new Binder() {
@@ -51,7 +52,7 @@ public final class BrokerLink extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (!Broker.ACTION.equals(intent.getAction()))
+        if (!sAction.equals(intent.getAction()))
             return;
         Bundle extra = intent.getBundleExtra(Broker.EXTRA);
         IBinder broker = extra == null ? null : extra.getBinder(Broker.KEY_BINDER);
@@ -70,12 +71,13 @@ public final class BrokerLink extends BroadcastReceiver {
      * Called once the presenter runs. Registered at runtime, not in the
      * manifest, so the broker's announcements never launch the app.
      */
-    static void listen(Context context) {
+    static void listen(Context context, int screen) {
         Context app = context.getApplicationContext();
         synchronized (BrokerLink.class) {
             sPackages = app.getPackageManager();
+            sAction = Broker.action(screen);
         }
-        IntentFilter filter = new IntentFilter(Broker.ACTION);
+        IntentFilter filter = new IntentFilter(Broker.action(screen));
         // Sent from Termux, so exported (a flag Android 14 requires).
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
             app.registerReceiver(new BrokerLink(), filter, Context.RECEIVER_EXPORTED);

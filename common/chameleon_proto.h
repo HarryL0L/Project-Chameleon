@@ -146,6 +146,10 @@ enum cham_input_kind {
  * sends RELEASE (with the blit fence) right after the copy is queued. KWin
  * via the shim uses this. */
 #define CHAM_HELLO_COPY 1u
+/* CHAM_HELLO_SCREENS: the producer's card has a second screen, which a further
+ * window of the app can be: the producer looks for it at the socket's path
+ * with ".2" added (a broker of its own there, Broker.java). */
+#define CHAM_HELLO_SCREENS 2u
 
 /* CONFIG flags.
  *

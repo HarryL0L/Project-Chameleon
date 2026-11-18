@@ -429,8 +429,9 @@ static int own_refs(const struct cham_bo *bo)
 static void bo_free_locked(struct cham_bo *bo)
 {
     link_forget_bo_locked(bo);
-    if (bo->release_fence >= 0)
-        close(bo->release_fence);
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        if (bo->release_fence[i] >= 0)
+            close(bo->release_fence[i]);
     close(bo->dmabuf_fd);
     if (bo->release)
         bo->release(bo->ahb);
@@ -542,8 +543,8 @@ static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, 
     bo->dmabuf_dev = st.st_dev;
     bo->dmabuf_ino = st.st_ino;
     bo->refs = 1;
-    bo->slot = -1;
-    bo->release_fence = -1;
+    for (int i = 0; i < CHAM_SCREENS; i++)
+        bo->slot[i] = bo->release_fence[i] = -1;
 
     pthread_mutex_lock(&g_lock);
     bo->next = g_bos;
@@ -706,13 +707,13 @@ void cham_bo_unlock(struct cham_bo *bo)
         ahb.unlock(bo->ahb, NULL);
 }
 
-int bo_take_release_fences_locked(int *fences, int max)
+int bo_take_release_fences_locked(int screen, int *fences, int max)
 {
     int n = 0;
     for (struct cham_bo *bo = g_bos; bo && n < max; bo = bo->next) {
-        if (bo->release_fence >= 0) {
-            fences[n++] = bo->release_fence;
-            bo->release_fence = -1;
+        if (bo->release_fence[screen] >= 0) {
+            fences[n++] = bo->release_fence[screen];
+            bo->release_fence[screen] = -1;
         }
     }
     return n;

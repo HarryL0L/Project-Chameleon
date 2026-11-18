@@ -1,0 +1,450 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+/*
+ * A card with two screens (CHAMELEON_SCREENS=2) against the real libdrm: the
+ * second connector is a second window of the app, plugged in while that
+ * window exists. Two stand-in app windows, each on its own socket as the
+ * app's two processes are.
+ *
+ * Run via run-host-test.sh.
+ */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <time.h>
+#include <unistd.h>
+
+#include <drm_fourcc.h>
+#include <gbm.h>
+#include <xf86drm.h>
+#include <xf86drmMode.h>
+
+#include "../../common/cham_io.h"
+
+static int failures;
+#define CHECK(cond, ...)                                           \
+    do {                                                           \
+        if (cond) {                                                \
+            printf("  ok   " __VA_ARGS__);                         \
+        } else {                                                   \
+            printf("  FAIL " __VA_ARGS__);                         \
+            printf("       (%s, errno %s)\n", #cond, strerror(errno)); \
+            failures++;                                            \
+        }                                                          \
+        printf("\n");                                              \
+    } while (0)
+
+static uint64_t now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* ---- a stand-in window of the app ---- */
+
+struct window {
+    char path[108];
+    uint32_t win_w, win_h, w, h, mhz;
+    volatile int open;       /* the window exists: it takes the service's connection and reports its size */
+    volatile int connected;
+    volatile int presents, unchanged, buffers, hellos;
+    volatile uint64_t hello_flags;
+};
+
+static void take_buffer(int c)
+{
+    char packet[64];
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    struct iovec iov = {.iov_base = packet, .iov_len = sizeof packet};
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    if (recvmsg(c, &mh, MSG_CMSG_CLOEXEC) > 0) { /* the (fake) AHardwareBuffer */
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+        int fd = -1;
+        if (cm && cm->cmsg_type == SCM_RIGHTS)
+            memcpy(&fd, CMSG_DATA(cm), sizeof fd);
+        if (fd >= 0)
+            close(fd);
+    }
+}
+
+static void *window_main(void *arg)
+{
+    struct window *win = arg;
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    snprintf(addr.sun_path, sizeof addr.sun_path, "%s", win->path);
+    for (;;) {
+        while (!win->open)
+            usleep(10000);
+        /* Nothing listens while the window is closed, as no broker has a
+         * window to hand a connection to. */
+        int l = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        unlink(win->path);
+        bind(l, (struct sockaddr *)&addr, sizeof addr);
+        listen(l, 1);
+        int c = accept(l, NULL, NULL);
+        close(l);
+        unlink(win->path);
+        struct cham_msg window = {CHAM_WINDOW, 0, win->win_w | (uint64_t)win->win_h << 32, 0};
+        struct cham_msg cfg = {CHAM_CONFIG, CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE, win->w | (uint64_t)win->h << 32,
+                               win->mhz};
+        cham_send(c, &window, -1);
+        cham_send(c, &cfg, -1);
+        win->connected = 1;
+        while (win->open) {
+            struct pollfd p = {c, POLLIN, 0};
+            if (poll(&p, 1, 20) <= 0)
+                continue;
+            struct cham_msg m;
+            int fd = -1;
+            if (cham_recv(c, &m, &fd) <= 0)
+                break;
+            if (fd >= 0)
+                close(fd);
+            if (m.type == CHAM_HELLO) {
+                win->hello_flags = m.b;
+                win->hellos++;
+            } else if (m.type == CHAM_BUFFER_ADD) {
+                take_buffer(c);
+                win->buffers++;
+            } else if (m.type == CHAM_CURSOR) {
+                if (m.id != CHAM_CURSOR_HIDE && (m.id & CHAM_CURSOR_NEW)) {
+                    struct cham_msg rel = {CHAM_RELEASE, m.id & ~CHAM_CURSOR_NEW, 0, 0};
+                    cham_send(c, &rel, -1);
+                }
+            } else if (m.type == CHAM_PRESENT) {
+                win->presents++;
+                win->unchanged += m.id == CHAM_PRESENT_UNCHANGED;
+                struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
+                cham_send(c, &queued, -1);
+                usleep(4000);
+                if (m.id != CHAM_PRESENT_UNCHANGED) {
+                    struct cham_msg rel = {CHAM_RELEASE, m.id, 0, 0};
+                    cham_send(c, &rel, -1);
+                }
+                struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, now_ns()};
+                cham_send(c, &done, -1);
+            }
+        }
+        close(c); /* the window is closed */
+        win->connected = 0;
+    }
+    return NULL;
+}
+
+/* ---- helpers ---- */
+
+static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, uint64_t *value)
+{
+    uint32_t id = 0;
+    drmModeObjectProperties *props = drmModeObjectGetProperties(fd, obj, type);
+    for (uint32_t i = 0; props && i < props->count_props; i++) {
+        drmModePropertyRes *p = drmModeGetProperty(fd, props->props[i]);
+        if (p && strcmp(p->name, name) == 0) {
+            id = p->prop_id;
+            if (value)
+                *value = props->prop_values[i];
+        }
+        drmModeFreeProperty(p);
+    }
+    drmModeFreeObjectProperties(props);
+    return id;
+}
+
+static int g_flips;
+static unsigned g_flip_crtc[8];
+static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned crtc, void *data)
+{
+    (void)fd, (void)seq, (void)sec, (void)usec, (void)data;
+    if (g_flips < 8)
+        g_flip_crtc[g_flips] = crtc;
+    g_flips++;
+}
+
+/* Waits until `count` page-flip events came since the last call's end. */
+static int wait_flips(int fd, int count, int timeout_ms)
+{
+    uint64_t end = now_ns() + (uint64_t)timeout_ms * 1000000ull;
+    g_flips = 0;
+    while (g_flips < count && now_ns() < end) {
+        struct pollfd p = {fd, POLLIN, 0};
+        if (poll(&p, 1, 50) <= 0)
+            continue;
+        drmEventContext ctx = {.version = 3, .page_flip_handler2 = on_flip};
+        drmHandleEvent(fd, &ctx);
+    }
+    return g_flips;
+}
+
+static int flipped_on(unsigned crtc)
+{
+    for (int i = 0; i < g_flips && i < 8; i++)
+        if (g_flip_crtc[i] == crtc)
+            return 1;
+    return 0;
+}
+
+static int wait_for(volatile int *what, int value, int timeout_ms)
+{
+    for (int i = 0; i < timeout_ms / 10 && *what != value; i++)
+        usleep(10000);
+    return *what == value;
+}
+
+static uint32_t make_fb(int fd, struct gbm_device *gbm, uint32_t w, uint32_t h)
+{
+    struct gbm_bo *bo = gbm_bo_create(gbm, w, h, DRM_FORMAT_XBGR8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+    uint32_t handles[4] = {bo ? gbm_bo_get_handle(bo).u32 : 0}, pitches[4] = {bo ? gbm_bo_get_stride(bo) : 0},
+             offsets[4] = {0}, fb = 0;
+    if (!bo || drmModeAddFB2(fd, w, h, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &fb, 0) != 0)
+        return 0;
+    return fb;
+}
+
+/* One screen's objects and the properties a compositor sets. */
+struct pipe_ids {
+    uint32_t conn, crtc, plane, w, h;
+    uint32_t p_conn_crtc, p_active, p_mode, p_fb, p_pcrtc, p_src[4], p_dst[4];
+    uint32_t fbs[2], blob;
+};
+
+static void pipe_props(int fd, struct pipe_ids *p)
+{
+    static const char *const src[] = {"SRC_X", "SRC_Y", "SRC_W", "SRC_H"};
+    static const char *const dst[] = {"CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H"};
+    p->p_conn_crtc = prop_id(fd, p->conn, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", NULL);
+    p->p_active = prop_id(fd, p->crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE", NULL);
+    p->p_mode = prop_id(fd, p->crtc, DRM_MODE_OBJECT_CRTC, "MODE_ID", NULL);
+    p->p_fb = prop_id(fd, p->plane, DRM_MODE_OBJECT_PLANE, "FB_ID", NULL);
+    p->p_pcrtc = prop_id(fd, p->plane, DRM_MODE_OBJECT_PLANE, "CRTC_ID", NULL);
+    for (int i = 0; i < 4; i++) {
+        p->p_src[i] = prop_id(fd, p->plane, DRM_MODE_OBJECT_PLANE, src[i], NULL);
+        p->p_dst[i] = prop_id(fd, p->plane, DRM_MODE_OBJECT_PLANE, dst[i], NULL);
+    }
+}
+
+static void add_modeset(drmModeAtomicReq *req, const struct pipe_ids *p)
+{
+    drmModeAtomicAddProperty(req, p->conn, p->p_conn_crtc, p->crtc);
+    drmModeAtomicAddProperty(req, p->crtc, p->p_active, 1);
+    drmModeAtomicAddProperty(req, p->crtc, p->p_mode, p->blob);
+    drmModeAtomicAddProperty(req, p->plane, p->p_fb, p->fbs[0]);
+    drmModeAtomicAddProperty(req, p->plane, p->p_pcrtc, p->crtc);
+    uint64_t src[4] = {0, 0, (uint64_t)p->w << 16, (uint64_t)p->h << 16}, dst[4] = {0, 0, p->w, p->h};
+    for (int i = 0; i < 4; i++) {
+        drmModeAtomicAddProperty(req, p->plane, p->p_src[i], src[i]);
+        drmModeAtomicAddProperty(req, p->plane, p->p_dst[i], dst[i]);
+    }
+}
+
+static int flip(int fd, const struct pipe_ids *p, int which)
+{
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, p->plane, p->p_fb, p->fbs[which]);
+    int ret = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL);
+    drmModeAtomicFree(req);
+    return ret;
+}
+
+int main(void)
+{
+    const char *dev_path = getenv("CHAMELEON_DRM_PATH"), *sock = getenv("CHAMELEON_SOCKET");
+    if (!dev_path || !sock) {
+        fprintf(stderr, "run via run-host-test.sh\n");
+        return 2;
+    }
+    static struct window first = {.win_w = 1080, .win_h = 2400, .w = 1080, .h = 1800, .mhz = 120000, .open = 1};
+    static struct window second = {.win_w = 1080, .win_h = 2400, .w = 1080, .h = 1500, .mhz = 60000};
+    snprintf(first.path, sizeof first.path, "%s", sock);
+    snprintf(second.path, sizeof second.path, "%s.2", sock);
+    pthread_t t;
+    pthread_create(&t, NULL, window_main, &first);
+    pthread_create(&t, NULL, window_main, &second);
+
+    printf("a card with two screens\n");
+    int fd = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd >= 0 && drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "the card opens, atomic");
+    CHECK(first.hellos == 1 && (first.hello_flags & CHAM_HELLO_SCREENS),
+          "the app's first window is told of the second screen");
+    drmModeRes *res = drmModeGetResources(fd);
+    CHECK(res && res->count_crtcs == 2 && res->count_connectors == 2 && res->count_encoders == 2,
+          "resources: 2 crtcs / connectors / encoders");
+    drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
+    CHECK(pres && pres->count_planes == 4, "four planes: a primary and a cursor plane each");
+    if (!res || res->count_crtcs != 2 || res->count_connectors != 2 || !pres || pres->count_planes != 4) {
+        printf("\nFAILED: not the objects to test\n");
+        return 1;
+    }
+    struct pipe_ids a = {.conn = res->connectors[0], .crtc = res->crtcs[0], .plane = pres->planes[0], .w = 1080,
+                         .h = 1800};
+    struct pipe_ids b = {.conn = res->connectors[1], .crtc = res->crtcs[1], .plane = pres->planes[2], .w = 1080,
+                         .h = 1500};
+    uint32_t masks[4];
+    uint64_t types[4];
+    for (int i = 0; i < 4; i++) {
+        drmModePlane *pl = drmModeGetPlane(fd, pres->planes[i]);
+        masks[i] = pl ? pl->possible_crtcs : 0;
+        drmModeFreePlane(pl);
+        prop_id(fd, pres->planes[i], DRM_MODE_OBJECT_PLANE, "type", &types[i]);
+    }
+    CHECK(masks[0] == 1 && masks[1] == 1 && masks[2] == 2 && masks[3] == 2,
+          "each screen's planes go on its own CRTC (masks %u %u %u %u)", masks[0], masks[1], masks[2], masks[3]);
+    CHECK(types[0] == 1 && types[1] == 2 && types[2] == 1 && types[3] == 2, "primary, cursor, primary, cursor");
+    drmModeEncoder *enc = drmModeGetEncoder(fd, res->encoders[1]);
+    CHECK(enc && enc->possible_crtcs == 2, "the second encoder drives the second CRTC");
+    drmModeFreeEncoder(enc);
+    pipe_props(fd, &a);
+    pipe_props(fd, &b);
+
+    drmModeConnector *conn = drmModeGetConnector(fd, a.conn);
+    CHECK(conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes == 1 &&
+              conn->modes[0].hdisplay == 1080 && conn->modes[0].vdisplay == 1800 && conn->connector_type_id == 1,
+          "DSI-1: connected, the first window's mode");
+    drmModeModeInfo mode_a = conn && conn->count_modes ? conn->modes[0] : (drmModeModeInfo){0};
+    drmModeFreeConnector(conn);
+    conn = drmModeGetConnector(fd, b.conn);
+    uint64_t edid = 99;
+    uint32_t p_edid = prop_id(fd, b.conn, DRM_MODE_OBJECT_CONNECTOR, "EDID", &edid);
+    CHECK(conn && conn->connection == DRM_MODE_DISCONNECTED && conn->count_modes == 0 && conn->mmWidth == 0 &&
+              conn->connector_type == DRM_MODE_CONNECTOR_DSI && conn->connector_type_id == 2,
+          "DSI-2: disconnected, no modes (its window isn't open)");
+    CHECK(p_edid && edid == 0, "...and no EDID");
+    drmModeFreeConnector(conn);
+    CHECK(second.hellos == 0 && !second.connected, "nothing was sent to a window that isn't there");
+
+    printf("the first screen alone\n");
+    struct gbm_device *gbm = gbm_create_device(fd);
+    for (int i = 0; i < 2; i++) {
+        a.fbs[i] = make_fb(fd, gbm, a.w, a.h);
+        b.fbs[i] = make_fb(fd, gbm, b.w, b.h);
+    }
+    CHECK(a.fbs[0] && a.fbs[1] && b.fbs[0] && b.fbs[1], "framebuffers for both");
+    drmModeCreatePropertyBlob(fd, &mode_a, sizeof mode_a, &a.blob);
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    add_modeset(req, &a);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0, "modeset on the first screen");
+    drmModeAtomicFree(req);
+    CHECK(flip(fd, &a, 1) == 0 && wait_flips(fd, 1, 2000) == 1 && g_flip_crtc[0] == a.crtc,
+          "a page flip there: its event names the first CRTC");
+    CHECK(wait_for(&first.presents, 2, 2000) && second.presents == 0, "its frames went to the first window (%d)",
+          first.presents);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, b.plane, b.p_pcrtc, a.crtc);
+    drmModeAtomicAddProperty(req, b.plane, b.p_fb, b.fbs[0]);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) != 0 && errno == EINVAL,
+          "the second screen's plane on the first CRTC: EINVAL");
+    drmModeAtomicFree(req);
+
+    printf("the second window opens\n");
+    second.open = 1;
+    int plugged = 0;
+    for (int i = 0; i < 400 && !plugged; i++) { /* the service looks for it once a second */
+        usleep(10000);
+        conn = drmModeGetConnector(fd, b.conn);
+        plugged = conn && conn->connection == DRM_MODE_CONNECTED;
+        if (!plugged)
+            drmModeFreeConnector(conn);
+    }
+    CHECK(plugged && conn->count_modes == 1 && conn->modes[0].hdisplay == 1080 && conn->modes[0].vdisplay == 1500 &&
+              conn->modes[0].vrefresh == 60,
+          "DSI-2: connected, with its window's mode (1080x1500 @ 60)");
+    CHECK(plugged && conn->mmWidth == 69 && conn->mmHeight == 152, "its size is its whole window's (%ux%u mm)",
+          plugged ? conn->mmWidth : 0, plugged ? conn->mmHeight : 0);
+    drmModeModeInfo mode_b = plugged && conn->count_modes ? conn->modes[0] : (drmModeModeInfo){0};
+    if (plugged)
+        drmModeFreeConnector(conn);
+    CHECK(second.hellos == 1 && !(second.hello_flags & CHAM_HELLO_SCREENS), "its own connection, a plain hello");
+    edid = 0;
+    prop_id(fd, b.conn, DRM_MODE_OBJECT_CONNECTOR, "EDID", &edid);
+    drmModePropertyBlobRes *eb = edid ? drmModeGetPropertyBlob(fd, (uint32_t)edid) : NULL;
+    const unsigned char *e = eb ? eb->data : NULL;
+    uint64_t edid_a = 0;
+    prop_id(fd, a.conn, DRM_MODE_OBJECT_CONNECTOR, "EDID", &edid_a);
+    CHECK(e && eb->length == 128 && e[10] == 2 && memcmp(e + 77, "Chameleon 2\n", 12) == 0 && edid != edid_a,
+          "its EDID: another monitor, \"Chameleon 2\"");
+    unsigned char sum = 0;
+    for (int i = 0; e && i < 128; i++)
+        sum = (unsigned char)(sum + e[i]);
+    CHECK(e && sum == 0, "...with a valid checksum");
+    drmModeFreePropertyBlob(eb);
+
+    printf("both screens\n");
+    drmModeCreatePropertyBlob(fd, &mode_b, sizeof mode_b, &b.blob);
+    int before_a = first.presents;
+    req = drmModeAtomicAlloc();
+    add_modeset(req, &b);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0, "modeset on the second screen");
+    drmModeAtomicFree(req);
+    CHECK(wait_for(&second.presents, 1, 2000) && second.buffers == 1, "its frame went to the second window");
+    CHECK(first.presents == before_a, "...and nothing new to the first");
+    int both = 1; /* the first flip after a modeset may complete at once */
+    for (int i = 0; i < 3; i++)
+        both &= flip(fd, &a, i & 1) == 0 && flip(fd, &b, !(i & 1)) == 0 && wait_flips(fd, 2, 2000) == 2 &&
+                flipped_on(a.crtc) && flipped_on(b.crtc);
+    CHECK(both, "flips on both, an event from each CRTC every time");
+    CHECK(flip(fd, &a, 0) == 0 && flip(fd, &b, 1) == 0, "a flip on each while the other's is pending");
+    CHECK(flip(fd, &b, 0) != 0 && errno == EBUSY, "a second on the same CRTC: EBUSY");
+    CHECK(wait_flips(fd, 2, 2000) == 2 && flipped_on(a.crtc) && flipped_on(b.crtc), "an event from each CRTC");
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, a.plane, a.p_fb, a.fbs[1]);
+    drmModeAtomicAddProperty(req, b.plane, b.p_fb, b.fbs[0]);
+    before_a = first.presents;
+    int before_b = second.presents;
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0,
+          "one commit for both");
+    drmModeAtomicFree(req);
+    CHECK(wait_flips(fd, 2, 2000) == 2 && flipped_on(a.crtc) && flipped_on(b.crtc), "...completes on both");
+    CHECK(wait_for(&first.presents, before_a + 1, 2000) && wait_for(&second.presents, before_b + 1, 2000),
+          "one frame to each window");
+    drmModeCrtc *crtc = drmModeGetCrtc(fd, b.crtc);
+    CHECK(crtc && crtc->mode_valid && crtc->mode.vdisplay == 1500 && crtc->buffer_id == b.fbs[0],
+          "GETCRTC of the second: its mode and framebuffer");
+    drmModeFreeCrtc(crtc);
+
+    printf("the second window closes\n");
+    second.open = 0;
+    int unplugged = 0;
+    for (int i = 0; i < 300 && !unplugged; i++) {
+        usleep(10000);
+        conn = drmModeGetConnector(fd, b.conn);
+        unplugged = conn && conn->connection == DRM_MODE_DISCONNECTED && conn->count_modes == 0;
+        drmModeFreeConnector(conn);
+    }
+    CHECK(unplugged, "DSI-2: disconnected again");
+    before_b = second.presents;
+    CHECK(flip(fd, &b, 1) == 0 && wait_flips(fd, 1, 2000) == 1 && g_flip_crtc[0] == b.crtc &&
+              second.presents == before_b,
+          "a flip on its CRTC still completes (nothing shown), as on a monitor pulled out");
+    before_a = first.presents;
+    CHECK(flip(fd, &a, 0) == 0 && wait_flips(fd, 1, 2000) == 1 && g_flip_crtc[0] == a.crtc &&
+              wait_for(&first.presents, before_a + 1, 2000),
+          "the first screen goes on as before");
+
+    printf("...and opens again\n");
+    before_b = second.presents;
+    second.open = 1;
+    plugged = 0;
+    for (int i = 0; i < 400 && !plugged; i++) {
+        usleep(10000);
+        conn = drmModeGetConnector(fd, b.conn);
+        plugged = conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes == 1;
+        drmModeFreeConnector(conn);
+    }
+    CHECK(plugged, "DSI-2: connected");
+    CHECK(wait_for(&second.presents, before_b + 1, 2000), "the frame on its CRTC is shown in the new window");
+    CHECK(flip(fd, &b, 0) == 0 && wait_flips(fd, 1, 2000) == 1 && g_flip_crtc[0] == b.crtc,
+          "its page flips complete again");
+
+    printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+    return failures != 0;
+}

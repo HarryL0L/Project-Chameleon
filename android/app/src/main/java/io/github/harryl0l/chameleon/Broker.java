@@ -19,12 +19,14 @@ import java.lang.reflect.Method;
 /**
  * Runs in Termux, as the Termux user, started by the `chameleon` launcher:
  *
- *   CLASSPATH=<apk> app_process / io.github.harryl0l.chameleon.Broker <pid> <socket>
+ *   CLASSPATH=<apk> app_process / io.github.harryl0l.chameleon.Broker <pid> <socket> [<screen>]
  *
  * The app can't listen in $PREFIX/tmp, so this process does while the app is
  * registered, and hands each connection from KWin's shim to the app over
  * Binder. The app finds it through a broadcast carrying this Binder, repeated
- * until it registers. Exits when <pid> (the session) does.
+ * until it registers. Exits when <pid> (the session) does. With <screen> 2 it
+ * serves the app's second window (ScreenActivity, a process of its own),
+ * which alone listens for that broadcast.
  */
 public final class Broker extends Binder {
     static final String ACTION = "io.github.harryl0l.chameleon.action.BROKER";
@@ -37,23 +39,37 @@ public final class Broker extends Binder {
 
     private static final String APP = "io.github.harryl0l.chameleon";
 
+    /** The broadcast a screen's window listens for: the first's is ACTION itself. */
+    static String action(int screen) {
+        return screen == 0 ? ACTION : ACTION + "." + (screen + 1);
+    }
+
     private final String mPath;
+    private final String mAction;
     private IBinder mApp;          // guarded by this
     private LocalSocket mSocket;   // guarded by this; listening while mApp is set
     private LocalServerSocket mServer;
     private long mInode;           // of mPath while it's our socket
 
-    private Broker(String path) {
+    private Broker(String path, String action) {
         mPath = path;
+        mAction = action;
     }
 
     public static void main(String[] args) {
-        if (args.length != 2) {
-            System.err.println("usage: Broker <pid to follow> <socket path>");
+        int screen = 0;
+        try {
+            if (args.length == 3)
+                screen = Integer.parseInt(args[2]) - 1;
+        } catch (NumberFormatException e) {
+            screen = -1;
+        }
+        if (args.length < 2 || args.length > 3 || screen < 0) {
+            System.err.println("usage: Broker <pid to follow> <socket path> [<screen, from 2>]");
             System.exit(2);
         }
         File session = new File("/proc/" + args[0]);
-        Broker broker = new Broker(args[1]);
+        Broker broker = new Broker(args[1], action(screen));
         System.out.println("chameleon-broker: waiting for the Chameleon app");
         try {
             while (session.exists()) {
@@ -75,7 +91,7 @@ public final class Broker extends Binder {
     private void announce() {
         Bundle extra = new Bundle();
         extra.putBinder(KEY_BINDER, this);
-        Intent intent = new Intent(ACTION)
+        Intent intent = new Intent(mAction)
                 .setPackage(APP)
                 .putExtra(EXTRA, extra);
         try {

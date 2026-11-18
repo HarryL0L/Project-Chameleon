@@ -20,7 +20,7 @@ void bo_ref_locked(struct cham_bo *bo);
 void bo_unref_locked(struct cham_bo *bo);
 /* Takes every pending presenter release fence (up to max) for the caller
  * to wait on and close. */
-int bo_take_release_fences_locked(int *fences, int max);
+int bo_take_release_fences_locked(int screen, int *fences, int max);
 /* An AHardwareBuffer sent by another process (card.c). */
 AHardwareBuffer *ahb_recv(int sock);
 /* The bo for a buffer another process sent (card.c), one per buffer however
@@ -41,7 +41,8 @@ int ahb_send(const AHardwareBuffer *b, int sock);
 int bo_send(const struct cham_bo *bo, int sock);
 
 /* ---- link.c: connection to the presenter app ---- */
-void link_start(void);
+/* `screens`: the card's screens, each with a link to its window of the app. */
+void link_start(int screens);
 /* Blocks until the presenter reported a surface size, or the timeout; the
  * window's size is 0x0 from an app that doesn't report it. */
 int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, uint32_t *win_width,
@@ -49,7 +50,7 @@ int link_wait_config(uint32_t *width, uint32_t *height, uint32_t *refresh_mhz, u
 /* Shows `bo` (acquire fence borrowed, may be -1); NULL leaves the frame on
  * screen as it is (only the cursor changed). Returns 1 if the presenter will
  * answer with FRAME_DONE for `frame`, 0 if nothing is on screen. */
-int link_present_locked(struct cham_bo *bo, int in_fence, uint64_t frame);
+int link_present_locked(int screen, struct cham_bo *bo, int in_fence, uint64_t frame);
 /* The app shows a cursor plane (it said so in its first CONFIG), unless
  * CHAMELEON_CURSOR_PLANE=0/1 says otherwise. */
 int link_app_cursor(void);
@@ -62,7 +63,7 @@ struct link_cursor {
     uint32_t src_x, src_y, w, h; /* the part of the buffer shown, pixels */
     int fence;
 };
-void link_cursor_locked(const struct link_cursor *c);
+void link_cursor_locked(int screen, const struct link_cursor *c);
 /* The primary plane as committed, for the next presents: plain if its whole
  * buffer is the whole screen; else the part of the buffer shown (pixels) and
  * where it goes on the screen, clipped to it (w or h 0: nothing), the rest
@@ -73,18 +74,23 @@ struct link_plane {
     uint32_t src_x, src_y, src_w, src_h;
     uint32_t dst_x, dst_y, dst_w, dst_h;
 };
-void link_plane_locked(const struct link_plane *p);
+void link_plane_locked(int screen, const struct link_plane *p);
 /* The app shows a plane that isn't the whole screen (CHAM_CONFIG_PLANE). */
-int link_shows_planes_locked(void);
+int link_shows_planes_locked(int screen);
 void link_forget_bo_locked(struct cham_bo *bo);
 /* Tells the presenter the compositor turned its screen off (1) or on (0). */
-void link_screen_off_locked(int off);
+void link_screen_off_locked(int screen, int off);
+/* The whole window of a screen's app window, 0x0 if not known. */
+void link_window_locked(int screen, uint32_t *width, uint32_t *height);
+/* Posted to the input thread for a screen after the first (id): its window's
+ * size (a, as CHAM_CONFIG; 0: the window is gone) and refresh rate (b). */
+#define LINK_SCREEN_PANEL 0x5343524eu
 /* Page-flip event bookkeeping (one pending flip, like KMS). */
-int link_flip_pending_locked(void);
+int link_flip_pending_locked(int screen);
 /* The pending flip's event would go to a file being closed: drop it. */
 void link_cancel_flip_locked(int event_fd);
-void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
-                            uint32_t refresh_mhz);
+void link_queue_flip_locked(int screen, uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame,
+                            int presented, uint32_t refresh_mhz);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
 void link_clipboard(uint32_t type, uint64_t a, int fd);
 
@@ -178,11 +184,14 @@ pid_t kms_master_pid(void);
 /* Size of the mode the compositor has set, 0x0 before the first modeset. */
 void kms_mode_size(uint32_t *width, uint32_t *height);
 /* The app's surface as the connector's mode; 1 if that changed it. */
-int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz);
+int kms_panel(int screen, uint32_t width, uint32_t height, uint32_t refresh_mhz);
+/* A further screen's window is gone: its connector reads disconnected.
+ * Returns 1 if that changed. */
+int kms_unplug(int screen);
 /* The buffer on the compositor's screen, or NULL if the screen shows none. */
-struct cham_bo *kms_screen_bo_locked(void);
+struct cham_bo *kms_screen_bo_locked(int screen);
 /* The compositor turned its screen off (it wakes on input). */
-int kms_screen_off_locked(void);
+int kms_screen_off_locked(int screen);
 /* `arg` is an address in the calling process. 0 / >=0 or -errno. */
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);
 /* A GEM handle in `f` for a buffer its process sent (card.c); 0 if none. */

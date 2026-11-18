@@ -52,6 +52,9 @@ extern "C" {
 
 typedef struct AHardwareBuffer AHardwareBuffer;
 
+/* The card's screens at most: the app's main window, and one further window. */
+#define CHAM_SCREENS 2
+
 /* An AHardwareBuffer standing in for a GEM buffer object. */
 struct cham_bo {
     uint32_t width, height;
@@ -64,9 +67,10 @@ struct cham_bo {
 
     /* private to the core */
     int refs;
-    int slot;          /* presenter buffer id, -1 if not registered */
-    uint64_t slot_gen; /* presenter connection the slot belongs to */
-    int release_fence; /* last RELEASE fence from the presenter */
+    /* per screen (its window of the app): */
+    int slot[CHAM_SCREENS];          /* presenter buffer id, -1 if not registered */
+    uint64_t slot_gen[CHAM_SCREENS]; /* presenter connection the slot belongs to */
+    int release_fence[CHAM_SCREENS]; /* last RELEASE fence from the presenter */
     void (*release)(AHardwareBuffer *); /* for cham_bo_wrap()'s buffers */
     int base_refs;     /* cham_bo_create(): references to the dmabuf the buffer holds itself */
     int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */

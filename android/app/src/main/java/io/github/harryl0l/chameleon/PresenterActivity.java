@@ -78,6 +78,7 @@ public class PresenterActivity extends Activity
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
     private static native boolean nativeLostProducer();
+    private static native boolean nativeSecondScreen();
     /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
     static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
@@ -106,6 +107,7 @@ public class PresenterActivity extends Activity
     private final KeyInput mKeys = new KeyInput();
     private ImeView mImeView;
     private FloatingMenu mMenu;
+    private View mSecondScreen;
     private HorizontalScrollView mExtraKeys;
     private Button mCtrlKey, mAltKey;
     private boolean mKeyboardShown;
@@ -124,6 +126,8 @@ public class PresenterActivity extends Activity
             if (!showing)
                 mStatus.setText("Chameleon: " + status);
             mWakeHint.setVisibility(off ? View.VISIBLE : View.GONE);
+            if (mSecondScreen != null) // only with a session whose card has one
+                mSecondScreen.setVisibility(nativeSecondScreen() ? View.VISIBLE : View.GONE);
             mHandler.postDelayed(this, 500);
         }
     };
@@ -198,9 +202,15 @@ public class PresenterActivity extends Activity
         root.addView(mWakeHint, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         root.addView(mImeView, new FrameLayout.LayoutParams(1, 1));
-        mMenu = new FloatingMenu(this, mPrefs,
-                toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard()),
-                toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings()));
+        View keyboard = toolbarButton(R.drawable.ic_keyboard, R.string.keyboard, v -> toggleKeyboard());
+        View settings = toolbarButton(R.drawable.ic_tune, R.string.settings, v -> showSettings());
+        if (screen() == 0) {
+            mSecondScreen = toolbarButton(R.drawable.ic_screens, R.string.second_screen, v -> openSecondScreen());
+            mSecondScreen.setVisibility(View.GONE);
+            mMenu = new FloatingMenu(this, mPrefs, keyboard, settings, mSecondScreen);
+        } else {
+            mMenu = new FloatingMenu(this, mPrefs, keyboard, settings);
+        }
         root.addView(buildExtraKeys(), new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM));
         // Last, so it stays above the extra keys.
@@ -232,9 +242,25 @@ public class PresenterActivity extends Activity
 
         if (!sStarted) {
             nativeStart(); // serves the connections the Termux broker passes on
-            BrokerLink.listen(this);
+            BrokerLink.listen(this, screen());
             sStarted = true;
         }
+    }
+
+    /**
+     * Which screen of the desktop's card this window is: 0, the app's main
+     * window; ScreenActivity is 1, a second monitor, in a process of its own
+     * (the native presenter serves one window).
+     */
+    int screen() {
+        return 0;
+    }
+
+    private void openSecondScreen() {
+        // Beside this window when it is in split screen, as a file manager's
+        // "New window" opens; otherwise over it.
+        startActivity(new Intent(this, ScreenActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_LAUNCH_ADJACENT));
     }
 
     // ---- toolbar, keyboard and extra keys ----
@@ -445,11 +471,13 @@ public class PresenterActivity extends Activity
 
     private void applyInputPrefs() {
         mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT);
-        mClipboard.setEnabled(mPrefs.getBoolean(PREF_CLIPBOARD, true));
+        // Android's clipboard is shared through the main window's connection.
+        mClipboard.setEnabled(screen() == 0 && mPrefs.getBoolean(PREF_CLIPBOARD, true));
     }
 
     private boolean isTrackpad() {
-        return "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
+        // A further screen's window is a touchpad only, for now.
+        return screen() != 0 || "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
     }
 
     private boolean backLeavesApp() {

@@ -206,8 +206,13 @@ static int connect_wayland(void)
 
 /* The app's window, as the panel: the compositor follows a hotplug. With
  * CHAMELEON_RESIZE=0 the panel keeps its first size (the app scales). */
-static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+static void config(int screen, uint32_t width, uint32_t height, uint32_t refresh_mhz)
 {
+    if (screen) { /* a further screen: its window plugs its monitor in and out */
+        if (width && height ? kms_panel(screen, width, height, refresh_mhz) : kms_unplug(screen))
+            evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
+        return;
+    }
     static int disabled = -1;
     if (disabled < 0) {
         const char *env = getenv("CHAMELEON_RESIZE");
@@ -215,7 +220,7 @@ static void config(uint32_t width, uint32_t height, uint32_t refresh_mhz)
         if (disabled)
             cham_log("CHAMELEON_RESIZE=0: the compositor's screen keeps its size");
     }
-    if (!disabled && width && height && kms_panel(width, height, refresh_mhz))
+    if (!disabled && width && height && kms_panel(0, width, height, refresh_mhz))
         evdev_uevent(CHAM_UEVENT_CARD_HOTPLUG);
 }
 
@@ -273,7 +278,9 @@ static void *input_main(void *arg)
         for (size_t i = 0; i < count; i++) {
             const struct cham_msg *m = &batch[i];
             if (m->type == CHAM_CONFIG) {
-                config(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
+                config(0, CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
+            } else if (m->type == LINK_SCREEN_PANEL) {
+                config((int)m->id, CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m), (uint32_t)m->b);
             } else if (m->type == CHAM_WINDOW) {
                 evdev_window(CHAM_CONFIG_WIDTH(m), CHAM_CONFIG_HEIGHT(m));
             } else if (m->type == CHAM_PING) {

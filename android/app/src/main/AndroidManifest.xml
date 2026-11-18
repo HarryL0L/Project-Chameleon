@@ -25,6 +25,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- The desktop's second screen, where its card has one: a window in a
+             task and a process of its own. -->
+        <activity
+            android:name=".ScreenActivity"
+            android:exported="false"
+            android:label="@string/screen2"
+            android:process=":screen2"
+            android:taskAffinity="io.github.harryl0l.chameleon.screen2"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboard|keyboardHidden|navigation|uiMode|density"
+            android:launchMode="singleTask" />
         <!-- Optional: hardware keyboard shortcuts Android keeps for itself (KeyService). -->
         <service
             android:name=".KeyService"
