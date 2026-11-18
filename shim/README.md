@@ -165,7 +165,7 @@ program's own, as before there was a namespace for them; see below).
   write into the first word of instances, physical devices, devices, queues
   and command buffers, so programs hold wrappers of those and every call
   swaps them for the driver's own (`vulkan/vulkan.c`; the forwarders are
-  generated from the NDK's header by `vulkan/gen_vk.py`, which also finds
+  generated from Khronos's header in `include/vulkan` by `vulkan/gen_vk.py`, which also finds
   each function that carries such an object in an array or a structure and
   stops if one isn't written by hand). A Wayland window is an Android
   swapchain on the same kind of window an EGL surface has (an

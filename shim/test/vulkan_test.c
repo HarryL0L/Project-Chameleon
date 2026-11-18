@@ -186,8 +186,8 @@ int main(void)
     printf("the physical device:\n");
     VkPhysicalDeviceProperties props;
     vkGetPhysicalDeviceProperties(phys, &props);
-    CHECK(VK_API_VERSION_MAJOR(props.apiVersion) == 1 && VK_API_VERSION_MINOR(props.apiVersion) == 3,
-          "Vulkan %u.%u.%u of the driver's newer one: what the driver's functions here reach",
+    CHECK(VK_API_VERSION_MAJOR(props.apiVersion) == 1 && VK_API_VERSION_MINOR(props.apiVersion) == 4,
+          "Vulkan %u.%u.%u, the driver's own: the functions here reach it",
           VK_API_VERSION_MAJOR(props.apiVersion), VK_API_VERSION_MINOR(props.apiVersion),
           VK_API_VERSION_PATCH(props.apiVersion));
     n = 0;
@@ -201,8 +201,8 @@ int main(void)
           "the driver's device extensions are listed (%u)", n);
     CHECK(!has(exts, n, "VK_KHR_swapchain") && !has(exts, n, "VK_EXT_external_memory_dma_buf") &&
               !has(exts, n, "VK_ANDROID_external_memory_android_hardware_buffer"),
-          "not windows, the driver's own dma-bufs or Android's buffers");
-    CHECK(!has(exts, n, "VK_KHR_maintenance5"), "nor an extension newer than the functions here");
+          "not windows, the driver's own dma-bufs or Android's buffers (an extension without functions here)");
+    CHECK(has(exts, n, "VK_KHR_maintenance5"), "an extension of Vulkan 1.4 is");
 
     /* The card's nodes, as the session shows them to this program too. */
     struct stat primary, render;

@@ -944,6 +944,14 @@ VKAPI_ATTR void VKAPI_CALL cham_vkCmdExecuteCommands(VkCommandBuffer commandBuff
     }
 }
 
+VKAPI_ATTR void VKAPI_CALL cham_vkCmdPreprocessGeneratedCommandsEXT(
+    VkCommandBuffer commandBuffer, const VkGeneratedCommandsInfoEXT *pGeneratedCommandsInfo,
+    VkCommandBuffer stateCommandBuffer)
+{
+    struct dev_obj *c = (struct dev_obj *)commandBuffer;
+    DEV_FN(c, vkCmdPreprocessGeneratedCommandsEXT)(c->real, pGeneratedCommandsInfo, real_cmd(stateCommandBuffer));
+}
+
 /* ---- objects named by type and number ---- */
 
 static uint64_t real_object(VkObjectType type, uint64_t handle)

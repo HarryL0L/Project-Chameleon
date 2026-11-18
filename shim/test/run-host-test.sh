@@ -121,7 +121,7 @@ cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidde
     -Wl,--version-script=shim/vulkan/vulkan.map
 cc -O1 -g -Wall -Wextra -fPIC -shared -o "$OUT/fake_android_vulkan.so" shim/test/fake_android_vulkan.c -ldl
 cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/vulkan_test" shim/test/vulkan_test.c -lvulkan -ldl
-printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.3.0"}}\n' \
+printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.4.0"}}\n' \
     "$OUT/libvulkan_chameleon.so" > "$OUT/chameleon-vulkan.json"
 # vulkan [VAR=value...] PROGRAM...: only this driver, on the stand-in.
 vulkan() {
