@@ -410,7 +410,8 @@ static void vulkan_app(struct wl_display *display, struct wl_surface *surface)
               !has_extension(exts, n, "VK_KHR_android_surface") && !has_extension(exts, n, "VK_KHR_xcb_surface"),
           "Wayland surfaces offered, and no other kind");
     const char *instance_exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
-    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_1};
+    /* Vulkan 1.0, as vkcube asks for. */
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_0};
     VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
                                 .enabledExtensionCount = 2, .ppEnabledExtensionNames = instance_exts};
     VkInstance inst;

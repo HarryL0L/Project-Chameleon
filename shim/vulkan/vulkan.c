@@ -380,6 +380,26 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCreateInfo 
         }
     }
     info.ppEnabledExtensionNames = names;
+    /* Android's own instance asks for Vulkan 1.1 at least. Android 17's
+     * window code calls the driver's vkGetPhysicalDeviceImageFormatProperties2
+     * without checking it, and a driver that keeps to the instance's version
+     * (Mesa's) gives none on a 1.0 instance: a program asking for 1.0, such
+     * as vkcube, would crash there. The program still uses only what it
+     * asked for. */
+    VkApplicationInfo app;
+    uint32_t loader_version = VK_API_VERSION_1_0;
+    PFN_vkEnumerateInstanceVersion version = (PFN_vkEnumerateInstanceVersion)android("vkEnumerateInstanceVersion");
+    if (version && version(&loader_version) != VK_SUCCESS)
+        loader_version = VK_API_VERSION_1_0;
+    if (loader_version >= VK_API_VERSION_1_1 &&
+        (!info.pApplicationInfo || info.pApplicationInfo->apiVersion < VK_API_VERSION_1_1)) {
+        if (info.pApplicationInfo)
+            app = *info.pApplicationInfo;
+        else
+            app = (VkApplicationInfo){.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO};
+        app.apiVersion = VK_API_VERSION_1_1;
+        info.pApplicationInfo = &app;
+    }
     VkInstance created;
     VkResult result = real(&info, pAllocator, &created);
     free(names);

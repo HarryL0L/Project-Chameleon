@@ -33,6 +33,9 @@ static PFN_vkGetInstanceProcAddr driver;
 static VkInstance g_instance;           /* the driver's, for its functions */
 static VkPhysicalDevice g_physical;     /* of the last device */
 static PFN_vkGetDeviceProcAddr real_device_proc;
+/* Taken from the driver when an instance is made, as Android does; a driver
+ * keeping to a 1.0 instance (lavapipe, like any Mesa driver) gives none. */
+static PFN_vkGetPhysicalDeviceImageFormatProperties2 image_format2;
 
 /* fake_android_gl.c's window system */
 typedef struct {
@@ -108,8 +111,11 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_instance(const VkInstanceCreateInfo
             names[mine.enabledExtensionCount++] = name;
     }
     VkResult result = ((PFN_vkCreateInstance)driver(NULL, "vkCreateInstance"))(&mine, allocator, instance);
-    if (result == VK_SUCCESS)
+    if (result == VK_SUCCESS) {
         g_instance = *instance;
+        image_format2 = (PFN_vkGetPhysicalDeviceImageFormatProperties2)driver(
+            *instance, "vkGetPhysicalDeviceImageFormatProperties2");
+    }
     return result;
 }
 
@@ -239,7 +245,20 @@ static VkResult list(const void *all, uint32_t n, size_t size, uint32_t *count, 
 static VKAPI_ATTR VkResult VKAPI_CALL surface_formats(VkPhysicalDevice physical, VkSurfaceKHR surface,
                                                      uint32_t *count, VkSurfaceFormatKHR *formats)
 {
-    (void)physical, (void)surface;
+    (void)surface;
+    /* Android 17 asks the driver about an RGB format here, through a
+     * function it never checks. */
+    if (!image_format2) {
+        fprintf(stderr, "fake_android_vulkan: the window formats call the driver's "
+                        "vkGetPhysicalDeviceImageFormatProperties2, and it has none (Android 17 crashes)\n");
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    VkPhysicalDeviceImageFormatInfo2 format_info = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+                                                    .format = VK_FORMAT_R8G8B8A8_UNORM, .type = VK_IMAGE_TYPE_2D,
+                                                    .tiling = VK_IMAGE_TILING_OPTIMAL,
+                                                    .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT};
+    VkImageFormatProperties2 format_props = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2};
+    image_format2(physical, &format_info, &format_props);
     static const VkSurfaceFormatKHR k_formats[] = {
         {VK_FORMAT_R8G8B8A8_UNORM, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
         {VK_FORMAT_R8G8B8A8_SRGB, VK_COLOR_SPACE_SRGB_NONLINEAR_KHR},
