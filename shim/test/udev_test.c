@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <poll.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -81,7 +82,9 @@ int main(void)
         input += subsystem && strcmp(subsystem, "input") == 0;
         udev_device_unref(d);
     }
-    CHECK(all > 0 && input == 0, "real devices, none of the real input ones (%d listed, %d input)", all, input);
+    /* With a service running (the two-screen run) the input ones are its six. */
+    int ours = getenv("UDEV_TEST_SCREENS") ? 6 : 0;
+    CHECK(all > 0 && input == ours, "real devices, none of the real input ones (%d listed, %d input)", all, input);
     udev_enumerate_unref(e);
 
     printf("libinput's udev backend\n");
@@ -89,6 +92,30 @@ int main(void)
     CHECK(li != NULL, "libinput_udev_create_context");
     CHECK(li && libinput_udev_assign_seat(li, "seat0") == 0, "libinput_udev_assign_seat starts on the monitor");
     CHECK(li && libinput_dispatch(li) == 0, "libinput_dispatch");
+    if (li && getenv("UDEV_TEST_SCREENS")) {
+        /* A card with two screens (run-host-test.sh): each touchscreen
+         * names its monitor, which is how a compositor tells them apart. */
+        printf("the touchscreens of a card with two screens\n");
+        const char *first = NULL, *second = NULL;
+        int touchscreens = 0;
+        struct libinput_event *ev;
+        while ((ev = libinput_get_event(li))) {
+            struct libinput_device *dev = libinput_event_get_device(ev);
+            if (libinput_event_get_type(ev) == LIBINPUT_EVENT_DEVICE_ADDED &&
+                libinput_device_has_capability(dev, LIBINPUT_DEVICE_CAP_TOUCH)) {
+                touchscreens++;
+                libinput_device_ref(dev); /* its strings stay */
+                if (strcmp(libinput_device_get_name(dev), "Chameleon touchscreen") == 0)
+                    first = libinput_device_get_output_name(dev);
+                else if (strcmp(libinput_device_get_name(dev), "Chameleon touchscreen 2") == 0)
+                    second = libinput_device_get_output_name(dev);
+            }
+            libinput_event_destroy(ev);
+        }
+        CHECK(touchscreens == 2, "libinput has two touchscreens (%d)", touchscreens);
+        CHECK(first && strcmp(first, "DSI-1") == 0, "the first's output name is DSI-1 (%s)", first ? first : "none");
+        CHECK(second && strcmp(second, "DSI-2") == 0, "the second's is DSI-2 (%s)", second ? second : "none");
+    }
     if (li)
         libinput_unref(li);
     udev_unref(udev);

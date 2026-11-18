@@ -2,12 +2,13 @@
 package io.github.harryl0l.chameleon;
 
 /**
- * A second window of the app: the second screen of the desktop's card, a
+ * A further window of the app: the second screen of the desktop's card (the
+ * third and fourth are ScreenActivity3 and ScreenActivity4), a
  * monitor that is plugged in while this window exists. It runs in a process
  * of its own (see the manifest), with its own copy of the native presenter,
  * its own Termux broker and its own connection from the desktop's service.
  */
-public final class ScreenActivity extends PresenterActivity {
+public class ScreenActivity extends PresenterActivity {
     @Override
     int screen() {
         return 1;

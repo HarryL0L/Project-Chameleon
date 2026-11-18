@@ -37,6 +37,7 @@
 struct cham_evdev_info {
     char name[80];
     char udev_type[32];       /* "ID_INPUT_TOUCHSCREEN", ... space-separated (each "1" in udev) */
+    char output[16];          /* udev's WL_OUTPUT: the connector whose screen it touches, "" = none named */
     struct input_id id;
     uint8_t ev[CHAM_BITS(EV_CNT)];
     uint8_t key[CHAM_BITS(KEY_CNT)];

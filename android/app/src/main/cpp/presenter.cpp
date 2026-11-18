@@ -866,6 +866,22 @@ void queue_clipboard(uint32_t type, bool secret, int fd)
     g_clip_cond.notify_one();
 }
 
+// What the producer asks of the app's windows (CHAM_WINDOW_OPEN / _CLOSE,
+// CHAM_TITLE), for PresenterActivity's thread (nativeWindowEvent): "open N",
+// "close", "title TEXT".
+std::mutex g_win_lock;
+std::condition_variable g_win_cond;
+std::deque<std::string> g_win;
+
+void queue_window_event(std::string event)
+{
+    std::lock_guard<std::mutex> lock(g_win_lock);
+    if (g_win.size() >= 16)  // nobody is taking them
+        g_win.pop_front();
+    g_win.push_back(std::move(event));
+    g_win_cond.notify_one();
+}
+
 // Connections from KWin's shim, passed on by the Termux broker
 // (nativeConnection); g_conn_event counts arrivals.
 std::mutex g_conn_lock;
@@ -999,6 +1015,20 @@ void serve(int client, int arrivals)
                 queue_clipboard(msg.type, msg.a != 0, fd);
             fd = -1;
             break;
+        case CHAM_WINDOW_OPEN:
+            queue_window_event("open " + std::to_string((int)msg.a));
+            break;
+        case CHAM_WINDOW_CLOSE:
+            queue_window_event("close");
+            break;
+        case CHAM_TITLE: {
+            // A short text the producer has written already: read to the end.
+            char text[256];
+            ssize_t n = fd >= 0 ? read(fd, text, sizeof text) : -1;
+            if (n >= 0)
+                queue_window_event("title " + std::string(text, (size_t)n));
+            break;
+        }
         case CHAM_CURSOR: {
             std::lock_guard<std::mutex> lock(g_lock);
             // A new image not copied yet stays new (with the fence it came
@@ -1315,6 +1345,23 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSetFrameRateVote(JNIEn
     g_frame_rate_vote = hz;
     g_vote_dirty = true;
     LOGI("frame rate vote %.1f Hz", hz);
+}
+
+// Blocks until the producer asks something of the app's windows: "open N"
+// (the window of screen N, from 1), "close" (this window, for good), "title
+// TEXT" (this window's name), as UTF-8.
+JNIEXPORT jbyteArray JNICALL
+Java_io_github_harryl0l_chameleon_PresenterActivity_nativeWindowEvent(JNIEnv *env, jclass)
+{
+    std::unique_lock<std::mutex> lock(g_win_lock);
+    g_win_cond.wait(lock, [] { return !g_win.empty(); });
+    std::string event = g_win.front();
+    g_win.pop_front();
+    lock.unlock();
+    jbyteArray bytes = env->NewByteArray((jsize)event.size());
+    if (bytes)
+        env->SetByteArrayRegion(bytes, 0, (jsize)event.size(), (const jbyte *)event.data());
+    return bytes;
 }
 
 // Blocks until the producer sends a clipboard pipe: returns

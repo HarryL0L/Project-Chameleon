@@ -17,6 +17,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <linux/sync_file.h>
 #include <poll.h>
 #include <stdlib.h>
@@ -109,11 +110,10 @@ struct link {
     unsigned latch_next;
     uint64_t tick_phase;            /* ticks: at a vsync + this, ... */
     uint64_t tick_phase_period;     /* ...on a grid of this period (0: none yet) */
+    uint64_t asked_ns;              /* when the app was asked for this screen's window (0: not, or it came) */
 };
-static struct link g_links[CHAM_SCREENS] = {
-    {.screen = 0, .sock = -1, .cursor = {.fence = -1}, .plane = {.plain = 1}},
-    {.screen = 1, .sock = -1, .cursor = {.fence = -1}, .plane = {.plain = 1}},
-};
+#define LINK(n) {.screen = n, .sock = -1, .cursor = {.fence = -1}, .plane = {.plain = 1}}
+static struct link g_links[CHAM_SCREENS] = {LINK(0), LINK(1), LINK(2), LINK(3)};
 static int g_screens = 1;           /* links in use */
 static pthread_cond_t g_cond;
 
@@ -839,6 +839,7 @@ static void *reader_main(void *arg)
 
         pthread_mutex_lock(&g_lock);
         L->sock = s;
+        L->asked_ns = 0;
         L->gen++;
         if (kms_screen_off_locked(L->screen))
             link_screen_off_locked(L->screen, 1); /* the app shows "tap to wake" */
@@ -857,12 +858,12 @@ static void *reader_main(void *arg)
             if (m.type == CHAM_INPUT || m.type == CHAM_CLIPBOARD_OFFER) {
                 /* for the input thread, in order with WINDOW and CONFIG
                  * (this thread posts those too); nothing here needs g_lock.
-                 * A further screen's window is a touchpad only, and the
-                 * clipboard is the first window's. */
-                int direct = m.type == CHAM_INPUT &&
-                             ((m.id >= CHAM_INPUT_TOUCH_DOWN && m.id <= CHAM_INPUT_TOUCH_FRAME) ||
-                              m.id == CHAM_INPUT_POINTER_ABS);
-                if (!L->screen || (m.type == CHAM_INPUT && !direct))
+                 * Touches go to their screen's touchscreen; the absolute
+                 * pointer and the clipboard are the first window's. */
+                int touch = m.type == CHAM_INPUT && m.id >= CHAM_INPUT_TOUCH_DOWN && m.id <= CHAM_INPUT_TOUCH_FRAME;
+                if (touch)
+                    m.a = (uint32_t)m.a | (uint64_t)L->screen << 32; /* LINK_INPUT_SCREEN */
+                if (!L->screen || (m.type == CHAM_INPUT && m.id != CHAM_INPUT_POINTER_ABS))
                     input_post(&m);
                 if (fd >= 0)
                     close(fd);
@@ -944,6 +945,52 @@ void link_start(int screens)
     if (screens > 1)
         g_screens = screens <= CHAM_SCREENS ? screens : CHAM_SCREENS; /* before the threads: only read after */
     pthread_once(&g_once, start_threads);
+}
+
+int link_screen_open(void)
+{
+    int ret = -EBUSY;
+    pthread_mutex_lock(&g_lock);
+    uint64_t now = now_ns();
+    for (struct link *L = g_links + 1; L < g_links + g_screens; L++) {
+        /* One asked for a while ago that never came (the app couldn't open
+         * it) is free again. */
+        if (L->sock >= 0 || (L->asked_ns && now - L->asked_ns < 10000000000ull))
+            continue;
+        ret = send_msg_locked(&g_links[0], CHAM_WINDOW_OPEN, 0, (uint64_t)L->screen, 0, -1) == 0 ? L->screen
+                                                                                                  : -ENOTCONN;
+        if (ret > 0)
+            L->asked_ns = now;
+        break;
+    }
+    pthread_mutex_unlock(&g_lock);
+    return ret;
+}
+
+int link_screen_close(int screen)
+{
+    if (screen < 1 || screen >= g_screens)
+        return -EINVAL;
+    pthread_mutex_lock(&g_lock);
+    int ret = send_msg_locked(&g_links[screen], CHAM_WINDOW_CLOSE, 0, 0, 0, -1) == 0 ? 0 : -ENOTCONN;
+    pthread_mutex_unlock(&g_lock);
+    return ret;
+}
+
+int link_screen_title(int screen, const char *text)
+{
+    int p[2];
+    if (screen < 0 || screen >= g_screens)
+        return -EINVAL;
+    if (pipe2(p, O_CLOEXEC) != 0)
+        return -errno;
+    ssize_t n = write(p[1], text, strlen(text)); /* short: it fits a pipe */
+    close(p[1]);
+    pthread_mutex_lock(&g_lock);
+    int ret = n >= 0 && send_msg_locked(&g_links[screen], CHAM_TITLE, 0, 0, 0, p[0]) == 0 ? 0 : -ENOTCONN;
+    pthread_mutex_unlock(&g_lock);
+    close(p[0]);
+    return ret;
 }
 
 void link_clipboard(uint32_t type, uint64_t a, int fd)

@@ -85,6 +85,9 @@ void link_window_locked(int screen, uint32_t *width, uint32_t *height);
 /* Posted to the input thread for a screen after the first (id): its window's
  * size (a, as CHAM_CONFIG; 0: the window is gone) and refresh rate (b). */
 #define LINK_SCREEN_PANEL 0x5343524eu
+/* A touch message (CHAM_INPUT_TOUCH_*) as the input thread gets it: which
+ * screen's window it is from, above the touch's id in `a`. */
+#define LINK_INPUT_SCREEN(m) ((uint32_t)((m)->a >> 32))
 /* Page-flip event bookkeeping (one pending flip, like KMS). */
 int link_flip_pending_locked(int screen);
 /* The pending flip's event would go to a file being closed: drop it. */
@@ -93,6 +96,13 @@ void link_queue_flip_locked(int screen, uint64_t user_data, uint32_t crtc_id, in
                             int presented, uint32_t refresh_mhz);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
 void link_clipboard(uint32_t type, uint64_t a, int fd);
+/* For a program of the session (CARD_SCREEN): asks the app for the window
+ * of a screen that has none, returning the screen (from 1) or -EBUSY when
+ * all have one or -ENOTCONN without the app; has a further screen's window
+ * closed; names a screen's window. */
+int link_screen_open(void);
+int link_screen_close(int screen);
+int link_screen_title(int screen, const char *text);
 
 /* ---- input.c: the app's input, window size and clipboard (one thread) ---- */
 struct cham_msg;
@@ -176,9 +186,12 @@ void kms_init_once(void);
  * its master, handles, framebuffers, blobs and pending event go. */
 void kms_file_open(struct fake_fd *f);
 void kms_file_close(struct fake_fd *f);
-/* The app's screen when the compositor started, in pixels and as the
- * connector reports its physical size. */
-void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
+/* A screen in pixels and as its connector reports its physical size: the
+ * first as it was when the compositor started, a further one as its window
+ * is now (0 while it has none). */
+void kms_screen_size(int screen, uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height);
+/* How many screens the card has. */
+int kms_screens(void);
 /* The process that opened the file that is DRM master, 0 if none. */
 pid_t kms_master_pid(void);
 /* Size of the mode the compositor has set, 0x0 before the first modeset. */
@@ -198,6 +211,7 @@ int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);
 uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 
 /* ---- card.c: the card's files, served to every process ---- */
+enum { CARD_SCREEN_OPEN = 1, CARD_SCREEN_CLOSE, CARD_SCREEN_TITLE };
 #define CHAM_CARD_SOCKET_NAME "chameleon-card" /* in $XDG_RUNTIME_DIR, SOCK_SEQPACKET */
 /* Requests (struct cham_msg type), one at a time per connection, each
  * answered by CARD_DONE (a = the result, or -errno): */
@@ -214,6 +228,8 @@ enum {
                       * app's registered one), or -ENOENT */
     CARD_SEND_FD,  /* + an fd, a = its number in the caller: a second fd the next
                     * CARD_IOCTL names (a commit's other fence); no answer */
+    CARD_SCREEN,   /* id = CARD_SCREEN_*, a = a screen (from 0); for TITLE then a packet
+                    * with the text: -> a = the screen opened, 0 or -errno */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */

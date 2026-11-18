@@ -8,6 +8,9 @@
 #   chameleon kwin_wayland konsole      # KWin plus a first app
 #   chameleon weston                    # Weston
 #   chameleon sway                      # sway
+#   chameleon --windows kate            # an app in a window of its own, no
+#                                       # desktop: each further app window gets
+#                                       # its own Android window (KWin places them)
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
 # chameleon-kernel serves the card, the input devices and the link to the app
@@ -19,7 +22,7 @@ SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$1" in
 "" | -h | --help)
-    sed -n '2,17s/^# \{0,1\}//p' "$0"
+    sed -n '2,20s/^# \{0,1\}//p' "$0"
     exit 0
     ;;
 --install)
@@ -35,6 +38,18 @@ esac
 # of becoming orphans of Android's init, which some phones kill.
 if ! kill -0 "${CHAMELEON_INIT:-}" 2>/dev/null; then
     exec "$SHIM_DIR/chameleon-init" "$0" "$@"
+fi
+
+# --windows APP...: see the end. Its card has four screens unless told otherwise.
+WINDOWS=
+if [ "$1" = --windows ]; then
+    shift
+    if [ $# = 0 ]; then
+        echo "chameleon: --windows needs an app to start" >&2
+        exit 2
+    fi
+    WINDOWS=1
+    export CHAMELEON_SCREENS=${CHAMELEON_SCREENS:-4}
 fi
 
 for lib in libchameleon.so libchameleon_udev.so libgbm.so libEGL_chameleon.so; do
@@ -58,7 +73,7 @@ esac
 
 # A session bus for the compositor and its desktop, started before anything else.
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
-    exec dbus-run-session -- "$0" "$@"
+    exec dbus-run-session -- "$0" ${WINDOWS:+--windows} "$@"
 fi
 
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
@@ -139,13 +154,19 @@ export CHAMELEON_SOCKET=${CHAMELEON_SOCKET:-$PREFIX/tmp/chameleon-0}
 CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
     /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET" \
     >"$XDG_RUNTIME_DIR/chameleon-broker.log" 2>&1 &
-# CHAMELEON_SCREENS=2: the card gets a second screen, the app's second window
-# (a process of its own there), which a broker of its own serves.
-if [ "${CHAMELEON_SCREENS:-1}" = 2 ]; then
+# CHAMELEON_SCREENS=2..4: the card gets further screens, each a further window
+# of the app (a process of its own there), which a broker of its own serves.
+case "${CHAMELEON_SCREENS:-1}" in
+2 | 3 | 4) SCREENS=$CHAMELEON_SCREENS ;;
+*) SCREENS=1 ;;
+esac
+n=2
+while [ "$n" -le "$SCREENS" ]; do
     CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
-        /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET.2" 2 \
-        >"$XDG_RUNTIME_DIR/chameleon-broker2.log" 2>&1 &
-fi
+        /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET.$n" "$n" \
+        >"$XDG_RUNTIME_DIR/chameleon-broker$n.log" 2>&1 &
+    n=$((n + 1))
+done
 
 # The card, the input devices and the link to the app, as the kernel would
 # be (shim/core/main.c): it answers before the command starts, and exits
@@ -153,6 +174,28 @@ fi
 if ! env -u LD_PRELOAD -u LD_LIBRARY_PATH "$SHIM_DIR/chameleon-kernel" "$$"; then
     echo "chameleon: chameleon-kernel didn't start" >&2
     exit 1
+fi
+
+# Where the card has further screens, the session's programs ask for their
+# windows over the session's bus (shim/screens/screens.c).
+if [ "$SCREENS" -gt 1 ]; then
+    env -u LD_PRELOAD "$SHIM_DIR/chameleon-screens" &
+fi
+
+# --windows: KWin alone, with the script that gives each app window a screen
+# of its own (shim/windows/), and the app as its session.
+if [ -n "$WINDOWS" ]; then
+    i=0
+    for arg in "$@"; do
+        i=$((i + 1))
+        export "CHAMELEON_WINDOWS_ARG_$i=$arg"
+    done
+    export CHAMELEON_WINDOWS_ARGS=$i
+    KWIN=kwin_wayland
+    if command -v kwin_wayland_wrapper >/dev/null 2>&1; then
+        KWIN="kwin_wayland_wrapper --xwayland"
+    fi
+    exec $KWIN --exit-with-session "$SHIM_DIR/chameleon-windows-session"
 fi
 
 exec "$@"

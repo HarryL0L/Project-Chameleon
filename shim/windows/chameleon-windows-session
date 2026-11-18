@@ -1,0 +1,74 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# SPDX-License-Identifier: GPL-2.0-or-later
+# KWin's session for `chameleon --windows APP...`: has KWin load the script
+# that gives each app window a screen of its own (chameleon-windows.js, next
+# to this file), then starts the app. The session lasts as long as KWin: the
+# script has KWin quit when the last app window is closed (many apps' first
+# process ends at once, their window living in another), and KWin ends with
+# this program if the app fails to start.
+DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+call() {
+    method=$1
+    shift
+    dbus-send --session --print-reply --dest=org.kde.KWin /Scripting "org.kde.kwin.Scripting.$method" "$@" >/dev/null
+}
+if ! { call loadScript "string:$DIR/chameleon-windows.js" string:chameleon-windows && call start; }; then
+    echo "chameleon: KWin didn't take the script for app windows; they all stay on the first screen" >&2
+fi
+# Each screen's touchscreen belongs to its screen. The devices say so (udev's
+# WL_OUTPUT), but KWin replaces that with its own setting, empty until set,
+# so it is set here: event0 is the first screen's, event5 and up the further
+# ones' (core/evdev.c). KWin keeps it for later sessions.
+n=1
+while [ "$n" -le "${CHAMELEON_SCREENS:-1}" ]; do
+    dbus-send --session --print-reply --dest=org.kde.KWin "/org/kde/KWin/InputDevice/event$((n > 1 ? n + 3 : 0))" \
+        org.freedesktop.DBus.Properties.Set string:org.kde.KWin.InputDevice string:outputName \
+        "variant:string:DSI-$n" >/dev/null ||
+        echo "chameleon: KWin didn't take screen $n's touchscreen; its touches may land on another screen" >&2
+    n=$((n + 1))
+done
+# A further screen gets the first screen's scale (and full brightness) the
+# first time a window is put on it: KWin guesses a scale for a monitor it
+# hasn't seen, so the app's windows would differ in size. KWin keeps what it
+# is given. The script names a window's screen right when it has put the
+# window there (SetTitle), which is watched for here; kscreen-doctor is KDE's
+# tool for the screens' setup.
+scale=$(kscreen-doctor -j 2>/dev/null | sed -n 's/^ *"scale": *\([0-9.]*\).*/\1/p' | head -n 1)
+if [ -n "$scale" ] && command -v dbus-monitor >/dev/null 2>&1; then
+    dbus-monitor --session "type='method_call',interface='io.github.harryl0l.Chameleon.Screens',member='SetTitle'" |
+        while read -r word rest; do
+            case "$word $rest" in
+            "method call "*) screen=next ;;
+            'string "'[2-9]'"')
+                n=${rest#\"}
+                n=${n%\"}
+                case "$screen:$seen" in
+                next:*" $n "*) ;;
+                next:*)
+                    kscreen-doctor "output.DSI-$n.scale.$scale" >/dev/null 2>&1 </dev/null
+                    # ...and full brightness: Android dims the glass, and KWin
+                    # would darken the picture by what a desktop session left.
+                    kscreen-doctor "output.DSI-$n.brightness.100" >/dev/null 2>&1 </dev/null
+                    seen="$seen $n "
+                    ;;
+                esac
+                screen=
+                ;;
+            *) screen= ;;
+            esac
+        done &
+else
+    echo "chameleon: no kscreen-doctor or dbus-monitor: further windows keep the scale KWin picks" >&2
+fi
+i=1
+set --
+while [ "$i" -le "${CHAMELEON_WINDOWS_ARGS:-0}" ]; do
+    eval "set -- \"\$@\" \"\$CHAMELEON_WINDOWS_ARG_$i\""
+    unset "CHAMELEON_WINDOWS_ARG_$i"
+    i=$((i + 1))
+done
+unset CHAMELEON_WINDOWS_ARGS
+"$@" || exit
+while kill -0 "$PPID" 2>/dev/null; do
+    sleep 1
+done

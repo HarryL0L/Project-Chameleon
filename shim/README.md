@@ -67,7 +67,7 @@ Useful variables: `CHAMELEON_WAIT` (seconds to wait for the app, default 30),
 `CHAMELEON_MODE=1080x2400@120` (mode if the app isn't open), `CHAMELEON_DPI`
 (default 400; decides KWin's default scale), `CHAMELEON_RESIZE=0` (KWin's
 screen keeps its first size instead of following the app's window),
-`CHAMELEON_SCREENS=2` (the card gets a second screen; see below),
+`CHAMELEON_SCREENS=2` to `4` (the card gets further screens; see below),
 `CHAMELEON_VULKAN=0` (the session without the card's Vulkan driver) or
 `CHAMELEON_VULKAN=all` (every installed Vulkan driver next to it),
 `CHAMELEON_VULKAN_DRIVER=/a/driver.so` (another driver below the card's
@@ -77,19 +77,41 @@ program's own, as before there was a namespace for them; see below).
 
 ## Status / limits
 
-- A second screen (`CHAMELEON_SCREENS=2`, off by default): the card gets a
-  second connector, encoder, CRTC, primary and cursor plane. The connector
-  (`DSI-2`) is disconnected until the app's second window is opened from the
-  floating menu ("Second screen"); the window is a task of its own in
+- Further screens (`CHAMELEON_SCREENS=2` to `4`, off by default): the card
+  gets a connector, encoder, CRTC, primary and cursor plane for each. A
+  further connector (`DSI-2` ...) is disconnected until its window of the app
+  is open: the second from the floating menu ("Second screen"), any of them
+  when a program of the session asks (below); the window is a task of its own in
   Android's recent apps and runs in a process of its own. Opening it and
   closing it (swiping it out of the recent apps) are hotplugs; with the first
-  window in Android's split screen it opens in the other half. The pointer,
-  the keyboard and the on-screen keyboard are the first screen's, shared; the
-  second window works as a trackpad only, no direct touch. Only a window
+  window in Android's split screen it opens in the other half. Each screen
+  has a touchscreen of its own (`Chameleon touchscreen 2` ...) that names its
+  connector (udev's `WL_OUTPUT`), so a finger on a window touches that
+  window's screen; the pointer (trackpad mode, a mouse), the keyboard and the
+  on-screen keyboard are one, shared by all screens. Only a window
   Android shows gets frames; another's page flips complete without a picture,
   as for the one window in the background. The compositor lays the screens
   out: KWin keeps a screen's place when its neighbour changes size with its
   window, so they can overlap until arranged again.
+- App windows without a desktop (`chameleon --windows APP`, a first version):
+  KWin alone, with a script (`shim/windows/chameleon-windows.js`) that gives
+  each app window a screen of the card to itself, full screen and without a
+  border, so each is a window of the Chameleon app in Android's recent apps,
+  carrying the app window's title. The first app window takes the first
+  screen; for each further one the script asks `chameleon-screens` over the
+  session's bus (`io.github.harryl0l.Chameleon`, `/Screens`: `Open`, `Close`,
+  `SetTitle`), which has chameleon-kernel ask the app for a window. Closing
+  an app window closes its Android window and the other way round; dialogs
+  stay with their window. Four windows at most, each further one a process
+  of the app; the session ends when the last app window
+  is closed. A touch acts in the window under the finger (the session tells
+  KWin which screen each touchscreen is, since KWin goes by its own setting
+  rather than the device's `WL_OUTPUT`, and gives each further screen the
+  first one's scale and full brightness with `kscreen-doctor`, where KWin
+  would guess a scale or keep a desktop session's dimming); the
+  pointer is
+  one for all screens, so in trackpad mode it has to be moved onto a window's
+  screen to use it there.
 - Input: direct touch, trackpad mode (a touchpad without buttons, so
   libinput's tap to click, scrolling and gestures apply), hardware keyboards
   (by Linux key code, so the desktop's keyboard layout applies) and the mouse
@@ -242,8 +264,9 @@ vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardware
   stub presenter, simulated vblank without one;
 - a card with two screens: both pipelines' objects, the second connector's
   hotplug when the app's second window opens, closes and opens again, frames
-  of each screen to its own window, page flips on both at once
-  (`screens_test`);
+  of each screen to its own window, page flips on both at once; a program
+  asking for a window, having one closed and naming one, directly and
+  through `chameleon-screens` on a session bus (`screens_test`);
 - `chameleon-init` adopting and reaping a program that detached, signals and
   the exit status passing through (`init_test`);
 - typed text and `chameleon-ime` against a real libwayland-server with stub

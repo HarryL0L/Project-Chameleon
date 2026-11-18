@@ -53,7 +53,7 @@ extern "C" {
 typedef struct AHardwareBuffer AHardwareBuffer;
 
 /* The card's screens at most: the app's main window, and one further window. */
-#define CHAM_SCREENS 2
+#define CHAM_SCREENS 4
 
 /* An AHardwareBuffer standing in for a GEM buffer object. */
 struct cham_bo {

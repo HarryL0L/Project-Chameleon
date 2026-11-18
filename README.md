@@ -357,6 +357,8 @@ More switches and the details of each piece are in
 | [`shim/udev/`](shim/udev/) | `libchameleon_udev.so`: udev, the sysfs entries and the `/dev/input` nodes of Chameleon's devices |
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/init/`](shim/init/) | `chameleon-init`: the session's init, adopts and reaps the programs that detach in it |
+| [`shim/screens/`](shim/screens/) | `chameleon-screens`: a session's programs ask for windows of the app over its bus |
+| [`shim/windows/`](shim/windows/) | `chameleon --windows`: KWin's session and script that give each app window its own Android window |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor; `vendor/window.c`: an app's window, for EGL and Vulkan |
 | [`shim/vulkan/`](shim/vulkan/) | `libvulkan_chameleon.so`, the card's Vulkan driver on Android's, with Wayland windows |

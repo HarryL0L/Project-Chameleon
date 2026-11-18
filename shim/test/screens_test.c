@@ -25,6 +25,8 @@
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
+#include "../../common/chameleon_evdev.h"
+#include "../core/internal.h"
 #include "../../common/cham_io.h"
 
 static int failures;
@@ -40,7 +42,7 @@ static int failures;
         printf("\n");                                              \
     } while (0)
 
-static uint64_t now_ns(void)
+static uint64_t mono_ns(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -55,7 +57,10 @@ struct window {
     volatile int open;       /* the window exists: it takes the service's connection and reports its size */
     volatile int connected;
     volatile int presents, unchanged, buffers, hellos;
+    volatile int asked_open, asked_close, titles; /* CHAM_WINDOW_OPEN (its screen), _CLOSE, CHAM_TITLE */
+    char title[256];
     volatile uint64_t hello_flags;
+    volatile int touch; /* 1: a finger is to touch it at (1/4, 1/2), 2: it did */
 };
 
 static void take_buffer(int c)
@@ -102,6 +107,16 @@ static void *window_main(void *arg)
         cham_send(c, &cfg, -1);
         win->connected = 1;
         while (win->open) {
+            if (win->touch == 1) {
+                struct cham_msg down = {CHAM_INPUT, CHAM_INPUT_TOUCH_DOWN, 7, CHAM_INPUT_POS(0x4000, 0x8000)};
+                struct cham_msg up = {CHAM_INPUT, CHAM_INPUT_TOUCH_UP, 7, 0};
+                struct cham_msg frame = {CHAM_INPUT, CHAM_INPUT_TOUCH_FRAME, 0, 0};
+                cham_send(c, &down, -1);
+                cham_send(c, &frame, -1);
+                cham_send(c, &up, -1);
+                cham_send(c, &frame, -1);
+                win->touch = 2;
+            }
             struct pollfd p = {c, POLLIN, 0};
             if (poll(&p, 1, 20) <= 0)
                 continue;
@@ -109,9 +124,19 @@ static void *window_main(void *arg)
             int fd = -1;
             if (cham_recv(c, &m, &fd) <= 0)
                 break;
+            if (m.type == CHAM_TITLE && fd >= 0) {
+                ssize_t n = read(fd, win->title, sizeof win->title - 1);
+                win->title[n > 0 ? n : 0] = 0;
+                win->titles++;
+            }
             if (fd >= 0)
                 close(fd);
-            if (m.type == CHAM_HELLO) {
+            if (m.type == CHAM_WINDOW_OPEN) {
+                win->asked_open = (int)m.a;
+            } else if (m.type == CHAM_WINDOW_CLOSE) {
+                win->asked_close++;
+                win->open = 0; /* as the app: the window closes for good */
+            } else if (m.type == CHAM_HELLO) {
                 win->hello_flags = m.b;
                 win->hellos++;
             } else if (m.type == CHAM_BUFFER_ADD) {
@@ -125,14 +150,14 @@ static void *window_main(void *arg)
             } else if (m.type == CHAM_PRESENT) {
                 win->presents++;
                 win->unchanged += m.id == CHAM_PRESENT_UNCHANGED;
-                struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
+                struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, mono_ns()};
                 cham_send(c, &queued, -1);
                 usleep(4000);
                 if (m.id != CHAM_PRESENT_UNCHANGED) {
                     struct cham_msg rel = {CHAM_RELEASE, m.id, 0, 0};
                     cham_send(c, &rel, -1);
                 }
-                struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, now_ns()};
+                struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, mono_ns()};
                 cham_send(c, &done, -1);
             }
         }
@@ -143,6 +168,77 @@ static void *window_main(void *arg)
 }
 
 /* ---- helpers ---- */
+
+/* The service's input devices (common/chameleon_evdev.h): the list, and a
+ * connection reading device `index` (-1: just the list), past its STATE. */
+static int open_input(int index, struct cham_evdev_info *list, uint32_t *count)
+{
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", getenv("XDG_RUNTIME_DIR"), CHAM_EVDEV_SOCKET_NAME);
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    uint32_t n = 0, want = (uint32_t)index;
+    struct cham_evdev_info info;
+    struct cham_evdev_record h;
+    struct cham_evdev_state state;
+    int ok = connect(s, (struct sockaddr *)&addr, sizeof addr) == 0 && recv(s, &n, sizeof n, MSG_WAITALL) == sizeof n &&
+             n <= CHAM_EVDEV_MAX_DEVICES;
+    for (uint32_t i = 0; ok && i < n; i++) {
+        ok = recv(s, &info, sizeof info, MSG_WAITALL) == sizeof info;
+        if (ok && list)
+            list[i] = info;
+    }
+    if (count)
+        *count = ok ? n : 0;
+    if (ok && index >= 0)
+        ok = send(s, &want, sizeof want, 0) == sizeof want && recv(s, &h, sizeof h, MSG_WAITALL) == sizeof h &&
+             h.type == CHAM_EVDEV_STATE && recv(s, &state, sizeof state, MSG_WAITALL) == sizeof state;
+    if (!ok || index < 0) {
+        close(s);
+        return -1;
+    }
+    return s;
+}
+
+/* The device's next frames within the time: 1 if a contact came down at
+ * (x, y), 0 if nothing came, -1 for anything else. */
+static int touched_at(int s, int32_t x, int32_t y, int timeout_ms)
+{
+    int got_x = 0, got_y = 0, down = 0, any = 0;
+    struct pollfd p = {s, POLLIN, 0};
+    while (!(got_x && got_y && down) && poll(&p, 1, timeout_ms) == 1) {
+        struct cham_evdev_record h;
+        struct input_event e[64];
+        if (recv(s, &h, sizeof h, MSG_WAITALL) != sizeof h || h.size > sizeof e ||
+            recv(s, e, h.size, MSG_WAITALL) != (ssize_t)h.size)
+            return -1;
+        any = 1;
+        for (size_t i = 0; h.type == CHAM_EVDEV_FRAME && i < h.size / sizeof e[0]; i++) {
+            got_x |= e[i].type == EV_ABS && e[i].code == ABS_MT_POSITION_X && e[i].value == x;
+            got_y |= e[i].type == EV_ABS && e[i].code == ABS_MT_POSITION_Y && e[i].value == y;
+            down |= e[i].type == EV_KEY && e[i].code == BTN_TOUCH && e[i].value == 1;
+        }
+    }
+    return got_x && got_y && down ? 1 : any ? -1 : 0;
+}
+
+/* A program of the session asking for a window, as chameleon-screens does. */
+static int64_t ask_screen(uint32_t what, int screen, const char *text)
+{
+    static int card = -1;
+    if (card < 0) {
+        struct sockaddr_un addr = {.sun_family = AF_UNIX};
+        snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", getenv("XDG_RUNTIME_DIR"), CHAM_CARD_SOCKET_NAME);
+        card = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+        if (connect(card, (struct sockaddr *)&addr, sizeof addr) != 0)
+            return -ECONNREFUSED;
+    }
+    struct cham_msg req = {CARD_SCREEN, what, (uint64_t)(int64_t)screen, 0}, done = {0};
+    int fd = -1;
+    if (cham_send(card, &req, -1) != 0 || (text && send(card, text, strlen(text), MSG_NOSIGNAL) < 0) ||
+        cham_recv(card, &done, &fd) != 1 || done.type != CARD_DONE)
+        return -EPIPE;
+    return (int64_t)done.a;
+}
 
 static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, uint64_t *value)
 {
@@ -174,9 +270,9 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
 /* Waits until `count` page-flip events came since the last call's end. */
 static int wait_flips(int fd, int count, int timeout_ms)
 {
-    uint64_t end = now_ns() + (uint64_t)timeout_ms * 1000000ull;
+    uint64_t end = mono_ns() + (uint64_t)timeout_ms * 1000000ull;
     g_flips = 0;
-    while (g_flips < count && now_ns() < end) {
+    while (g_flips < count && mono_ns() < end) {
         struct pollfd p = {fd, POLLIN, 0};
         if (poll(&p, 1, 50) <= 0)
             continue;
@@ -444,6 +540,103 @@ int main(void)
     CHECK(wait_for(&second.presents, before_b + 1, 2000), "the frame on its CRTC is shown in the new window");
     CHECK(flip(fd, &b, 0) == 0 && wait_flips(fd, 1, 2000) == 1 && g_flip_crtc[0] == b.crtc,
           "its page flips complete again");
+
+    printf("a program of the session asks for windows\n");
+    CHECK(ask_screen(CARD_SCREEN_TITLE, 1, "Kate \xe2\x80\x94 notes") == 0 && wait_for(&second.titles, 1, 2000) &&
+              strcmp(second.title, "Kate \xe2\x80\x94 notes") == 0 && first.titles == 0,
+          "a title for the second screen's window reaches it (%s)", second.title);
+    CHECK(ask_screen(CARD_SCREEN_TITLE, 0, "first") == 0 && wait_for(&first.titles, 1, 2000) &&
+              strcmp(first.title, "first") == 0,
+          "...and one for the first's");
+    CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == -EBUSY && first.asked_open == 0,
+          "open: every screen has its window, EBUSY");
+    CHECK(ask_screen(CARD_SCREEN_CLOSE, 0, NULL) == -EINVAL && ask_screen(CARD_SCREEN_CLOSE, 2, NULL) == -EINVAL &&
+              ask_screen(CARD_SCREEN_TITLE, 7, "x") == -EINVAL,
+          "the first screen's window isn't closed; a screen the card hasn't: EINVAL");
+    CHECK(ask_screen(CARD_SCREEN_CLOSE, 1, NULL) == 0 && wait_for(&second.asked_close, 1, 2000),
+          "close: the second window is told to");
+    unplugged = 0;
+    for (int i = 0; i < 300 && !unplugged; i++) {
+        usleep(10000);
+        conn = drmModeGetConnector(fd, b.conn);
+        unplugged = conn && conn->connection == DRM_MODE_DISCONNECTED;
+        drmModeFreeConnector(conn);
+    }
+    CHECK(unplugged, "...and its connector is disconnected");
+    CHECK(ask_screen(CARD_SCREEN_CLOSE, 1, NULL) == -ENOTCONN, "close again: no window there, ENOTCONN");
+    CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == 1 && wait_for(&first.asked_open, 1, 2000),
+          "open: the first window is asked for the second screen's, which is the answer");
+    CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == -EBUSY, "open again before it came: EBUSY");
+    second.open = 1; /* the app opens it */
+    plugged = 0;
+    for (int i = 0; i < 400 && !plugged; i++) {
+        usleep(10000);
+        conn = drmModeGetConnector(fd, b.conn);
+        plugged = conn && conn->connection == DRM_MODE_CONNECTED;
+        drmModeFreeConnector(conn);
+    }
+    CHECK(plugged, "the window comes: DSI-2 connected");
+
+    printf("a finger on each window\n");
+    static struct cham_evdev_info devs[CHAM_EVDEV_MAX_DEVICES];
+    uint32_t count = 0;
+    open_input(-1, devs, &count);
+    CHECK(count == 6 && strcmp(devs[5].name, "Chameleon touchscreen 2") == 0 &&
+              cham_bit_test(devs[5].prop, INPUT_PROP_DIRECT),
+          "the card's second screen has a touchscreen of its own (%u devices, the last: %s)", count,
+          count ? devs[count - 1].name : "");
+    CHECK(strcmp(devs[0].output, "DSI-1") == 0 && strcmp(devs[5].output, "DSI-2") == 0 && !devs[3].output[0],
+          "each touchscreen names its connector (%s, %s); the touchpad names none", devs[0].output, devs[5].output);
+    int touch1 = open_input(0, NULL, NULL), touch2 = open_input(5, NULL, NULL);
+    CHECK(touch1 >= 0 && touch2 >= 0, "both can be read");
+    second.touch = 1;
+    CHECK(wait_for(&second.touch, 2, 2000) && touched_at(touch2, 0x4000, 0x8000, 2000) == 1,
+          "a finger on the second window: a contact on the second touchscreen, at its place");
+    CHECK(touched_at(touch1, 0x4000, 0x8000, 200) == 0, "...and nothing on the first");
+    while (touched_at(touch2, 0, 0, 100)) /* its lift */
+        ;
+    first.touch = 1;
+    CHECK(wait_for(&first.touch, 2, 2000) && touched_at(touch1, 0x4000, 0x8000, 2000) == 1,
+          "a finger on the first window: a contact on the first touchscreen");
+    CHECK(touched_at(touch2, 0x4000, 0x8000, 200) == 0, "...and nothing on the second");
+    close(touch1);
+    close(touch2);
+
+    /* Through chameleon-screens, over the session's bus, as a compositor's
+     * script calls it (run-host-test.sh starts both). */
+    if (getenv("SCREENS_TEST_BUS")) {
+        printf("...over the session's bus\n");
+#define BUS_CALL "dbus-send --session --print-reply --dest=io.github.harryl0l.Chameleon /Screens " \
+                 "io.github.harryl0l.Chameleon.Screens."
+        int there = 0;
+        for (int i = 0; i < 50 && !there; i++) { /* until it has the name */
+            there = system(BUS_CALL "SetTitle string:2 'string:Dolphin \xe2\x80\x94 Home' >/dev/null 2>&1") == 0;
+            if (!there)
+                usleep(100000);
+        }
+        CHECK(there && wait_for(&second.titles, 2, 2000) && strcmp(second.title, "Dolphin \xe2\x80\x94 Home") == 0,
+              "SetTitle(\"2\", ...) names the second screen's window (%s)", second.title);
+        first.asked_open = 0;
+        CHECK(system(BUS_CALL "Close string:2 >/dev/null") == 0 && wait_for(&second.asked_close, 2, 2000),
+              "Close(\"2\") has it closed");
+        for (int i = 0; i < 300 && second.connected; i++)
+            usleep(10000);
+        usleep(200000); /* the service has seen it go */
+        FILE *out = popen(BUS_CALL "Open", "r");
+        char reply[512] = "";
+        size_t got = out ? fread(reply, 1, sizeof reply - 1, out) : 0;
+        reply[got] = 0;
+        if (out)
+            pclose(out);
+        CHECK(strstr(reply, "int32 2") && wait_for(&first.asked_open, 1, 2000),
+              "Open() asks for a window and answers its connector's number, 2");
+        out = popen(BUS_CALL "Open", "r");
+        got = out ? fread(reply, 1, sizeof reply - 1, out) : 0;
+        reply[got] = 0;
+        if (out)
+            pclose(out);
+        CHECK(strstr(reply, "int32 0"), "Open() with no screen left: 0");
+    }
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures != 0;

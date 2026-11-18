@@ -43,12 +43,23 @@ CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DI
 cc $CFLAGS -Ishim/include -o "$OUT/screens_test" shim/test/screens_test.c "$OUT/libgbm.so" $(pkg-config --libs libdrm) \
     -lpthread -Wl,-rpath,"$OUT"
 (export CHAMELEON_SCREENS=2 && start_kernel "$OUT/runtime-screens" "$OUT/presenter-screens" 5)
-CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter-screens" XDG_RUNTIME_DIR="$OUT/runtime-screens" \
-    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/screens_test"
+# ...with chameleon-screens on a session bus, where there is one to start
+# (dbus-run-session, dbus-send): what a compositor's script calls.
+cc $CFLAGS -o "$OUT/chameleon-screens" shim/screens/screens.c -ldl
+if command -v dbus-run-session >/dev/null 2>&1 && command -v dbus-send >/dev/null 2>&1; then
+    CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter-screens" XDG_RUNTIME_DIR="$OUT/runtime-screens" \
+        SCREENS_TEST_BUS=1 dbus-run-session -- sh -c \
+        '"$1/chameleon-screens" & LD_PRELOAD="$1/libchameleon.so" "$1/screens_test"; ret=$?; kill $!; exit $ret' sh "$OUT"
+else
+    echo "no dbus-run-session or dbus-send: chameleon-screens isn't tested" >&2
+    CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter-screens" XDG_RUNTIME_DIR="$OUT/runtime-screens" \
+        LD_PRELOAD="$OUT/libchameleon.so" "$OUT/screens_test"
+fi
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)
 LD_PRELOAD="$OUT/libchameleon_udev.so" "$OUT/udev_test"
+XDG_RUNTIME_DIR="$OUT/runtime-screens" UDEV_TEST_SCREENS=1 LD_PRELOAD="$OUT/libchameleon_udev.so" "$OUT/udev_test"
 cc -O1 -Wall -Wextra -o "$OUT/glsl_fix_test" shim/test/glsl_fix_test.c shim/gles/glsl_fix.c
 "$OUT/glsl_fix_test"
 cc -O1 -g -Wall -Wextra -o "$OUT/input_test" shim/test/input_test.c $(pkg-config --cflags --libs wayland-server)

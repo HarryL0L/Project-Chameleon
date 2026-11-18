@@ -178,8 +178,8 @@ struct screen {
     int cursor_fence;            /* ...the cursor plane's */
 };
 
-static struct kms_state g_state = {{{.in_fence = -1}, {.in_fence = -1}}};
-static struct screen g_sc[CHAM_SCREENS] = {{.in_fence = -1, .cursor_fence = -1}, {.in_fence = -1, .cursor_fence = -1}};
+static struct kms_state g_state; /* each screen's in_fence set to none in kms_init */
+static struct screen g_sc[CHAM_SCREENS]; /* their fences set to none in kms_init */
 static int g_screens = 1;           /* how many the card has (CHAMELEON_SCREENS) */
 static int g_has_cursor;            /* the card has cursor planes */
 static struct fb *g_fbs;
@@ -308,12 +308,15 @@ static void kms_init(void)
     uint32_t w = 0, h = 0, mhz = 0, win_w = 0, win_h = 0;
     const char *screens = getenv("CHAMELEON_SCREENS");
     if (screens && atoi(screens) >= 2) {
-        g_screens = CHAM_SCREENS;
-        cham_log("the card has a second screen: open it from the Chameleon app's menu");
+        g_screens = atoi(screens) < CHAM_SCREENS ? atoi(screens) : CHAM_SCREENS;
+        cham_log("the card has %d screens: the further ones are windows the Chameleon app opens", g_screens);
     }
-    for (int i = 0; i < CHAM_SCREENS; i++)
+    for (int i = 0; i < CHAM_SCREENS; i++) {
+        g_sc[i].in_fence = g_sc[i].cursor_fence = -1;
+        g_state.sc[i].in_fence = -1;
         g_sc[i].edid_blob = (struct blob){.id = SCREEN_ID(i, ID_EDID_BLOB), .length = sizeof g_sc[i].edid,
                                           .data = g_sc[i].edid};
+    }
     link_start(g_screens);
     const char *wait = getenv("CHAMELEON_WAIT");
     int timeout_ms = (wait ? atoi(wait) : 30) * 1000;
@@ -1088,13 +1091,23 @@ static uint32_t mode_mhz(const struct drm_mode_modeinfo *m, const struct screen 
     return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : sc->mode_mhz;
 }
 
-void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height)
+void kms_screen_size(int screen, uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height)
 {
     kms_init_once();
-    *width = g_sc[0].width; /* the first screen: the input devices are its window's */
-    *height = g_sc[0].height;
-    *mm_width = g_sc[0].mm_width;
-    *mm_height = g_sc[0].mm_height;
+    pthread_mutex_lock(&g_lock);
+    const struct screen *sc = &g_sc[screen];
+    int there = screen < g_screens && sc->connected;
+    *width = there ? sc->width : 0;
+    *height = there ? sc->height : 0;
+    *mm_width = there ? sc->mm_width : 0;
+    *mm_height = there ? sc->mm_height : 0;
+    pthread_mutex_unlock(&g_lock);
+}
+
+int kms_screens(void)
+{
+    kms_init_once();
+    return g_screens;
 }
 
 void kms_mode_size(uint32_t *width, uint32_t *height)

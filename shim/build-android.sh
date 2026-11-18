@@ -32,7 +32,10 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 # The session's init: adopts and reaps the programs that detach in it.
 "$CC" $CFLAGS -o "$OUT/chameleon-init" shim/init/init.c
-cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
+# Asks the app for windows, for the session's programs (over its bus).
+"$CC" $CFLAGS -o "$OUT/chameleon-screens" shim/screens/screens.c -ldl
+cp shim/chameleon shim/chameleon-vendor-install shim/windows/chameleon-windows-session \
+    shim/windows/chameleon-windows.js "$OUT/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
 # missing symbol breaks KWin at load time. The vendor exports only its entry.

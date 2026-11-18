@@ -10,6 +10,10 @@
  *    high-resolution wheels;
  *  3 touchpad: the app's trackpad mode, the screen as a laptop's touchpad
  *    without buttons (so libinput taps to click), in screen pixels.
+ * A card with several screens has a touchscreen for each further one too
+ * (from DEV_COUNT on), and each touchscreen names its screen's connector
+ * (udev's WL_OUTPUT, which libinput passes on as the device's output name),
+ * so a compositor knows which monitor's glass it is.
  * Touch positions are fractions of the screen, so those axes run 0..65535
  * and the compositor maps them onto its output. As in the kernel, a device
  * changes whether or not a program reads it; its events reach only the
@@ -37,6 +41,8 @@
 #include "internal.h"
 
 enum { DEV_TOUCH, DEV_KEYBOARD, DEV_MOUSE, DEV_TOUCHPAD, DEV_TABLET, DEV_COUNT };
+#define MAX_DEVICES (DEV_COUNT + CHAM_SCREENS - 1) /* and the further screens' touchscreens */
+_Static_assert(MAX_DEVICES <= CHAM_EVDEV_MAX_DEVICES, "more devices than a client lists");
 
 #define TOUCH_SLOTS 10
 #define MAX_READERS 8
@@ -70,7 +76,7 @@ static struct device {
     struct input_event frame[FRAME_EVENTS]; /* input thread only */
     int frame_len;
     int64_t last_time; /* ns, of the last frame sent */
-} g_dev[DEV_COUNT];
+} g_dev[MAX_DEVICES];
 static pthread_mutex_t g_evdev_lock = PTHREAD_MUTEX_INITIALIZER;
 #define MAX_MONITORS 16
 static struct {
@@ -87,7 +93,7 @@ static struct mt {         /* a multitouch device (protocol B) */
     int tracking_id;
     int touching;
     int tool; /* the touchpad's BTN_TOOL_* finger count, as last sent */
-} g_touch, g_pad;
+} g_touch[CHAM_SCREENS], g_pad;
 static int32_t g_pad_size; /* the touchpad's axes: the screen's longer side, in pixels */
 static uint32_t g_window_w, g_window_h; /* input thread: the app's whole window, 0 = not reported */
 static int32_t g_wheel_rest[2]; /* hi-res wheel movement short of a whole notch */
@@ -100,23 +106,35 @@ static void set_axis(struct cham_evdev_info *d, unsigned axis, int32_t max)
     d->absinfo[axis].maximum = max;
 }
 
+/* A screen's touchscreen. */
+static struct device *touch_device(int screen)
+{
+    return &g_dev[screen ? DEV_COUNT + screen - 1 : DEV_TOUCH];
+}
+
 static void describe(void)
 {
-    struct cham_evdev_info *d = &g_dev[DEV_TOUCH].info;
-    snprintf(d->name, sizeof d->name, "Chameleon touchscreen");
-    snprintf(d->udev_type, sizeof d->udev_type, "ID_INPUT_TOUCHSCREEN");
-    d->id.bustype = BUS_VIRTUAL;
-    cham_bit_set(d->prop, INPUT_PROP_DIRECT);
-    cham_bit_set(d->ev, EV_SYN);
-    cham_bit_set(d->ev, EV_KEY);
-    cham_bit_set(d->ev, EV_ABS);
-    cham_bit_set(d->key, BTN_TOUCH);
-    set_axis(d, ABS_X, AXIS_MAX);
-    set_axis(d, ABS_Y, AXIS_MAX);
-    set_axis(d, ABS_MT_SLOT, TOUCH_SLOTS - 1);
-    set_axis(d, ABS_MT_POSITION_X, AXIS_MAX);
-    set_axis(d, ABS_MT_POSITION_Y, AXIS_MAX);
-    set_axis(d, ABS_MT_TRACKING_ID, 65535);
+    struct cham_evdev_info *d;
+    for (int screen = 0; screen < CHAM_SCREENS; screen++) {
+        d = &touch_device(screen)->info;
+        if (screen)
+            snprintf(d->name, sizeof d->name, "Chameleon touchscreen %d", screen + 1);
+        else
+            snprintf(d->name, sizeof d->name, "Chameleon touchscreen");
+        snprintf(d->udev_type, sizeof d->udev_type, "ID_INPUT_TOUCHSCREEN");
+        d->id.bustype = BUS_VIRTUAL;
+        cham_bit_set(d->prop, INPUT_PROP_DIRECT);
+        cham_bit_set(d->ev, EV_SYN);
+        cham_bit_set(d->ev, EV_KEY);
+        cham_bit_set(d->ev, EV_ABS);
+        cham_bit_set(d->key, BTN_TOUCH);
+        set_axis(d, ABS_X, AXIS_MAX);
+        set_axis(d, ABS_Y, AXIS_MAX);
+        set_axis(d, ABS_MT_SLOT, TOUCH_SLOTS - 1);
+        set_axis(d, ABS_MT_POSITION_X, AXIS_MAX);
+        set_axis(d, ABS_MT_POSITION_Y, AXIS_MAX);
+        set_axis(d, ABS_MT_TRACKING_ID, 65535);
+    }
 
     d = &g_dev[DEV_KEYBOARD].info;
     snprintf(d->name, sizeof d->name, "Chameleon keyboard");
@@ -185,19 +203,31 @@ static void describe(void)
 }
 
 /* Units per mm from the size the connector reports, so programs that
- * measure in mm get sensible numbers. The touchscreen's axes span the
- * screen. The touchpad's are pixels, the same per mm both ways whichever
- * way the phone is turned (libinput's touchpad gestures are measured in mm),
- * and as long as the screen's longer side either way. */
-static void set_resolution(void)
+ * measure in mm get sensible numbers. A touchscreen's axes span its screen
+ * (a further screen that has no window yet: as the first). The touchpad's
+ * are pixels, the same per mm both ways whichever way the phone is turned
+ * (libinput's touchpad gestures are measured in mm), and as long as the
+ * screen's longer side either way. Returns how many devices there are; on a
+ * card with several screens each touchscreen names its connector. */
+static int set_resolution(void)
 {
     uint32_t w, h, mm_w, mm_h;
-    kms_screen_size(&w, &h, &mm_w, &mm_h);
+    int screens = kms_screens();
+    kms_screen_size(0, &w, &h, &mm_w, &mm_h);
     if (!w || !h || !mm_w || !mm_h)
-        return;
-    struct cham_evdev_info *t = &g_dev[DEV_TOUCH].info;
-    t->absinfo[ABS_X].resolution = t->absinfo[ABS_MT_POSITION_X].resolution = AXIS_MAX / (int32_t)mm_w;
-    t->absinfo[ABS_Y].resolution = t->absinfo[ABS_MT_POSITION_Y].resolution = AXIS_MAX / (int32_t)mm_h;
+        return DEV_COUNT + screens - 1;
+    for (int screen = 0; screen < screens; screen++) {
+        struct cham_evdev_info *t = &touch_device(screen)->info;
+        uint32_t sw, sh, smm_w = 0, smm_h = 0;
+        if (screen)
+            kms_screen_size(screen, &sw, &sh, &smm_w, &smm_h);
+        if (!smm_w || !smm_h)
+            smm_w = mm_w, smm_h = mm_h;
+        t->absinfo[ABS_X].resolution = t->absinfo[ABS_MT_POSITION_X].resolution = AXIS_MAX / (int32_t)smm_w;
+        t->absinfo[ABS_Y].resolution = t->absinfo[ABS_MT_POSITION_Y].resolution = AXIS_MAX / (int32_t)smm_h;
+        if (screens > 1)
+            snprintf(t->output, sizeof t->output, "DSI-%d", screen + 1);
+    }
     struct cham_evdev_info *p = &g_dev[DEV_TOUCHPAD].info;
     int32_t size = (int32_t)(w > h ? w : h), res = size / (int32_t)(w > h ? mm_w : mm_h);
     const unsigned axes[] = {ABS_X, ABS_Y, ABS_MT_POSITION_X, ABS_MT_POSITION_Y};
@@ -208,6 +238,7 @@ static void set_resolution(void)
     pthread_mutex_lock(&g_evdev_lock);
     g_pad_size = size;
     pthread_mutex_unlock(&g_evdev_lock);
+    return DEV_COUNT + screens - 1;
 }
 
 /* ---- server ---- */
@@ -356,11 +387,10 @@ static int take_requests(struct device *d, int i)
 
 static void serve(int c)
 {
-    uint32_t count = DEV_COUNT, index = UINT32_MAX;
-    set_resolution();
+    uint32_t count = (uint32_t)set_resolution(), index = UINT32_MAX;
     if (write_all(c, &count, sizeof count))
         goto done;
-    for (int i = 0; i < DEV_COUNT; i++)
+    for (uint32_t i = 0; i < count; i++)
         if (write_all(c, &g_dev[i].info, sizeof g_dev[i].info))
             goto done;
     /* A reader asks for its device right away; a lister just closes. */
@@ -392,7 +422,7 @@ static void serve(int c)
         c = -1;
         goto done;
     }
-    if (index >= DEV_COUNT)
+    if (index >= count)
         goto done;
     struct device *d = &g_dev[index];
     pthread_mutex_lock(&g_evdev_lock);
@@ -422,12 +452,12 @@ static void *server_main(void *arg)
 {
     int s = (int)(intptr_t)arg;
     for (;;) {
-        struct pollfd p[2 + DEV_COUNT * MAX_READERS + MAX_MONITORS] = {{s, POLLIN, 0}, {g_server_wake[0], POLLIN, 0}};
+        struct pollfd p[2 + MAX_DEVICES * MAX_READERS + MAX_MONITORS] = {{s, POLLIN, 0}, {g_server_wake[0], POLLIN, 0}};
         int n = 2;
         pthread_mutex_lock(&g_evdev_lock);
         for (int i = 0; i < MAX_MONITORS; i++) /* only their going away */
             p[n++] = (struct pollfd){g_monitors[i].fd ? g_monitors[i].fd : -1, POLLIN, 0};
-        for (int d = 0; d < DEV_COUNT; d++)
+        for (int d = 0; d < MAX_DEVICES; d++)
             for (int i = 0; i < MAX_READERS; i++) {
                 struct reader *r = &g_dev[d].readers[i];
                 p[n++] = (struct pollfd){r->fd ? r->fd : -1, (short)(POLLIN | (r->out_len ? POLLOUT : 0)), 0};
@@ -485,12 +515,16 @@ void evdev_start(void)
         return;
     describe();
     for (int i = 0; i < TOUCH_SLOTS; i++)
-        g_touch.slot_id[i] = g_pad.slot_id[i] = -1;
-    for (int d = 0; d < DEV_COUNT; d++) {
+        g_pad.slot_id[i] = -1;
+    for (int d = 0; d < MAX_DEVICES; d++) {
         g_dev[d].grab = -1;
         cham_evdev_state_init(&g_dev[d].state);
     }
-    g_touch.cur_slot = g_touch.abs_x = g_touch.abs_y = -1;
+    for (int screen = 0; screen < CHAM_SCREENS; screen++) {
+        for (int i = 0; i < TOUCH_SLOTS; i++)
+            g_touch[screen].slot_id[i] = -1;
+        g_touch[screen].cur_slot = g_touch[screen].abs_x = g_touch[screen].abs_y = -1;
+    }
     g_pad.cur_slot = g_pad.abs_x = g_pad.abs_y = -1;
     if (pipe2(g_server_wake, O_CLOEXEC | O_NONBLOCK) != 0)
         return;
@@ -681,7 +715,7 @@ static void position(struct device *d, struct mt *t, int slot, uint64_t pos)
         if (!w || !h)
             kms_mode_size(&w, &h);
         if (!w || !h) /* before the compositor's first modeset */
-            kms_screen_size(&w, &h, &mm_w, &mm_h);
+            kms_screen_size(0, &w, &h, &mm_w, &mm_h);
         pthread_mutex_lock(&g_evdev_lock);
         int32_t size = g_pad_size;
         pthread_mutex_unlock(&g_evdev_lock);
@@ -807,8 +841,12 @@ int evdev_input(const struct cham_msg *m)
     case CHAM_INPUT_TOUCH_MOTION:
     case CHAM_INPUT_TOUCH_UP:
     case CHAM_INPUT_TOUCH_CANCEL:
-    case CHAM_INPUT_TOUCH_FRAME:
-        return touch(&g_dev[DEV_TOUCH], &g_touch, m->id, m);
+    case CHAM_INPUT_TOUCH_FRAME: {
+        uint32_t screen = LINK_INPUT_SCREEN(m); /* whose window's glass */
+        if (screen >= (uint32_t)kms_screens())
+            return 1;
+        return touch(touch_device((int)screen), &g_touch[screen], m->id, m);
+    }
     case CHAM_INPUT_PAD_DOWN:
     case CHAM_INPUT_PAD_MOTION:
     case CHAM_INPUT_PAD_UP:

@@ -80,6 +80,7 @@ struct dev {
     unsigned long long seqnum;
     char seqnum_s[24];
     char sysname[16], syspath[4 + 64], devpath[64], devnode[108], major[8], minor[8], type[32];
+    char output[16]; /* WL_OUTPUT, if the device names its screen */
     dev_t devnum;
     struct entry props[MAX_PROPS];
     int nprops;
@@ -131,6 +132,7 @@ static int read_list(int s, struct cham_evdev_info *out, int max)
         if (recv(s, &info, sizeof info, MSG_WAITALL) != (ssize_t)sizeof info)
             return 0;
         info.name[sizeof info.name - 1] = info.udev_type[sizeof info.udev_type - 1] = '\0';
+        info.output[sizeof info.output - 1] = '\0';
         if ((int)i < max)
             out[i] = info;
     }
@@ -223,6 +225,9 @@ static void describe(struct dev *d, struct udev *udev, int index, const struct c
     char *save, *type = strtok_r(d->type, " ", &save);
     for (; type && d->nprops < MAX_PROPS; type = strtok_r(NULL, " ", &save))
         p[d->nprops++] = (struct entry){MAGIC_ENTRY, type, "1", NULL};
+    snprintf(d->output, sizeof d->output, "%s", info->output);
+    if (d->output[0]) /* as a udev rule of the machine's would name it */
+        p[d->nprops++] = (struct entry){MAGIC_ENTRY, "WL_OUTPUT", d->output, NULL};
     link_entries(p, d->nprops);
 }
 

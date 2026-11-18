@@ -36,4 +36,6 @@
     <string name="key_service_description">While Chameleon is in front, sends every key of a hardware keyboard to the desktop, including shortcuts Android keeps for itself (Alt+Tab, Meta…). Volume and power keys stay with Android. Nothing is read or sent while another app is in front.</string>
     <string name="close">Close</string>
     <string name="screen_off">The desktop\'s screen is off\nTap to wake it</string>
+    <string name="screen3">Chameleon 3</string>
+    <string name="screen4">Chameleon 4</string>
 </resources>

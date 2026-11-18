@@ -54,6 +54,12 @@ enum cham_msg_type {
                                requests take (a stuck producer doesn't answer): a = the PING's a,
                                b = how long the compositor has left the producer's own question
                                to it unanswered, in ms (0: it answers, or isn't asked) */
+    CHAM_WINDOW_OPEN = 11,  /* to the first window: open the window of screen a (from 1), as
+                               the user does from the menu; a program of the session asked */
+    CHAM_WINDOW_CLOSE = 12, /* to a further screen's window: close for good (its monitor is
+                               then unplugged) */
+    CHAM_TITLE = 13,        /* what this window shows: fd = pipe to read its name from (UTF-8),
+                               for Android's list of recent apps */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),

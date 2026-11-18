@@ -316,6 +316,21 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
             input_note_socket(c->pid, path);
         break;
     }
+    case CARD_SCREEN: {
+        char text[256] = "";
+        if (m->id == CARD_SCREEN_TITLE) {
+            ssize_t n = recv(c->sock, text, sizeof text - 1, 0);
+            text[n > 0 ? n : 0] = 0;
+        }
+        int screen = (int)(int64_t)m->a;
+        answer(c, m->id == CARD_SCREEN_OPEN ? link_screen_open() : m->id == CARD_SCREEN_CLOSE
+                                                                        ? link_screen_close(screen)
+                                                                        : m->id == CARD_SCREEN_TITLE
+                                                                              ? link_screen_title(screen, text)
+                                                                              : -EINVAL,
+               -1);
+        break;
+    }
     case CARD_SEND_FD:
         if (c->sent_fd[1] >= 0)
             close(c->sent_fd[1]);

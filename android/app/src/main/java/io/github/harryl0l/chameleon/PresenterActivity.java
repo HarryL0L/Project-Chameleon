@@ -4,6 +4,7 @@ package io.github.harryl0l.chameleon;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.util.Log;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
@@ -66,6 +67,7 @@ import java.util.List;
  */
 public class PresenterActivity extends Activity
         implements SurfaceHolder.Callback, DisplayManager.DisplayListener {
+    private static final String TAG = "chameleon";
     static {
         System.loadLibrary("chameleon_presenter");
     }
@@ -79,6 +81,7 @@ public class PresenterActivity extends Activity
     private static native String nativeStatus();
     private static native boolean nativeLostProducer();
     private static native boolean nativeSecondScreen();
+    private static native byte[] nativeWindowEvent();
     /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
     static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
@@ -245,6 +248,7 @@ public class PresenterActivity extends Activity
             BrokerLink.listen(this, screen());
             sStarted = true;
         }
+        listenForWindowEvents(); // each time: the window may be a new one of a process that stayed
     }
 
     /**
@@ -254,6 +258,68 @@ public class PresenterActivity extends Activity
      */
     int screen() {
         return 0;
+    }
+
+    // ---- windows the desktop's session asks for ----
+
+    private static PresenterActivity sWindow; // this process's window, while it exists (main thread)
+    private static Thread sWindowEvents;
+
+    /** The classes of the further screens' windows, each a process of its own (the manifest). */
+    private static final Class<?>[] SCREENS = {ScreenActivity.class, ScreenActivity3.class, ScreenActivity4.class};
+
+    /** Starts the thread that takes what the session asks of this process's window. */
+    private void listenForWindowEvents() {
+        sWindow = this;
+        if (sWindowEvents != null)
+            return;
+        Context app = getApplicationContext();
+        Handler main = new Handler(Looper.getMainLooper());
+        sWindowEvents = new Thread(() -> {
+            for (;;) {
+                byte[] bytes = nativeWindowEvent();
+                if (bytes == null)
+                    continue;
+                String event = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+                main.post(() -> windowEvent(app, event));
+            }
+        }, "window-events");
+        sWindowEvents.setDaemon(true);
+        sWindowEvents.start();
+    }
+
+    private static void windowEvent(Context app, String event) {
+        if (event.startsWith("open ")) {
+            int screen;
+            try {
+                screen = Integer.parseInt(event.substring(5));
+            } catch (NumberFormatException e) {
+                return;
+            }
+            if (screen < 1 || screen > SCREENS.length)
+                return;
+            // From the app, not this window: it may be in the background while
+            // another of the app's windows is in front (Android lets an app
+            // with a visible window start another).
+            try {
+                app.startActivity(new Intent(app, SCREENS[screen - 1]).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            } catch (RuntimeException e) {
+                Log.w(TAG, "cannot open the window of screen " + (screen + 1), e);
+            }
+        } else if (event.equals("close")) {
+            if (sWindow != null && sWindow.screen() != 0)
+                sWindow.finishAndRemoveTask();
+        } else if (event.startsWith("title ")) {
+            if (sWindow != null)
+                sWindow.setTaskDescription(new android.app.ActivityManager.TaskDescription(event.substring(6)));
+        }
+    }
+
+    @Override
+    protected void onDestroy() {
+        if (sWindow == this)
+            sWindow = null;
+        super.onDestroy();
     }
 
     private void openSecondScreen() {
@@ -476,8 +542,7 @@ public class PresenterActivity extends Activity
     }
 
     private boolean isTrackpad() {
-        // A further screen's window is a touchpad only, for now.
-        return screen() != 0 || "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
+        return "trackpad".equals(mPrefs.getString(PREF_MODE, "direct"));
     }
 
     private boolean backLeavesApp() {
