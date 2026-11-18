@@ -318,7 +318,7 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
     }
     case CARD_SCREEN: {
         char text[256] = "";
-        if (m->id == CARD_SCREEN_TITLE) {
+        if (m->id == CARD_SCREEN_TITLE || m->id == CARD_SCREEN_ICON) {
             ssize_t n = recv(c->sock, text, sizeof text - 1, 0);
             text[n > 0 ? n : 0] = 0;
         }
@@ -327,7 +327,9 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
                                                                         ? link_screen_close(screen)
                                                                         : m->id == CARD_SCREEN_TITLE
                                                                               ? link_screen_title(screen, text)
-                                                                              : -EINVAL,
+                                                                              : m->id == CARD_SCREEN_ICON
+                                                                                    ? link_screen_icon(screen, text)
+                                                                                    : -EINVAL,
                -1);
         break;
     }

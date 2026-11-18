@@ -59,6 +59,8 @@ struct window {
     volatile int presents, unchanged, buffers, hellos;
     volatile int asked_open, asked_close, titles; /* CHAM_WINDOW_OPEN (its screen), _CLOSE, CHAM_TITLE */
     char title[256];
+    volatile int icons; /* CHAM_ICON */
+    char icon[64];
     volatile uint64_t hello_flags;
     volatile int touch; /* 1: a finger is to touch it at (1/4, 1/2), 2: it did */
 };
@@ -128,6 +130,11 @@ static void *window_main(void *arg)
                 ssize_t n = read(fd, win->title, sizeof win->title - 1);
                 win->title[n > 0 ? n : 0] = 0;
                 win->titles++;
+            }
+            if (m.type == CHAM_ICON && fd >= 0) {
+                ssize_t n = read(fd, win->icon, sizeof win->icon - 1);
+                win->icon[n > 0 ? n : 0] = 0;
+                win->icons++;
             }
             if (fd >= 0)
                 close(fd);
@@ -548,6 +555,20 @@ int main(void)
     CHECK(ask_screen(CARD_SCREEN_TITLE, 0, "first") == 0 && wait_for(&first.titles, 1, 2000) &&
               strcmp(first.title, "first") == 0,
           "...and one for the first's");
+    char icon_path[160];
+    snprintf(icon_path, sizeof icon_path, "%s/icon-test.png", getenv("XDG_RUNTIME_DIR"));
+    FILE *icon_file = fopen(icon_path, "w");
+    if (icon_file) {
+        fputs("a picture's bytes", icon_file);
+        fclose(icon_file);
+    }
+    CHECK(ask_screen(CARD_SCREEN_ICON, 1, icon_path) == 0 && wait_for(&second.icons, 1, 2000) &&
+              strcmp(second.icon, "a picture's bytes") == 0 && first.icons == 0,
+          "an icon's file for the second screen's window: it gets the file to read (%s)", second.icon);
+    CHECK(ask_screen(CARD_SCREEN_ICON, 1, "/nowhere/icon.png") == -ENOENT &&
+              ask_screen(CARD_SCREEN_ICON, 1, getenv("XDG_RUNTIME_DIR")) == -EINVAL &&
+              ask_screen(CARD_SCREEN_ICON, 7, icon_path) == -EINVAL && second.icons == 1,
+          "no such file ENOENT, a directory EINVAL, no such screen EINVAL");
     CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == -EBUSY && first.asked_open == 0,
           "open: every screen has its window, EBUSY");
     CHECK(ask_screen(CARD_SCREEN_CLOSE, 0, NULL) == -EINVAL && ask_screen(CARD_SCREEN_CLOSE, 2, NULL) == -EINVAL &&
@@ -616,6 +637,13 @@ int main(void)
         }
         CHECK(there && wait_for(&second.titles, 2, 2000) && strcmp(second.title, "Dolphin \xe2\x80\x94 Home") == 0,
               "SetTitle(\"2\", ...) names the second screen's window (%s)", second.title);
+        char call[512];
+        snprintf(call, sizeof call, BUS_CALL "SetIcon string:2 string:%s >/dev/null", icon_path);
+        int icons = second.icons;
+        CHECK(system(call) == 0 && wait_for(&second.icons, icons + 1, 2000),
+              "SetIcon(\"2\", file) gives it the icon's file");
+        CHECK(system(BUS_CALL "SetApp string:2 string:org.kde.kate >/dev/null") == 0 && second.icons == icons + 1,
+              "SetApp(\"2\", app) is answered and nothing more");
         first.asked_open = 0;
         CHECK(system(BUS_CALL "Close string:2 >/dev/null") == 0 && wait_for(&second.asked_close, 2, 2000),
               "Close(\"2\") has it closed");

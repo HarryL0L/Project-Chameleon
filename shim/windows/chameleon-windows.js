@@ -6,9 +6,9 @@
 // For each further one the script asks chameleon-screens for a window of the
 // Android app (Open); its connector (DSI-N) gets connected when that window is
 // there, and the app window moves onto it, full screen, without a border.
-// The Android window carries the app window's title. When the app window
-// closes, so does its Android window (Close); when the Android window is
-// closed, its connector goes and the app window is asked to close.
+// The Android window carries the app window's title and its app's icon. When
+// the app window closes, so does its Android window (Close); when the Android
+// window is closed, its connector goes and the app window is asked to close.
 // Dialogs and other windows that belong to one stay with it. When the last app
 // window has closed and none comes in its place, KWin is asked to quit: the
 // session is over.
@@ -55,6 +55,8 @@ function own(window, name) {
     window.noBorder = true;
     window.fullScreen = true;
     setTitle(window, name);
+    if (window.desktopFileName) // which app: the session finds its icon
+        callDBus(SERVICE, PATH, INTERFACE, "SetApp", number(name), window.desktopFileName);
     window.captionChanged.connect(function () {
         if (owners[name] === window)
             setTitle(window, name);

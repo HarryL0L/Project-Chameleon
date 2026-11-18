@@ -13,6 +13,12 @@
  *     Close(s N)             has that window closed (its connector is then
  *                            disconnected); not the first screen's
  *     SetTitle(s N, s text)  names the window in Android's recent apps
+ *     SetIcon(s N, s file)   gives it the icon in a file (a PNG, 1 MiB at
+ *                            most) there
+ *     SetApp(s N, s app)     says which app's window it shows (its desktop
+ *                            file's name): nothing is done with it here, a
+ *                            session's own tools may watch for it to find
+ *                            the icon
  *
  * The numbers are strings going in, since a script's numbers have no fixed
  * D-Bus type. Each call becomes one request to chameleon-kernel (CARD_SCREEN,
@@ -175,6 +181,14 @@ int main(void)
                 memcpy(cut, text, len);
                 cut[len] = 0;
                 ret = (int32_t)ask(CARD_SCREEN_TITLE, atoi(n) - 1, cut);
+            } else if (dbus.message_is_method_call(call, INTERFACE, "SetIcon") &&
+                       dbus.message_get_args(call, NULL, DBUS_TYPE_STRING, &n, DBUS_TYPE_STRING, &text,
+                                             DBUS_TYPE_INVALID)) {
+                ret = strlen(text) < 240 ? (int32_t)ask(CARD_SCREEN_ICON, atoi(n) - 1, text) : -ENAMETOOLONG;
+            } else if (dbus.message_is_method_call(call, INTERFACE, "SetApp") &&
+                       dbus.message_get_args(call, NULL, DBUS_TYPE_STRING, &n, DBUS_TYPE_STRING, &text,
+                                             DBUS_TYPE_INVALID)) {
+                ret = 0;
             } else {
                 handled = 0; /* the bus's own signals, a method this hasn't */
             }

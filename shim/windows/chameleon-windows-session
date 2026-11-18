@@ -27,38 +27,82 @@ while [ "$n" -le "${CHAMELEON_SCREENS:-1}" ]; do
         echo "chameleon: KWin didn't take screen $n's touchscreen; its touches may land on another screen" >&2
     n=$((n + 1))
 done
-# A further screen gets the first screen's scale (and full brightness) the
-# first time a window is put on it: KWin guesses a scale for a monitor it
-# hasn't seen, so the app's windows would differ in size. KWin keeps what it
-# is given. The script names a window's screen right when it has put the
-# window there (SetTitle), which is watched for here; kscreen-doctor is KDE's
-# tool for the screens' setup.
+# What the script tells chameleon-screens about a window's screen is watched
+# for here, to do what a script can't:
+# - A further screen gets the first screen's scale (and full brightness) the
+#   first time a window is named on it (SetTitle, right when the script has
+#   put it there): KWin guesses a scale for a monitor it hasn't seen, so the
+#   app's windows would differ in size. KWin keeps what it is given;
+#   kscreen-doctor is KDE's tool for the screens' setup.
+# - A window's app (SetApp, its desktop file's name) gives the Android window
+#   its icon: the desktop file names it, kiconfinder6 finds its file as KDE's
+#   programs do, rsvg-convert draws an SVG as the PNG Android can show.
 scale=$(kscreen-doctor -j 2>/dev/null | sed -n 's/^ *"scale": *\([0-9.]*\).*/\1/p' | head -n 1)
-if [ -n "$scale" ] && command -v dbus-monitor >/dev/null 2>&1; then
-    dbus-monitor --session "type='method_call',interface='io.github.harryl0l.Chameleon.Screens',member='SetTitle'" |
+[ -n "$scale" ] || echo "chameleon: no kscreen-doctor: further windows keep the scale KWin picks" >&2
+icon_of() { # $1 = a screen's number, $2 = an app's desktop file name
+    case $2 in *[!A-Za-z0-9._-]* | "") return ;; esac
+    icon=$2
+    for dir in "$HOME/.local/share" "${PREFIX:-/usr}/share"; do
+        if [ -r "$dir/applications/$2.desktop" ]; then
+            icon=$(sed -n 's/^Icon=//p' "$dir/applications/$2.desktop" | head -n 1)
+            break
+        fi
+    done
+    case $icon in
+    "") return ;;
+    /*) file=$icon ;;
+    *) file=$(kiconfinder6 "$icon" 2>/dev/null </dev/null) ;;
+    esac
+    case $file in
+    *.svg | *.svgz)
+        png=${XDG_RUNTIME_DIR:-/tmp}/chameleon-icon-$1.png
+        rsvg-convert -w 192 -h 192 -o "$png" "$file" 2>/dev/null </dev/null || return
+        file=$png
+        ;;
+    *.png) ;;
+    *) return ;;
+    esac
+    dbus-send --session --dest=io.github.harryl0l.Chameleon --print-reply /Screens \
+        io.github.harryl0l.Chameleon.Screens.SetIcon "string:$1" "string:$file" >/dev/null 2>&1 </dev/null
+}
+if command -v dbus-monitor >/dev/null 2>&1; then
+    dbus-monitor --session "type='method_call',interface='io.github.harryl0l.Chameleon.Screens'" |
         while read -r word rest; do
             case "$word $rest" in
-            "method call "*) screen=next ;;
-            'string "'[2-9]'"')
-                n=${rest#\"}
-                n=${n%\"}
-                case "$screen:$seen" in
-                next:*" $n "*) ;;
-                next:*)
-                    kscreen-doctor "output.DSI-$n.scale.$scale" >/dev/null 2>&1 </dev/null
-                    # ...and full brightness: Android dims the glass, and KWin
-                    # would darken the picture by what a desktop session left.
-                    kscreen-doctor "output.DSI-$n.brightness.100" >/dev/null 2>&1 </dev/null
-                    seen="$seen $n "
+            "method call "*"member=SetTitle") call=title n= ;;
+            "method call "*"member=SetApp") call=app n= ;;
+            'string "'*'"')
+                value=${rest#\"}
+                value=${value%\"}
+                case "$call:$n:$value" in
+                title::[2-9])
+                    case $seen in
+                    *" $value "*) ;;
+                    *)
+                        if [ -n "$scale" ]; then
+                            kscreen-doctor "output.DSI-$value.scale.$scale" >/dev/null 2>&1 </dev/null
+                            # ...and full brightness: Android dims the glass, and KWin
+                            # would darken the picture by what a desktop session left.
+                            kscreen-doctor "output.DSI-$value.brightness.100" >/dev/null 2>&1 </dev/null
+                        fi
+                        seen="$seen $value "
+                        ;;
+                    esac
+                    call=
                     ;;
+                app::[1-9]) n=$value ;;
+                app:[1-9]:*)
+                    icon_of "$n" "$value"
+                    call=
+                    ;;
+                *) call= ;;
                 esac
-                screen=
                 ;;
-            *) screen= ;;
+            *) call= ;;
             esac
         done &
 else
-    echo "chameleon: no kscreen-doctor or dbus-monitor: further windows keep the scale KWin picks" >&2
+    echo "chameleon: no dbus-monitor: further windows keep KWin's scale, and none has its app's icon" >&2
 fi
 i=1
 set --

@@ -99,10 +99,11 @@ void link_clipboard(uint32_t type, uint64_t a, int fd);
 /* For a program of the session (CARD_SCREEN): asks the app for the window
  * of a screen that has none, returning the screen (from 1) or -EBUSY when
  * all have one or -ENOTCONN without the app; has a further screen's window
- * closed; names a screen's window. */
+ * closed; names a screen's window; gives it the icon in a file (a PNG). */
 int link_screen_open(void);
 int link_screen_close(int screen);
 int link_screen_title(int screen, const char *text);
+int link_screen_icon(int screen, const char *path);
 
 /* ---- input.c: the app's input, window size and clipboard (one thread) ---- */
 struct cham_msg;
@@ -211,7 +212,7 @@ int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);
 uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 
 /* ---- card.c: the card's files, served to every process ---- */
-enum { CARD_SCREEN_OPEN = 1, CARD_SCREEN_CLOSE, CARD_SCREEN_TITLE };
+enum { CARD_SCREEN_OPEN = 1, CARD_SCREEN_CLOSE, CARD_SCREEN_TITLE, CARD_SCREEN_ICON };
 #define CHAM_CARD_SOCKET_NAME "chameleon-card" /* in $XDG_RUNTIME_DIR, SOCK_SEQPACKET */
 /* Requests (struct cham_msg type), one at a time per connection, each
  * answered by CARD_DONE (a = the result, or -errno): */
@@ -229,7 +230,8 @@ enum {
     CARD_SEND_FD,  /* + an fd, a = its number in the caller: a second fd the next
                     * CARD_IOCTL names (a commit's other fence); no answer */
     CARD_SCREEN,   /* id = CARD_SCREEN_*, a = a screen (from 0); for TITLE then a packet
-                    * with the text: -> a = the screen opened, 0 or -errno */
+                    * with the text, for ICON one with the file's path: -> a = the
+                    * screen opened, 0 or -errno */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */

@@ -97,10 +97,12 @@ program's own, as before there was a namespace for them; see below).
   KWin alone, with a script (`shim/windows/chameleon-windows.js`) that gives
   each app window a screen of the card to itself, full screen and without a
   border, so each is a window of the Chameleon app in Android's recent apps,
-  carrying the app window's title. The first app window takes the first
+  carrying the app window's title and its app's icon (found with
+  `kiconfinder6`, an SVG drawn with `rsvg-convert`; without them the app's
+  own icon stays). The first app window takes the first
   screen; for each further one the script asks `chameleon-screens` over the
   session's bus (`io.github.harryl0l.Chameleon`, `/Screens`: `Open`, `Close`,
-  `SetTitle`), which has chameleon-kernel ask the app for a window. Closing
+  `SetTitle`, `SetIcon`, `SetApp`), which has chameleon-kernel ask the app for a window. Closing
   an app window closes its Android window and the other way round; dialogs
   stay with their window. Four windows at most, each further one a process
   of the app; the session ends when the last app window

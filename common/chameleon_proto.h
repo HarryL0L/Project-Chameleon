@@ -60,6 +60,7 @@ enum cham_msg_type {
                                then unplugged) */
     CHAM_TITLE = 13,        /* what this window shows: fd = pipe to read its name from (UTF-8),
                                for Android's list of recent apps */
+    CHAM_ICON = 14,         /* ...and fd = a file to read its icon from (a PNG, 1 MiB at most) */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),

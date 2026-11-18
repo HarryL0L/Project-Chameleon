@@ -867,8 +867,8 @@ void queue_clipboard(uint32_t type, bool secret, int fd)
 }
 
 // What the producer asks of the app's windows (CHAM_WINDOW_OPEN / _CLOSE,
-// CHAM_TITLE), for PresenterActivity's thread (nativeWindowEvent): "open N",
-// "close", "title TEXT".
+// CHAM_TITLE, CHAM_ICON), for PresenterActivity's thread (nativeWindowEvent):
+// "open N", "close", "title TEXT", "icon " and the file's bytes.
 std::mutex g_win_lock;
 std::condition_variable g_win_cond;
 std::deque<std::string> g_win;
@@ -1027,6 +1027,17 @@ void serve(int client, int arrivals)
             ssize_t n = fd >= 0 ? read(fd, text, sizeof text) : -1;
             if (n >= 0)
                 queue_window_event("title " + std::string(text, (size_t)n));
+            break;
+        }
+        case CHAM_ICON: {
+            // A small file: read to the end, 1 MiB at most.
+            std::string event = "icon ";
+            char part[4096];
+            ssize_t n;
+            while (fd >= 0 && event.size() <= (1u << 20) && (n = read(fd, part, sizeof part)) > 0)
+                event.append(part, (size_t)n);
+            if (event.size() > 5 && event.size() <= (1u << 20) + 5)
+                queue_window_event(std::move(event));
             break;
         }
         case CHAM_CURSOR: {
@@ -1349,7 +1360,7 @@ Java_io_github_harryl0l_chameleon_PresenterActivity_nativeSetFrameRateVote(JNIEn
 
 // Blocks until the producer asks something of the app's windows: "open N"
 // (the window of screen N, from 1), "close" (this window, for good), "title
-// TEXT" (this window's name), as UTF-8.
+// TEXT" (this window's name) as UTF-8, "icon " and a picture's file (its icon).
 JNIEXPORT jbyteArray JNICALL
 Java_io_github_harryl0l_chameleon_PresenterActivity_nativeWindowEvent(JNIEnv *env, jclass)
 {

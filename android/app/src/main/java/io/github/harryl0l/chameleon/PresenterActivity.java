@@ -264,6 +264,8 @@ public class PresenterActivity extends Activity
 
     private static PresenterActivity sWindow; // this process's window, while it exists (main thread)
     private static Thread sWindowEvents;
+    private static String sTitle;                  // what the session named this process's window (main thread)
+    private static android.graphics.Bitmap sIcon; // ...and its icon
 
     /** The classes of the further screens' windows, each a process of its own (the manifest). */
     private static final Class<?>[] SCREENS = {ScreenActivity.class, ScreenActivity3.class, ScreenActivity4.class};
@@ -271,6 +273,7 @@ public class PresenterActivity extends Activity
     /** Starts the thread that takes what the session asks of this process's window. */
     private void listenForWindowEvents() {
         sWindow = this;
+        describeTask(); // a new window of a process that stayed: what the last one showed
         if (sWindowEvents != null)
             return;
         Context app = getApplicationContext();
@@ -280,6 +283,17 @@ public class PresenterActivity extends Activity
                 byte[] bytes = nativeWindowEvent();
                 if (bytes == null)
                     continue;
+                if (bytes.length > 5 && bytes[0] == 'i' && bytes[1] == 'c' && bytes[2] == 'o' && bytes[3] == 'n'
+                        && bytes[4] == ' ') { // the picture's file follows
+                    android.graphics.Bitmap icon =
+                            android.graphics.BitmapFactory.decodeByteArray(bytes, 5, bytes.length - 5);
+                    main.post(() -> {
+                        if (icon != null)
+                            sIcon = icon;
+                        describeTask();
+                    });
+                    continue;
+                }
                 String event = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
                 main.post(() -> windowEvent(app, event));
             }
@@ -310,9 +324,16 @@ public class PresenterActivity extends Activity
             if (sWindow != null && sWindow.screen() != 0)
                 sWindow.finishAndRemoveTask();
         } else if (event.startsWith("title ")) {
-            if (sWindow != null)
-                sWindow.setTaskDescription(new android.app.ActivityManager.TaskDescription(event.substring(6)));
+            sTitle = event.substring(6);
+            describeTask();
         }
+    }
+
+    /** This window in Android's recent apps: the name and icon the session gave it, if any. */
+    @SuppressWarnings("deprecation") // the icon is a picture the session sent, not a resource
+    private static void describeTask() {
+        if (sWindow != null && (sTitle != null || sIcon != null))
+            sWindow.setTaskDescription(new android.app.ActivityManager.TaskDescription(sTitle, sIcon));
     }
 
     @Override

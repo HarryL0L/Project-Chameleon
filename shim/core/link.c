@@ -24,6 +24,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -990,6 +991,24 @@ int link_screen_title(int screen, const char *text)
     int ret = n >= 0 && send_msg_locked(&g_links[screen], CHAM_TITLE, 0, 0, 0, p[0]) == 0 ? 0 : -ENOTCONN;
     pthread_mutex_unlock(&g_lock);
     close(p[0]);
+    return ret;
+}
+
+int link_screen_icon(int screen, const char *path)
+{
+    struct stat st;
+    if (screen < 0 || screen >= g_screens)
+        return -EINVAL;
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK);
+    if (fd < 0)
+        return -errno;
+    int ret = fstat(fd, &st) != 0 ? -errno : !S_ISREG(st.st_mode) ? -EINVAL : st.st_size > (1 << 20) ? -EFBIG : 0;
+    if (ret == 0) {
+        pthread_mutex_lock(&g_lock);
+        ret = send_msg_locked(&g_links[screen], CHAM_ICON, 0, 0, 0, fd) == 0 ? 0 : -ENOTCONN;
+        pthread_mutex_unlock(&g_lock);
+    }
+    close(fd);
     return ret;
 }
 
