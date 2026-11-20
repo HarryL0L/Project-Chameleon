@@ -11,6 +11,8 @@
 #   chameleon --windows kate            # an app in a window of its own, no
 #                                       # desktop: each further app window gets
 #                                       # its own Android window (KWin places them)
+#   chameleon --windows                 # the same without an app: it stays up
+#   chameleon --run dolphin             # a further program in that session
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
 # chameleon-kernel serves the card, the input devices and the link to the app
@@ -22,7 +24,7 @@ SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$1" in
 "" | -h | --help)
-    sed -n '2,20s/^# \{0,1\}//p' "$0"
+    sed -n '2,22s/^# \{0,1\}//p' "$0"
     exit 0
     ;;
 --install)
@@ -32,6 +34,37 @@ case "$1" in
     ;;
 esac
 
+# A --windows session leaves its environment in a file while it lasts
+# (shim/windows/chameleon-windows-session). --run APP... starts a program with
+# it, from any shell: the program finds the session's compositor, bus and
+# drivers as one started in the session does. --windows APP does the same
+# while such a session runs, instead of starting a second one in its place.
+SESSION_ENV=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}/chameleon-session.env
+session_runs() {
+    [ -r "$SESSION_ENV" ] && (. "$SESSION_ENV" && kill -0 "${CHAMELEON_INIT:-}") 2>/dev/null
+}
+if [ "$1" = --run ] || { [ "$1" = --windows ] && session_runs; }; then
+    mode=$1
+    shift
+    if [ $# = 0 ]; then
+        if [ "$mode" = --run ]; then
+            echo "chameleon: --run needs a program to start" >&2
+        else
+            echo "chameleon: a --windows session runs already; start apps in it with: chameleon --run APP" >&2
+        fi
+        exit 2
+    fi
+    if ! session_runs; then
+        echo "chameleon: no --windows session runs (start one with: chameleon --windows)" >&2
+        exit 1
+    fi
+    here=$(pwd)
+    . "$SESSION_ENV"
+    cd "$here" # the file's PWD was the session's
+    unset OLDPWD
+    exec "$@"
+fi
+
 # The session's init (shim/init/init.c), above everything else: programs that
 # detach from their parent - the bus's services, chameleon-kernel, a sound
 # server - stay the session's, as under systemd on a Linux desktop, instead
@@ -40,14 +73,10 @@ if ! kill -0 "${CHAMELEON_INIT:-}" 2>/dev/null; then
     exec "$SHIM_DIR/chameleon-init" "$0" "$@"
 fi
 
-# --windows APP...: see the end. Its card has four screens unless told otherwise.
+# --windows [APP...]: see the end. Its card has four screens unless told otherwise.
 WINDOWS=
 if [ "$1" = --windows ]; then
     shift
-    if [ $# = 0 ]; then
-        echo "chameleon: --windows needs an app to start" >&2
-        exit 2
-    fi
     WINDOWS=1
     export CHAMELEON_SCREENS=${CHAMELEON_SCREENS:-4}
 fi

@@ -1,18 +1,27 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# KWin's session for `chameleon --windows APP...`: has KWin load the script
+# KWin's session for `chameleon --windows [APP...]`: has KWin load the script
 # that gives each app window a screen of its own (chameleon-windows.js, next
 # to this file), then starts the app. The session lasts as long as KWin: the
 # script has KWin quit when the last app window is closed (many apps' first
 # process ends at once, their window living in another), and KWin ends with
-# this program if the app fails to start.
+# this program if the app fails to start. Without an app the session stays
+# until KWin is stopped (Ctrl+C where it was started).
+#
+# The session's environment is left in $XDG_RUNTIME_DIR/chameleon-session.env
+# while it lasts: `chameleon --run APP...` starts further programs with it.
 DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+SCRIPT=$DIR/chameleon-windows.js
+if [ "${CHAMELEON_WINDOWS_ARGS:-0}" = 0 ]; then
+    SCRIPT=${XDG_RUNTIME_DIR:-/tmp}/chameleon-windows.js
+    sed 's/^const STAY = false;/const STAY = true;/' "$DIR/chameleon-windows.js" >"$SCRIPT"
+fi
 call() {
     method=$1
     shift
     dbus-send --session --print-reply --dest=org.kde.KWin /Scripting "org.kde.kwin.Scripting.$method" "$@" >/dev/null
 }
-if ! { call loadScript "string:$DIR/chameleon-windows.js" string:chameleon-windows && call start; }; then
+if ! { call loadScript "string:$SCRIPT" string:chameleon-windows && call start; }; then
     echo "chameleon: KWin didn't take the script for app windows; they all stay on the first screen" >&2
 fi
 # Each screen's touchscreen belongs to its screen. The devices say so (udev's
@@ -112,7 +121,15 @@ while [ "$i" -le "${CHAMELEON_WINDOWS_ARGS:-0}" ]; do
     i=$((i + 1))
 done
 unset CHAMELEON_WINDOWS_ARGS
-"$@" || exit
+ENV_FILE=${XDG_RUNTIME_DIR:-/tmp}/chameleon-session.env
+trap 'rm -f "$ENV_FILE"' EXIT
+trap exit HUP INT TERM
+(umask 077 && export -p >"$ENV_FILE.new") && mv "$ENV_FILE.new" "$ENV_FILE"
+if [ $# = 0 ]; then
+    echo "chameleon: the session is up; start apps in it with: chameleon --run APP" >&2
+else
+    "$@" || exit
+fi
 while kill -0 "$PPID" 2>/dev/null; do
     sleep 1
 done

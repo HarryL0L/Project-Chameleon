@@ -296,3 +296,41 @@ apart "libadrenotools for another driver" "libadrenotools.so x1 " \
 apart "not with CHAMELEON_ANDROID_NAMESPACE=0" "" \
     VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" VULKAN_TEST_ICD="$OUT/libvulkan_chameleon.so" \
     CHAMELEON_ANDROID_VULKAN="$NS/android/libvulkan.so" CHAMELEON_ANDROID_NAMESPACE=0 "$OUT/vulkan_test"
+
+# `chameleon --run`: a program started from any shell gets the environment a
+# --windows session left in its file, and nothing starts without a session.
+RUN="$OUT/run"
+LAUNCHER="$(pwd)/shim/chameleon"
+rm -rf "$RUN" && mkdir -p "$RUN"
+sleep 60 &
+SESSION=$!
+run_check() {
+    what=$1 want=$2
+    shift 2
+    got=$(cd "$OUT" && { XDG_RUNTIME_DIR="$RUN" sh "$LAUNCHER" "$@" 2>&1 && echo "[0]" || echo "[$?]"; })
+    if [ "$got" != "$want" ]; then
+        echo "got: $got"
+        kill "$SESSION"
+        echo "chameleon --run, $what: FAILED"
+        exit 1
+    fi
+    echo "  ok    chameleon --run, $what"
+}
+run_check "no session" "chameleon: no --windows session runs (start one with: chameleon --windows)
+[1]" --run true
+(umask 077 && CHAMELEON_INIT=$SESSION RUN_MARK="a 'b'
+c" sh -c 'cd / && export -p' >"$RUN/chameleon-session.env")
+run_check "the session's environment, the caller's directory" "a 'b'
+c $OUT
+[0]" --run sh -c 'echo "$RUN_MARK $PWD"'
+run_check "the program's exit status" "[3]" --run sh -c 'exit 3'
+run_check "--windows APP while a session runs" "a 'b'
+c
+[0]" --windows sh -c 'echo "$RUN_MARK"'
+run_check "--windows alone while a session runs" \
+    "chameleon: a --windows session runs already; start apps in it with: chameleon --run APP
+[2]" --windows
+kill "$SESSION"
+wait "$SESSION" 2>/dev/null || true
+run_check "a file left by a session that is gone" "chameleon: no --windows session runs (start one with: chameleon --windows)
+[1]" --run true

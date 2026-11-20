@@ -706,6 +706,12 @@ static void surface_changed_locked(struct link *L, int had_surface)
             L->returned = 1;
         }
     }
+    /* A window of the app is to be seen (again): Android lets the app open
+     * further ones only then, so those asked for meanwhile are asked for again. */
+    if (!had_surface && has_surface)
+        for (struct link *F = g_links + 1; F < g_links + g_screens; F++)
+            if (F->sock < 0 && F->asked_ns)
+                send_msg_locked(&g_links[0], CHAM_WINDOW_OPEN, 0, (uint64_t)F->screen, 0, -1);
 }
 
 static void handle_msg_locked(struct link *L, const struct cham_msg *m, int *fd)
@@ -954,9 +960,10 @@ int link_screen_open(void)
     pthread_mutex_lock(&g_lock);
     uint64_t now = now_ns();
     for (struct link *L = g_links + 1; L < g_links + g_screens; L++) {
-        /* One asked for a while ago that never came (the app couldn't open
-         * it) is free again. */
-        if (L->sock >= 0 || (L->asked_ns && now - L->asked_ns < 10000000000ull))
+        /* One asked for stays taken until its window comes or the asker
+         * gives it up (link_screen_close): the app opens it when Android
+         * lets it, which may be much later. */
+        if (L->sock >= 0 || L->asked_ns)
             continue;
         ret = send_msg_locked(&g_links[0], CHAM_WINDOW_OPEN, 0, (uint64_t)L->screen, 0, -1) == 0 ? L->screen
                                                                                                   : -ENOTCONN;
@@ -974,6 +981,10 @@ int link_screen_close(int screen)
         return -EINVAL;
     pthread_mutex_lock(&g_lock);
     int ret = send_msg_locked(&g_links[screen], CHAM_WINDOW_CLOSE, 0, 0, 0, -1) == 0 ? 0 : -ENOTCONN;
+    if (ret != 0 && g_links[screen].asked_ns) { /* asked for, not there yet: no longer wanted */
+        g_links[screen].asked_ns = 0;
+        ret = 0;
+    }
     pthread_mutex_unlock(&g_lock);
     return ret;
 }

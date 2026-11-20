@@ -11,15 +11,17 @@
 // window is closed, its connector goes and the app window is asked to close.
 // Dialogs and other windows that belong to one stay with it. When the last app
 // window has closed and none comes in its place, KWin is asked to quit: the
-// session is over.
+// session is over. A session started without an app stays (STAY).
 
 const SERVICE = "io.github.harryl0l.Chameleon";
 const PATH = "/Screens";
 const INTERFACE = SERVICE + ".Screens";
 const FIRST = "DSI-1";
+const STAY = false; // the session loads a copy with true when it has no app of its own
 
 var owners = {};  // connector name -> the app window whose screen it is
 var waiting = []; // {window, name}: a window asked for, its connector not there yet
+var asking = [];  // windows whose Open hasn't been answered yet
 
 // The session's end, a moment after the last app window went (an app may
 // close one window to open the next).
@@ -27,7 +29,7 @@ var over = new QTimer();
 over.singleShot = true;
 over.interval = 1500;
 over.timeout.connect(function () {
-    if (Object.keys(owners).length === 0 && waiting.length === 0)
+    if (!STAY && Object.keys(owners).length === 0 && waiting.length === 0)
         callDBus("org.kde.KWin", "/Session", "org.kde.KWin.Session", "quit");
 });
 
@@ -78,13 +80,20 @@ function getsScreen(window) {
 }
 
 function added(window) {
-    if (!getsScreen(window) || ownerOf(window))
+    const known = asking.indexOf(window) >= 0 || waiting.some(function (w) {
+        return w.window === window;
+    });
+    if (!getsScreen(window) || ownerOf(window) || known)
         return;
     if (!owners[FIRST]) {
         own(window, FIRST);
         return;
     }
+    asking.push(window);
     callDBus(SERVICE, PATH, INTERFACE, "Open", function (n) {
+        asking.splice(asking.indexOf(window), 1);
+        if (n > 0 && window.deleted)
+            callDBus(SERVICE, PATH, INTERFACE, "Close", String(n)); // it went meanwhile
         if (!(n > 0) || window.deleted)
             return; // every screen has a window: it stays where KWin put it
         const name = "DSI-" + n;
@@ -97,6 +106,8 @@ function added(window) {
 
 function removed(window) {
     waiting = waiting.filter(function (w) {
+        if (w.window === window)
+            callDBus(SERVICE, PATH, INTERFACE, "Close", number(w.name)); // not wanted any more
         return w.window !== window;
     });
     const name = ownerOf(window);

@@ -63,6 +63,7 @@ struct window {
     char icon[64];
     volatile uint64_t hello_flags;
     volatile int touch; /* 1: a finger is to touch it at (1/4, 1/2), 2: it did */
+    volatile int hide;  /* 1: it is to go to the background, 3: to come back; 2, 4: it did */
 };
 
 static void take_buffer(int c)
@@ -109,6 +110,13 @@ static void *window_main(void *arg)
         cham_send(c, &cfg, -1);
         win->connected = 1;
         while (win->open) {
+            if (win->hide == 1 || win->hide == 3) { /* no surface in the background */
+                struct cham_msg gone = cfg;
+                if (win->hide == 1)
+                    gone.a = 0;
+                cham_send(c, &gone, -1);
+                win->hide++;
+            }
             if (win->touch == 1) {
                 struct cham_msg down = {CHAM_INPUT, CHAM_INPUT_TOUCH_DOWN, 7, CHAM_INPUT_POS(0x4000, 0x8000)};
                 struct cham_msg up = {CHAM_INPUT, CHAM_INPUT_TOUCH_UP, 7, 0};
@@ -588,6 +596,16 @@ int main(void)
     CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == 1 && wait_for(&first.asked_open, 1, 2000),
           "open: the first window is asked for the second screen's, which is the answer");
     CHECK(ask_screen(CARD_SCREEN_OPEN, 0, NULL) == -EBUSY, "open again before it came: EBUSY");
+    /* The app was in the background, where Android lets it open no window. */
+    CHECK(ask_screen(CARD_SCREEN_CLOSE, 1, NULL) == 0 && ask_screen(CARD_SCREEN_CLOSE, 1, NULL) == -ENOTCONN &&
+              ask_screen(CARD_SCREEN_OPEN, 0, NULL) == 1,
+          "a window asked for and not there yet can be given up, and asked for again");
+    first.hide = 1;
+    wait_for(&first.hide, 2, 2000);
+    usleep(50000);
+    first.asked_open = 0;
+    first.hide = 3;
+    CHECK(wait_for(&first.asked_open, 1, 2000), "the first window comes back to the front: it is asked again");
     second.open = 1; /* the app opens it */
     plugged = 0;
     for (int i = 0; i < 400 && !plugged; i++) {

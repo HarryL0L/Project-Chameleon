@@ -106,7 +106,11 @@ program's own, as before there was a namespace for them; see below).
   an app window closes its Android window and the other way round; dialogs
   stay with their window. Four windows at most, each further one a process
   of the app; the session ends when the last app window
-  is closed. A touch acts in the window under the finger (the session tells
+  is closed. `chameleon --windows` without an app starts a session that
+  stays, and `chameleon --run APP` starts a program in the running session
+  from any shell, with the session's environment (which the session leaves
+  in `$XDG_RUNTIME_DIR/chameleon-session.env` while it lasts); `chameleon
+  --windows APP` does the same while such a session runs. A touch acts in the window under the finger (the session tells
   KWin which screen each touchscreen is, since KWin goes by its own setting
   rather than the device's `WL_OUTPUT`, and gives each further screen the
   first one's scale and full brightness with `kscreen-doctor`, where KWin
