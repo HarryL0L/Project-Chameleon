@@ -55,6 +55,12 @@ static void load(void)
         return;
     }
     *(void **)&real_get_proc = dlsym(g_lib, "eglGetProcAddress");
+    /* Clients of the session wait for their GPU work when they hand a
+     * dmabuf to the compositor (core/wlsync.c, in libchameleon.so). */
+    void (*set_present_wait)(void (*)(void));
+    *(void **)&set_present_wait = dlsym(RTLD_DEFAULT, "cham_set_present_wait");
+    if (set_present_wait)
+        set_present_wait(cham_egl_present_wait);
 }
 
 static void *real(const char *name)
@@ -1219,6 +1225,9 @@ void *cham_egl_get_proc(const char *name)
     void *desktop = desktop_gl_proc(name);
     if (desktop)
         return desktop == (void *)-1 ? NULL : desktop;
+    void *alias = cham_gl_alias(name);
+    if (alias)
+        return alias;
     void *fn = real(name);
     for (size_t i = 0; fn && i < sizeof k_traced / sizeof k_traced[0]; i++) {
         if (strcmp(name, k_traced[i].name) == 0) {
@@ -1227,6 +1236,39 @@ void *cham_egl_get_proc(const char *name)
         }
     }
     return fn;
+}
+
+/* For libchameleon's Wayland hook (core/wlsync.c), when a client attaches a
+ * dmabuf buffer: waits until the GPU has done the work the thread's current
+ * context submitted so far (the fence is flushed with it). No current
+ * context of Android's driver: nothing to wait for. */
+void cham_egl_present_wait(void)
+{
+    static EGLContext (*get_context)(void);
+    static EGLDisplay (*get_display)(void);
+    static EGLSyncKHR (*create_sync)(EGLDisplay, EGLenum, const EGLint *);
+    static EGLint (*client_wait)(EGLDisplay, EGLSyncKHR, EGLint, EGLTimeKHR);
+    static EGLBoolean (*destroy_sync)(EGLDisplay, EGLSyncKHR);
+    if (!destroy_sync) {
+        *(void **)&get_context = real("eglGetCurrentContext");
+        *(void **)&get_display = real("eglGetCurrentDisplay");
+        *(void **)&create_sync = real("eglCreateSyncKHR");
+        *(void **)&client_wait = real("eglClientWaitSyncKHR");
+        if (!get_context || !get_display || !create_sync || !client_wait)
+            return;
+        *(void **)&destroy_sync = real("eglDestroySyncKHR");
+        if (!destroy_sync)
+            return;
+    }
+    if (get_context() == EGL_NO_CONTEXT)
+        return;
+    EGLDisplay dpy = get_display();
+    EGLSyncKHR sync = create_sync(dpy, EGL_SYNC_FENCE_KHR, NULL);
+    if (sync == EGL_NO_SYNC_KHR)
+        return;
+    if (client_wait(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, 1000000000ull) == EGL_TIMEOUT_EXPIRED_KHR)
+        cham_log("the GPU took over 1 s on a buffer handed to the compositor");
+    destroy_sync(dpy, sync);
 }
 
 int cham_egl_available(void)

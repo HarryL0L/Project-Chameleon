@@ -43,9 +43,10 @@ there is none). No `--drm` is needed anywhere: with neither
 backend by themselves, so plasma-workspace needs no change either. The
 compositor's Wayland socket is learnt from whichever program binds it
 (`kwin_wayland_wrapper` for KWin); `CHAMELEON_WAYLAND_SOCKET` names it for a
-compositor given its socket from outside the session. Xwayland keeps
-rendering on the CPU (`XWAYLAND_NO_GLAMOR=1`): its GPU path (glamor) isn't
-supported yet.
+compositor given its socket from outside the session. An Xwayland built
+with glamor renders X11 windows on Android's OpenGL ES through the render
+node and hands them to the compositor as session buffers; X11 OpenGL apps
+keep Mesa's GLX (`libGLX_chameleon.so.0` is a name for `libGLX_mesa.so.0`).
 
 The compositor loads the EGL vendor through Termux's own glvnd
 (`libEGL.so.1`, `libGLESv2.so.2`): `chameleon` sets

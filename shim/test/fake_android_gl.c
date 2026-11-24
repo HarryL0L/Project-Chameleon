@@ -33,6 +33,8 @@ API struct {
     int native_images, images_destroyed, copies, finishes;
     GLuint copy_source; /* texture the last glCopyTexSubImage2D read */
     GLuint swizzle_a_one; /* the last texture told to read alpha as 1 */
+    int fence_waits, fence_waits_flushed; /* eglClientWaitSyncKHR on fences */
+    GLuint vao_bound;
 } fake_state;
 
 static EGLDisplay const k_display = (EGLDisplay)0x1234;
@@ -93,6 +95,22 @@ API EGLSurface eglGetCurrentSurface(EGLint which)
     return which == EGL_READ ? g_current_read : fake_state.current_draw;
 }
 API EGLContext eglGetCurrentContext(void) { return g_current_ctx; }
+API EGLDisplay eglGetCurrentDisplay(void) { return g_current_ctx ? k_display : EGL_NO_DISPLAY; }
+API EGLSyncKHR eglCreateSyncKHR(EGLDisplay d, EGLenum type, const EGLint *attribs)
+{
+    (void)attribs;
+    return d == k_display && type == EGL_SYNC_FENCE_KHR ? (EGLSyncKHR)0x5ec : EGL_NO_SYNC_KHR;
+}
+API EGLint eglClientWaitSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLint flags, EGLTimeKHR timeout)
+{
+    (void)d, (void)timeout;
+    if (s != (EGLSyncKHR)0x5ec)
+        return EGL_FALSE;
+    fake_state.fence_waits++;
+    fake_state.fence_waits_flushed += (flags & EGL_SYNC_FLUSH_COMMANDS_BIT_KHR) != 0;
+    return EGL_CONDITION_SATISFIED_KHR;
+}
+API EGLBoolean eglDestroySyncKHR(EGLDisplay d, EGLSyncKHR s) { (void)d; return s == (EGLSyncKHR)0x5ec; }
 API EGLBoolean eglSwapInterval(EGLDisplay d, EGLint interval)
 {
     (void)d;
@@ -503,6 +521,7 @@ API void glTexParameteri(GLenum t, GLenum pname, GLint v)
     if (t == GL_TEXTURE_2D && pname == GL_TEXTURE_SWIZZLE_A && v == GL_ONE)
         fake_state.swizzle_a_one = g_tex_2d;
 }
+API void glBindVertexArray(GLuint array) { fake_state.vao_bound = array; }
 static void fake_image_target_texture(GLenum target, void *image)
 {
     (void)target;

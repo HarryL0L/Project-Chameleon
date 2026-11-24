@@ -324,11 +324,14 @@ static void *server_main(void *arg)
 /* ---- the app ---- */
 
 static struct wl_compositor *g_compositor;
+static struct wl_proxy *g_dmabuf;
 static void global(void *data, struct wl_registry *registry, uint32_t name, const char *iface, uint32_t version)
 {
     (void)data, (void)version;
     if (strcmp(iface, "wl_compositor") == 0)
         g_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    else if (strcmp(iface, "zwp_linux_dmabuf_v1") == 0)
+        g_dmabuf = wl_registry_bind(registry, name, &k_dmabuf_iface, 3);
 }
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
 {
@@ -683,13 +686,68 @@ int main(void)
     CHECK(srv.last_width == 80 && srv.last_height == 40 && srv.buffers_unknown == 0,
           "new buffers at %dx%d reach KWin", srv.last_width, srv.last_height);
     struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
-             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls; } *fake =
+             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls;
+             void *current_draw; int native_images, images_destroyed, copies, finishes; unsigned copy_source;
+             unsigned swizzle_a_one; int fence_waits, fence_waits_flushed; } *fake =
         getenv("CHAMELEON_ANDROID_MEDIANDK") /* the fake driver, loaded by the vendor */
             ? dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state")
             : NULL;
     CHECK(fake && fake->readers == 1 && fake->geometry_calls == 1,
           "the window was resized in place: %d reader, %d resize", fake ? fake->readers : -1,
           fake ? fake->geometry_calls : -1);
+
+    CHECK(fake && fake->fence_waits == 0, "the EGL window's own buffers wait in the vendor, not at attach (%d waits)",
+          fake ? fake->fence_waits : -1);
+
+    /* A client rendering into gbm buffers and handing them over itself, as
+     * Xwayland's glamor does: attaching such a buffer waits for the GPU work
+     * of the thread's current context (core/wlsync.c). Its requests also
+     * check that arguments of every kind pass through unchanged. */
+    printf("a client handing over its own dmabufs (Xwayland's glamor)\n");
+    struct cham_bo *(*bo_create)(uint32_t, uint32_t, uint32_t, uint32_t);
+    uint32_t (*bo_handle_open)(struct cham_bo *, int);
+    int (*bo_export_fd)(struct cham_bo *);
+    *(void **)&bo_create = dlsym(RTLD_DEFAULT, "cham_bo_create");
+    *(void **)&bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
+    *(void **)&bo_export_fd = dlsym(RTLD_DEFAULT, "cham_bo_export_fd");
+    /* as gbm on the render node makes one */
+    struct cham_bo *bo = bo_create ? bo_create(48, 16, DRM_FORMAT_XRGB8888, 0) : NULL;
+    uint32_t handle = bo ? bo_handle_open(bo, g_render) : 0;
+    int dmabuf = handle ? bo_export_fd(bo) : -1;
+    CHECK(g_dmabuf && dmabuf >= 0, "a session buffer to hand over (%d)", dmabuf);
+    struct wl_proxy *params =
+        wl_proxy_marshal_flags(g_dmabuf, 1 /* create_params */, &k_params_iface, 3, 0, NULL);
+    wl_proxy_marshal_flags(params, 1 /* add */, NULL, 3, 0, dmabuf, 0u, 0u, 192u, 0x00ffffffu, 0xffffffffu);
+    struct wl_proxy *buffer = wl_proxy_marshal_flags(params, 3 /* create_immed */, &wl_buffer_interface, 3, 0, NULL,
+                                                     48, 16, (uint32_t)DRM_FORMAT_XRGB8888, 0u);
+    wl_proxy_marshal_flags(params, 0 /* destroy */, NULL, 3, WL_MARSHAL_FLAG_DESTROY);
+    close(dmabuf);
+    wl_display_roundtrip(display);
+    CHECK(buffer && srv.buffers_unknown == 0 && srv.last_width == 48 && srv.last_height == 16 &&
+              srv.last_stride == 192 && srv.last_format == DRM_FORMAT_XRGB8888 &&
+              srv.last_modifier == DRM_FORMAT_MOD_INVALID,
+          "its wl_buffer reaches KWin as sent: %dx%d stride %d format %08x modifier %016llx", srv.last_width,
+          srv.last_height, srv.last_stride, srv.last_format, (unsigned long long)srv.last_modifier);
+    struct wl_surface *xsurface = wl_compositor_create_surface(g_compositor);
+    int commits = srv.commits;
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    CHECK(fake && fake->fence_waits == 1 && fake->fence_waits_flushed == 1 && srv.commits == commits + 1,
+          "attaching it waited for the GPU once, with a flush (%d waits, %d flushed)", fake ? fake->fence_waits : -1,
+          fake ? fake->fence_waits_flushed : -1);
+    wl_surface_attach(xsurface, NULL, 0, 0);
+    wl_surface_commit(xsurface);
+    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    CHECK(fake && fake->fence_waits == 1, "no wait for a NULL buffer, nor without a current context (%d waits)",
+          fake ? fake->fence_waits : -1);
+    eglMakeCurrent(dpy, surf, surf, ctx);
+    wl_buffer_destroy((struct wl_buffer *)buffer);
+    wl_surface_destroy(xsurface);
+    wl_display_roundtrip(display);
 
     CHECK(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT), "release the surface");
     CHECK(eglDestroySurface(dpy, surf), "eglDestroySurface");

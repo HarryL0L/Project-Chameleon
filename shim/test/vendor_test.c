@@ -9,6 +9,7 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl31.h>
+#include <GLES2/gl2ext.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <stdint.h>
@@ -31,6 +32,8 @@ struct fake_state {
     int native_images, images_destroyed, copies, finishes;
     GLuint copy_source;
     GLuint swizzle_a_one;
+    int fence_waits, fence_waits_flushed;
+    GLuint vao_bound;
 };
 
 /* A texture as Firefox makes one for WebGL (bound, level 0 only). */
@@ -365,6 +368,12 @@ int main(void)
           "glGetString through glvnd hides the timer query only: '%s'", glexts ? glexts : "(null)");
     CHECK(glexts && strstr(glexts, "GL_EXT_unpack_subimage"),
           "GL_EXT_unpack_subimage added on OpenGL ES 3 (KWin asks for it by name)");
+    CHECK(glexts && strstr(glexts, "GL_OES_texture_border_clamp") && strstr(glexts, "GL_OES_vertex_array_object"),
+          "GL_OES_texture_border_clamp and GL_OES_vertex_array_object added on OpenGL ES 3.2 (glamor asks for them)");
+    void (*bind_vao)(GLuint) = (void (*)(GLuint))eglGetProcAddress("glBindVertexArrayOES");
+    if (bind_vao)
+        bind_vao(5);
+    CHECK(bind_vao && st->vao_bound == 5, "glBindVertexArrayOES is the core glBindVertexArray");
     const char *src = "#if GL_FOO\nx\n#endif\n";
     glShaderSource(1, 1, &src, NULL);
     CHECK(strstr(st->shader, "defined(GL_FOO)") != NULL, "glShaderSource through glvnd gets the GLSL fix");

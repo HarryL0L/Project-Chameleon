@@ -9,9 +9,10 @@ mkdir -p "$OUT"
 : "${CC:?set CC to the NDK aarch64-linux-android29-clang}"
 CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -fno-emulated-tls \
     -Ishim/include -Ishim/include/libdrm"
-# The card node and gbm's buffers in every program of the session; the card
-# itself, input, the app link and apps' buffers in chameleon-kernel.
-LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c"
+# The card node, gbm's buffers and Wayland clients' implicit sync in every
+# program of the session; the card itself, input, the app link and apps'
+# buffers in chameleon-kernel.
+LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c shim/core/wlsync.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
     shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" $LIB_SRC -ldl -Wl,-soname,libchameleon.so

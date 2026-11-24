@@ -14,7 +14,7 @@ if [ -z "$OUT" ]; then
 fi
 mkdir -p "$OUT"
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
-LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c"
+LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c shim/core/wlsync.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
     shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c"
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" $LIB_SRC -ldl -lpthread \

@@ -70,6 +70,10 @@ NAMES_DIR="$XDG_RUNTIME_DIR/chameleon-lib"
 mkdir -p "$NAMES_DIR"
 ln -sf "$SHIM_DIR/libgbm.so" "$NAMES_DIR/libgbm.so.1"
 [ ! -e "$PREFIX/lib/libdrm.so" ] || ln -sf "$PREFIX/lib/libdrm.so" "$NAMES_DIR/libdrm.so.2"
+# Xwayland with glamor names our gbm (backend "chameleon") as the GLX vendor
+# of its screen; X11 OpenGL apps then load libGLX_chameleon, which is
+# Mesa's: GLX stays Mesa's, as without glamor.
+[ ! -e "$PREFIX/lib/libGLX_mesa.so.0" ] || ln -sf "$PREFIX/lib/libGLX_mesa.so.0" "$NAMES_DIR/libGLX_chameleon.so.0"
 case ":$LD_LIBRARY_PATH:" in
 *":$NAMES_DIR:"*) ;;
 *) export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$NAMES_DIR" ;;
@@ -78,11 +82,6 @@ esac
 # X/Wayland server; with neither set, compositors pick their DRM backend.
 unset WAYLAND_DISPLAY DISPLAY
 export XDG_SESSION_TYPE=wayland
-
-# Xwayland would find a card and gbm now, but the compositor can't import
-# its GPU buffers yet: X11 apps render as before (Mesa, shared memory).
-# Delete with the Xwayland glamor step.
-export XWAYLAND_NO_GLAMOR=1
 
 # EGL for the whole session: the Chameleon vendor first - it takes the
 # compositor's GBM display and Wayland windows under a compositor running
