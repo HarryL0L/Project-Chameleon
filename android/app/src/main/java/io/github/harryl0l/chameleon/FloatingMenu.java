@@ -4,6 +4,7 @@ package io.github.harryl0l.chameleon;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
+import android.graphics.Region;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.TypedValue;
@@ -172,6 +173,23 @@ final class FloatingMenu extends LinearLayout {
         setLayoutParams(lp);
     }
 
+    /**
+     * The window tells Android which of its area is see-through to the
+     * desktop's surface behind it: all but the views drawn over it, as they
+     * lie at the last layout. Android stops showing the window there, and
+     * that changes a little apart from what is drawn, so a menu on the move
+     * showed cut where it had left its old place. While it is dragged,
+     * nothing is called see-through.
+     */
+    @Override
+    public boolean gatherTransparentRegion(Region region) {
+        if (mDragging && region != null) {
+            region.setEmpty();
+            return true;
+        }
+        return super.gatherTransparentRegion(region);
+    }
+
     private float left() {
         return ((MarginLayoutParams) getLayoutParams()).leftMargin;
     }
@@ -196,10 +214,12 @@ final class FloatingMenu extends LinearLayout {
                 if (!mDragging && Math.hypot(dx, dy) > mSlop) {
                     mDragging = true;
                     setAlpha(1f); // easy to follow under the finger
+                    requestLayout(); // gathers the transparent region again
                 }
                 if (mDragging && parent != null) {
-                    moveTo(clamp(mDownX + dx, 0, parent.getWidth() - getWidth()),
-                            clamp(mDownY + dy, 0, parent.getHeight() - getHeight()));
+                    // Moved as it is drawn, with no layout per move.
+                    setTranslationX(clamp(mDownX + dx, 0, parent.getWidth() - getWidth()) - mDownX);
+                    setTranslationY(clamp(mDownY + dy, 0, parent.getHeight() - getHeight()) - mDownY);
                 }
                 return true;
             }
@@ -207,7 +227,11 @@ final class FloatingMenu extends LinearLayout {
                 if (mDragging) {
                     mDragging = false;
                     setAlpha(mUnfolded ? UNFOLDED_ALPHA : FOLDED_ALPHA);
-                    stick();
+                    float x = left() + getTranslationX(), y = top() + getTranslationY();
+                    setTranslationX(0);
+                    setTranslationY(0);
+                    stick(x, y);
+                    requestLayout(); // the transparent region again, also if it didn't move
                     if (mUnfolded)
                         scheduleFold();
                 } else {
@@ -216,21 +240,24 @@ final class FloatingMenu extends LinearLayout {
                 return true;
             case MotionEvent.ACTION_CANCEL:
                 mDragging = false;
+                setTranslationX(0);
+                setTranslationY(0);
                 setAlpha(mUnfolded ? UNFOLDED_ALPHA : FOLDED_ALPHA);
                 place();
+                requestLayout();
                 return true;
         }
         return false;
     }
 
-    /** After a drag: the nearest side edge, and the height it was left at. */
-    private void stick() {
+    /** After a drag to x, y: the nearest side edge, and the height it was left at. */
+    private void stick(float x, float y) {
         ViewGroup parent = (ViewGroup) getParent();
         if (parent == null)
             return;
-        boolean right = left() + getWidth() / 2f > parent.getWidth() / 2f;
+        boolean right = x + getWidth() / 2f > parent.getWidth() / 2f;
         int free = freeHeight();
-        mY = free > 0 ? clamp((top() - mMargin) / free, 0, 1) : 0;
+        mY = free > 0 ? clamp((y - mMargin) / free, 0, 1) : 0;
         if (right != mRight) {
             mRight = right;
             arrange(); // relayout places it
