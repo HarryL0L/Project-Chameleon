@@ -5,7 +5,8 @@
 # device with the system's real libdrm, and the input and output paths
 # against a real Wayland server.
 # Needs: cc, libdrm-dev, libwayland-dev, libegl-dev, libgles-dev, libudev-dev, libinput-dev,
-# libvulkan-dev, mesa-vulkan-drivers (lavapipe), vulkan-validationlayers, vulkan-tools.
+# libvulkan-dev, mesa-vulkan-drivers (lavapipe), vulkan-validationlayers, vulkan-tools,
+# libxcb1-dev, libxcb-dri3-0, libxcb-present0, libx11-xcb1.
 set -e
 cd "$(dirname "$0")/../.."
 if [ -z "$OUT" ]; then
@@ -229,6 +230,27 @@ if ! vulkan_window "$OUT/runtime-vkw2" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_valid
     exit 1
 fi
 grep "PASSED" "$OUT/vulkan-window-validation.log" | sed 's/^/  (validation layer) /'
+# ...and on X11: the frames go to an X server (a stand-in with DRI3 and
+# Present) as pixmaps of the session's buffers.
+cc -O1 -g -Wall -Wextra -Wno-missing-field-initializers -o "$OUT/x11_window_test" shim/test/x11_window_test.c \
+    -lvulkan $(pkg-config --libs xcb) -ldl -lpthread
+x11_window() {
+    rt=$1
+    shift
+    start_kernel "$rt" "$OUT/presenter-none" 0
+    env XDG_RUNTIME_DIR="$rt" "$@" VK_DRIVER_FILES="$OUT/chameleon-vulkan.json" \
+        CHAMELEON_ANDROID_VULKAN="$OUT/fake_android_vulkan.so" CHAMELEON_ANDROID_NATIVEWINDOW="$FAKE" \
+        CHAMELEON_ANDROID_MEDIANDK="$FAKE" CHAMELEON_DRM_PATH="$OUT/card9" CHAMELEON_SOCKET="$OUT/presenter-none" \
+        LD_PRELOAD="$OUT/libchameleon.so" "$OUT/x11_window_test"
+}
+x11_window "$OUT/runtime-x11"
+if ! x11_window "$OUT/runtime-x112" VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation \
+    > "$OUT/x11-window-validation.log" 2>&1 || grep -q "Validation Error\|VUID-" "$OUT/x11-window-validation.log"; then
+    cat "$OUT/x11-window-validation.log"
+    echo "Vulkan windows on X11 under the validation layer: FAILED"
+    exit 1
+fi
+grep "PASSED" "$OUT/x11-window-validation.log" | sed 's/^/  (validation layer) /'
 # Android's own libraries are opened through Termux's namespace helper where
 # $PREFIX has one (a stand-in here, which writes down what it is asked for):
 # those of the EGL vendor, of gbm and the windows, the Vulkan driver's, and

@@ -8,9 +8,9 @@ the Chameleon app's screen, rendering with Android's GPU driver.
 | `chameleon-kernel` (started by `chameleon`) | the kernel | fake KMS device: one DSI connector sized to the app (with an EDID), one CRTC, a primary and a cursor plane, atomic commits → PRESENT, FRAME_DONE → page-flip event on the display's vsync; the render node `renderD128`; the input devices, the link to the app and the input thread |
 | `chameleon-init` (the session's first process) | init / `systemd --user` | adopts every program of the session whose parent exits (the bus's services, `chameleon-kernel`, a sound server) and reaps it, so none becomes an orphan of Android's init, which some phones' process cleaners kill; passes SIGTERM/SIGHUP and the exit status through |
 | `libchameleon.so` (LD_PRELOAD, every program of the session) | the device node | `/dev/dri/card0`: open, stat and DRM ioctls go to `chameleon-kernel` as the system call's arguments (`core/interpose.c`, `core/card.c`); apps' GPU buffers for the compositor's dmabuf imports (shared with `chameleon-kernel` as GEM handles on the render node, `vendor/window.c`); crash reporter where Android's driver renders |
-| `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf |
+| `libgbm.so` (LD_LIBRARY_PATH, the session) | Mesa's libgbm | `gbm_bo` = `AHardwareBuffer`, fd = the gralloc handle's dmabuf; `gbm_bo_import` takes the dmabufs of the session's buffers |
 | `libEGL_chameleon.so` (glvnd vendor) | Mesa's EGL vendor | EGL/GLES on `/system/lib64/libEGL.so` / `libGLESv2.so` (→ vendor driver); adds the GBM platform, dmabuf import (as `AHardwareBuffer`) and the card as an `EGLDevice` (`EGL_EXT_device_drm`, `EGL_EXT_device_drm_render_node`) in a Chameleon session, and the Mali workarounds: `#if GL_*` → `#if defined(GL_*)` in GLSL, hidden timer-query extension, no robust/priority contexts; window configs only in the window buffers' 8-bit RGBA/RGBX (a 10-bit config stays off-screen) |
-| `libvulkan_chameleon.so` (a driver for the Vulkan loader) | Mesa's Vulkan driver | Vulkan on `/system/lib64/libvulkan.so` (→ vendor driver), up to the version and with the extensions `vulkan/vk_forward.h` has the functions of; names the card's nodes (`VK_EXT_physical_device_drm`); Wayland windows (`VK_KHR_wayland_surface`, `VK_KHR_swapchain`) in a Chameleon session |
+| `libvulkan_chameleon.so` (a driver for the Vulkan loader) | Mesa's Vulkan driver | Vulkan on `/system/lib64/libvulkan.so` (→ vendor driver), up to the version and with the extensions `vulkan/vk_forward.h` has the functions of; names the card's nodes (`VK_EXT_physical_device_drm`); Wayland and X11 windows (`VK_KHR_wayland_surface`, `VK_KHR_xcb_surface`, `VK_KHR_xlib_surface`, `VK_KHR_swapchain`) in a Chameleon session |
 
 ## Run
 
@@ -46,7 +46,9 @@ compositor's Wayland socket is learnt from whichever program binds it
 compositor given its socket from outside the session. An Xwayland built
 with glamor renders X11 windows on Android's OpenGL ES through the render
 node and hands them to the compositor as session buffers; X11 OpenGL apps
-keep Mesa's GLX (`libGLX_chameleon.so.0` is a name for `libGLX_mesa.so.0`).
+keep Mesa's GLX (`libGLX_chameleon.so.0` is a name for `libGLX_mesa.so.0`);
+with zink they run on the card's Vulkan driver, whose X11 windows Xwayland
+shows (DRI3 pixmaps of session buffers, imported by its gbm).
 
 The compositor loads the EGL vendor through Termux's own glvnd
 (`libEGL.so.1`, `libGLESv2.so.2`): `chameleon` sets
@@ -178,9 +180,18 @@ program's own, as before there was a namespace for them; see below).
   doesn't; its size is the swapchain's. Android stores an opaque window's
   images as RGBA all the same, so the compositor's dmabuf import reads
   alpha as 1 from a buffer declared XBGR or XRGB, as a driver importing
-  that format does (`egl/egl.c`). Left out for now: X11 windows,
-  dma-buf import and export, the debug extensions (the loader and the
-  validation layer provide those).
+  that format does (`egl/egl.c`). An X11 window (xcb or Xlib) is fed the
+  same way, but its frames go to the X server as Mesa's drivers send
+  theirs: each buffer becomes a DRI3 pixmap once (Xwayland's gbm finds the
+  session's buffer behind the dmabuf), each frame a `PresentPixmap`;
+  `IdleNotify` gives a buffer back, `CompleteNotify` paces FIFO, and Present's
+  events come on a queue of the driver's, not the program's. Its size is the
+  window's own: a present after the window changed size is
+  `VK_SUBOPTIMAL_KHR`. It needs an X server with DRI3 and Present (Xwayland
+  with glamor); libxcb and its DRI3 and Present parts, and libX11-xcb for
+  Xlib, are loaded from Termux when there. Left out for now: dma-buf import
+  and export, the debug extensions (the loader and the validation layer
+  provide those).
 - Android's own libraries (`libEGL.so`, `libGLESv2.so`, `libvulkan.so`,
   `libnativewindow.so`, `libmediandk.so`) are loaded apart from the
   program's: into the linker namespace Termux keeps for Android's libraries
@@ -222,7 +233,8 @@ program's own, as before there was a namespace for them; see below).
 
 `shim/test/run-host-test.sh` (needs `libdrm-dev libwayland-dev libegl-dev
 libgles-dev libudev-dev libinput-dev libvulkan-dev mesa-vulkan-drivers
-vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardwareBuffer`:
+vulkan-validationlayers vulkan-tools libxcb1-dev libxcb-dri3-0
+libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
 
 - the fake device driven by the real libdrm the way KWin does: enumeration,
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
@@ -258,6 +270,12 @@ vulkan-validationlayers vulkan-tools`) runs, with memfd stand-ins for `AHardware
   swapchains (FIFO and mailbox, opaque and with alpha), each frame's pixels
   as the compositor reads them from the shared buffer
   (`wayland_client_test`, also under the validation layer);
+- the same on X11, against a stand-in X server with DRI3 and Present: the
+  pixmaps of the session's buffers, each frame's pixels as the server reads
+  them, buffers given back, a window that changes size, the window's
+  objects gone with the surface, an X server without DRI3
+  (`x11_window_test`, also under the validation layer); and `gbm_bo_import`
+  of another process's buffer (`kms_test`);
 
 `shim/test/run-conformance.sh` compares Chameleon's evdev devices with the
 real kernel's: `evdev_conformance.c` runs the same reader-side checks on

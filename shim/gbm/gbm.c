@@ -122,14 +122,63 @@ struct gbm_bo *gbm_bo_create_with_modifiers(struct gbm_device *gbm, uint32_t wid
                                          GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
 }
 
+/* A dmabuf of the session's buffers (another program's: an X11 client's
+ * DRI3 pixmap, for Xwayland). A dmabuf of another device has no
+ * AHardwareBuffer to show and is refused. The bo keeps the buffer's own
+ * format: every format here has 4 bytes a pixel, and which one the caller
+ * names (Xwayland names one by the pixmap's depth) only matters for which
+ * byte is which colour, which the buffer itself knows. */
 struct gbm_bo *gbm_bo_import(struct gbm_device *gbm, uint32_t type, void *buffer, uint32_t flags)
 {
-    (void)gbm;
-    (void)type;
-    (void)buffer;
     (void)flags;
-    errno = ENOSYS; /* foreign dmabufs have no AHardwareBuffer to show */
-    return NULL;
+    int fd;
+    uint32_t width, height, stride, format;
+    if (type == GBM_BO_IMPORT_FD) {
+        const struct gbm_import_fd_data *d = buffer;
+        fd = d->fd;
+        width = d->width;
+        height = d->height;
+        stride = d->stride;
+        format = d->format;
+    } else if (type == GBM_BO_IMPORT_FD_MODIFIER) {
+        const struct gbm_import_fd_modifier_data *d = buffer;
+        /* one plane at its start, in the driver's own layout */
+        if (d->num_fds != 1 || d->offsets[0] != 0 || d->modifier != DRM_FORMAT_MOD_INVALID) {
+            errno = EINVAL;
+            return NULL;
+        }
+        fd = d->fds[0];
+        width = d->width;
+        height = d->height;
+        stride = d->strides[0];
+        format = d->format;
+    } else {
+        errno = ENOSYS; /* wl_buffers, EGLImages */
+        return NULL;
+    }
+    if (!cham_format_supported(format)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    struct cham_bo *cb = cham_bo_import(fd);
+    if (!cb)
+        return NULL;
+    if (cb->width != width || cb->height != height || cb->stride != stride) {
+        cham_bo_unref(cb);
+        errno = EINVAL;
+        return NULL;
+    }
+    struct gbm_bo *bo = calloc(1, sizeof *bo);
+    if (!bo) {
+        cham_bo_unref(cb);
+        errno = ENOMEM;
+        return NULL;
+    }
+    bo->device = gbm;
+    bo->cb = cb;
+    bo->handle = cham_bo_handle_open(cb, gbm->fd);
+    bo->modifier = DRM_FORMAT_MOD_INVALID;
+    return bo;
 }
 
 void gbm_bo_destroy(struct gbm_bo *bo)

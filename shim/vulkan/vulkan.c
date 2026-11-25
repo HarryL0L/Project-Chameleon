@@ -228,7 +228,7 @@ static int card_present(void)
 
 /* ---- extension lists ---- */
 
-#define EXTRA_EXTENSIONS 2 /* the room each list has for this driver's own */
+#define EXTRA_EXTENSIONS 4 /* the room each list has for this driver's own */
 
 static int listed(const VkExtensionProperties *all, uint32_t n, const char *name)
 {
@@ -283,12 +283,22 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateInstanceExtensionProperties(const
         free(all);
         return result;
     }
-    /* Windows: Wayland surfaces here, on Android's own kind of surface. */
+    /* Windows: Wayland and X11 surfaces here, on Android's own kind of
+     * surface. */
     VkExtensionProperties extra[EXTRA_EXTENSIONS + 1] = {{{0}, 0}};
-    if (cham_wsi_available() && listed(all, n, VK_KHR_SURFACE_EXTENSION_NAME) &&
+    int wayland = cham_wsi_available(), xcb = cham_wsi_xcb_available();
+    if ((wayland || xcb) && listed(all, n, VK_KHR_SURFACE_EXTENSION_NAME) &&
         listed(all, n, "VK_KHR_android_surface")) {
-        extra[0] = (VkExtensionProperties){VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION};
-        extra[1] = (VkExtensionProperties){VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_SPEC_VERSION};
+        int k = 0;
+        extra[k++] = (VkExtensionProperties){VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_SURFACE_SPEC_VERSION};
+        if (wayland)
+            extra[k++] =
+                (VkExtensionProperties){VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME, VK_KHR_WAYLAND_SURFACE_SPEC_VERSION};
+        if (xcb)
+            extra[k++] = (VkExtensionProperties){VK_KHR_XCB_SURFACE_EXTENSION_NAME, VK_KHR_XCB_SURFACE_SPEC_VERSION};
+        if (xcb && cham_wsi_xlib_available())
+            extra[k++] =
+                (VkExtensionProperties){VK_KHR_XLIB_SURFACE_EXTENSION_NAME, VK_KHR_XLIB_SURFACE_SPEC_VERSION};
     }
     return give_extensions(all, n, extra, pPropertyCount, pProperties);
 }
@@ -319,7 +329,7 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkEnumerateDeviceExtensionProperties(VkPhysi
     if (card_present())
         extra[extras++] = (VkExtensionProperties){VK_EXT_PHYSICAL_DEVICE_DRM_EXTENSION_NAME,
                                                   VK_EXT_PHYSICAL_DEVICE_DRM_SPEC_VERSION};
-    if (cham_wsi_available() && listed(all, n, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
+    if ((cham_wsi_available() || cham_wsi_xcb_available()) && listed(all, n, VK_KHR_SWAPCHAIN_EXTENSION_NAME))
         extra[extras++] = (VkExtensionProperties){VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_SWAPCHAIN_SPEC_VERSION};
     return give_extensions(all, n, extra, pPropertyCount, pProperties);
 }
@@ -366,19 +376,27 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateInstance(const VkInstanceCreateInfo 
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     VkInstanceCreateInfo info = *pCreateInfo;
     info.pNext = without_loader_info(info.pNext, VK_STRUCTURE_TYPE_LOADER_INSTANCE_CREATE_INFO);
-    /* A Wayland surface here is Android's kind of surface below. */
+    /* A Wayland or X11 surface here is Android's kind of surface below,
+     * asked for once. */
     const char **names = malloc((info.enabledExtensionCount + 1) * sizeof *names);
     if (!names) {
         free(inst);
         return VK_ERROR_OUT_OF_HOST_MEMORY;
     }
+    uint32_t kept = 0;
     for (uint32_t i = 0; i < info.enabledExtensionCount; i++) {
-        names[i] = info.ppEnabledExtensionNames[i];
-        if (strcmp(names[i], VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0) {
-            names[i] = "VK_KHR_android_surface";
+        const char *name = info.ppEnabledExtensionNames[i];
+        if (strcmp(name, VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME) == 0 ||
+            strcmp(name, VK_KHR_XCB_SURFACE_EXTENSION_NAME) == 0 ||
+            strcmp(name, VK_KHR_XLIB_SURFACE_EXTENSION_NAME) == 0) {
+            if (inst->windows)
+                continue;
+            name = "VK_KHR_android_surface";
             inst->windows = 1;
         }
+        names[kept++] = name;
     }
+    info.enabledExtensionCount = kept;
     info.ppEnabledExtensionNames = names;
     /* Android's own instance asks for Vulkan 1.1 at least. Android 17's
      * window code calls the driver's vkGetPhysicalDeviceImageFormatProperties2

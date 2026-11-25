@@ -42,14 +42,17 @@ HAND = {
     "vkQueueSubmit", "vkQueueSubmit2", "vkQueueSubmit2KHR",
     "vkSetPrivateData", "vkGetPrivateData", "vkSetPrivateDataEXT", "vkGetPrivateDataEXT",
     # Windows (wsi.c): what Android answers for its own kind of window is
-    # turned into a Wayland window's answers, and frames go to the compositor.
+    # turned into a Wayland or X11 window's answers, and frames go to the
+    # compositor or the X server.
     "vkDestroySurfaceKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR",
     "vkGetPhysicalDeviceSurfacePresentModesKHR", "vkCreateSwapchainKHR", "vkDestroySwapchainKHR",
     "vkQueuePresentKHR",
 }
 # Functions of this driver alone, from a platform's header (their prototypes
 # are in vulkan.h): Android has none by these names.
-OWN = {"vkCreateWaylandSurfaceKHR": "INSTANCE", "vkGetPhysicalDeviceWaylandPresentationSupportKHR": "PHYSICAL"}
+OWN = {"vkCreateWaylandSurfaceKHR": "INSTANCE", "vkGetPhysicalDeviceWaylandPresentationSupportKHR": "PHYSICAL",
+       "vkCreateXcbSurfaceKHR": "INSTANCE", "vkGetPhysicalDeviceXcbPresentationSupportKHR": "PHYSICAL",
+       "vkCreateXlibSurfaceKHR": "INSTANCE", "vkGetPhysicalDeviceXlibPresentationSupportKHR": "PHYSICAL"}
 # Extensions with all their functions here, but listed by vulkan.c only where
 # windows can be shown.
 WINDOWS = {"VK_KHR_surface", "VK_KHR_swapchain"}
@@ -62,7 +65,7 @@ PLAIN_OBJECTS = {"VkDeviceMemoryReportCallbackDataEXT"}
 
 # Extensions of the header that aren't offered, with their functions.
 LEFT_OUT = {
-    # Windows beyond plain Wayland surfaces and swapchains.
+    # Windows beyond plain Wayland and X11 surfaces and swapchains.
     "VK_KHR_display", "VK_KHR_display_swapchain",
     "VK_KHR_get_surface_capabilities2", "VK_KHR_get_display_properties2", "VK_KHR_incremental_present",
     "VK_KHR_shared_presentable_image", "VK_KHR_swapchain_mutable_format", "VK_KHR_surface_protected_capabilities",

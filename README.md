@@ -42,8 +42,10 @@ KWin, wlroots compositors such as sway, Weston, Mutter.
   `AHardwareBuffer`. The finished desktop frame then takes one GPU copy on
   its way to Android's display, so the path is not zero-copy end to end.
 - **Programs that draw on the CPU work as on any Linux desktop**: `wl_shm`
-  windows and X11 apps through Xwayland are uploaded by the compositor, and
-  desktop OpenGL falls back to Mesa's software renderer.
+  windows are uploaded by the compositor, and desktop OpenGL falls back to
+  Mesa's software renderer.
+- **X11 apps run through Xwayland, which draws on the GPU** when it is
+  built with glamor. Vulkan programs get X11 windows too.
 - **Input comes back as real devices**: touchscreen or trackpad, mouse,
   hardware keyboards, and the Android on-screen keyboard as the desktop's
   input method.
@@ -68,9 +70,12 @@ Adreno 618 on Android 17:
 - Screen and window recording through KWin's PipeWire screencast, when
   PipeWire runs in the session.
 
-Not there yet: GPU rendering for X11 apps (Xwayland draws on the CPU),
-windows of Vulkan drivers other than Chameleon's, and desktop OpenGL on the
-GPU. A keyboard's autocorrection can still double a word in some apps.
+Not there yet: windows of Vulkan drivers other than Chameleon's, and
+desktop OpenGL on the GPU without setting it up by hand (Mesa's zink runs
+on Chameleon's Vulkan driver, but needs a newer Vulkan below it than many
+phones' own drivers have). An
+X11 window can flash black while it is being resized. A keyboard's
+autocorrection can still double a word in some apps.
 GNOME Shell (Mutter), sway and Weston have run on the same device layer
 too, but get far less testing than KWin, which every change is tried with
 on phones.
@@ -181,8 +186,8 @@ Code: [`shim/core/`](shim/core/) · protocol: [`common/chameleon_proto.h`](commo
 - **Driver quirks** are worked around in the EGL vendor, not required of
   the phone: a GLSL construct strict drivers reject, extensions that
   misbehave, context attributes a driver mishandles.
-- **Scope:** desktop OpenGL, X11 windows and windows under a compositor
-  that isn't on Chameleon still go to Mesa.
+- **Scope:** desktop OpenGL, OpenGL ES in X11 windows and windows under a
+  compositor that isn't on Chameleon still go to Mesa.
 
 Code: [`shim/gbm/`](shim/gbm/), [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/), [`shim/vulkan/`](shim/vulkan/)
 </details>
@@ -401,7 +406,7 @@ vulkan-validationlayers vulkan-tools`; the conformance tests also need
 - [x] Cursor plane and vsync-timed page flips
 - [x] Screen recording through PipeWire
 - [x] Vulkan with Wayland windows, on the phone's driver or your own
-- [ ] Vulkan for X11 windows, and GPU rendering in Xwayland (glamor)
+- [x] Vulkan for X11 windows, and GPU rendering in Xwayland (glamor)
 - [ ] Windows of any other GPU driver
 - [ ] A release
 

@@ -140,6 +140,10 @@ CHAM_EXPORT AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo);
  * cham_buffer_ahb_release; NULL if none. */
 CHAM_EXPORT AHardwareBuffer *cham_buffer_ahb_acquire(int fd);
 CHAM_EXPORT void cham_buffer_ahb_release(AHardwareBuffer *b);
+/* The session's buffer whose dmabuf `fd` refers to, as a bo of this process
+ * (with a reference for the caller, cham_bo_unref): gbm_bo_import's.
+ * NULL with errno ENODEV for another dmabuf, EINVAL for anything else. */
+CHAM_EXPORT struct cham_bo *cham_bo_import(int fd);
 
 CHAM_EXPORT void cham_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 

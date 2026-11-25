@@ -347,6 +347,22 @@ void cham_buffer_ahb_release(AHardwareBuffer *b)
     ahb_release(b);
 }
 
+struct cham_bo *cham_bo_import(int dmabuf)
+{
+    struct cham_bo *bo = ahb_bo_for_fd(dmabuf); /* one of this process's */
+    if (bo)
+        return bo;
+    AHardwareBuffer *b = cham_buffer_ahb_acquire(dmabuf);
+    if (!b) {
+        errno = ahb_is_dmabuf(dmabuf) ? ENODEV : EINVAL; /* as PRIME_FD_TO_HANDLE */
+        return NULL;
+    }
+    bo = ahb_import(b, ahb_drm_format(b)); /* takes over b's reference */
+    if (!bo)
+        errno = EINVAL; /* a format gbm doesn't make */
+    return bo;
+}
+
 int ioctl(int fd, int request, ...); /* ours, below */
 
 /* ---- a commit's fence travels with it ----

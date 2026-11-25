@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Wayland windows for the Vulkan driver: VK_KHR_wayland_surface and
- * VK_KHR_swapchain on Android's own window system.
+ * Wayland and X11 windows for the Vulkan driver: VK_KHR_wayland_surface,
+ * VK_KHR_xcb_surface, VK_KHR_xlib_surface and VK_KHR_swapchain on Android's
+ * own window system.
  *
  * Android's Vulkan draws into ANativeWindows. A Wayland surface here is a
  * window of vendor/window.c - an AImageReader - with an Android surface
@@ -9,12 +10,17 @@
  * swapchain is Android's swapchain on that surface: its images, their
  * acquiring and the waiting for the GPU are Android's. A presented image
  * arrives in the reader and is committed on the program's wl_surface, shared
- * with the session like an EGL window's buffer, without a copy.
+ * with the session like an EGL window's buffer, without a copy. An X11
+ * surface's frames go to the X server instead, as DRI3 pixmaps shown with
+ * Present (vendor/window.c), the way Mesa's drivers show theirs.
  *
  * Surfaces and swapchains keep Android's handles, so every function that
  * only passes one on is a generated forwarder. What is written here is what
  * a Wayland window answers differently:
- *  - its size is the swapchain's (no current extent), never rotated;
+ *  - its size: a Wayland window's is the swapchain's (no current extent),
+ *    an X11 window's is the window's own (the swapchain must match it, and
+ *    a present after the window changed size says it's suboptimal); never
+ *    rotated;
  *  - its alpha: opaque or pre-multiplied, which Android leaves to its
  *    compositor ("inherit") and which the wl_buffer's format tells ours;
  *  - its formats: 8-bit RGBA, plain or sRGB, the buffers the session shows;
@@ -38,6 +44,7 @@ struct AHardwareBuffer;
 struct surface {
     VkSurfaceKHR real; /* Android's, which the program holds too */
     struct cham_window *w;
+    int x11;
     pthread_mutex_t lock; /* serializes the window */
     struct surface *next;
 };
@@ -52,6 +59,16 @@ struct swapchain {
 int cham_wsi_available(void)
 {
     return cham_window_available();
+}
+
+int cham_wsi_xcb_available(void)
+{
+    return cham_window_x11_available();
+}
+
+int cham_wsi_xlib_available(void)
+{
+    return cham_window_xlib_available();
 }
 
 static struct surface *surface_for(struct instance *inst, VkSurfaceKHR real, int unlink)
@@ -82,23 +99,19 @@ static struct swapchain *swapchain_for(struct device *dev, VkSwapchainKHR real, 
 
 /* ---- surfaces ---- */
 
-VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateWaylandSurfaceKHR(VkInstance instance,
-                                                             const VkWaylandSurfaceCreateInfoKHR *pCreateInfo,
-                                                             const VkAllocationCallbacks *pAllocator,
-                                                             VkSurfaceKHR *pSurface)
+/* A surface on window `w` (taken over): Android's surface on its reader. */
+static VkResult make_surface(struct instance *inst, struct cham_window *w, int x11,
+                             const VkAllocationCallbacks *pAllocator, VkSurfaceKHR *pSurface)
 {
-    struct instance *inst = (struct instance *)instance;
     PFN_vkCreateAndroidSurfaceKHR create = (PFN_vkCreateAndroidSurfaceKHR)inst->android_surface;
-    struct surface *s = calloc(1, sizeof *s);
-    if (!s)
-        return VK_ERROR_OUT_OF_HOST_MEMORY;
-    /* The reader's size is the swapchain's later; with alpha, which the
-     * swapchain may ask to have ignored. */
-    s->w = create ? cham_window_create(pCreateInfo->display, pCreateInfo->surface, 1, 1, 0) : NULL;
-    if (!s->w) {
-        free(s);
-        return VK_ERROR_INITIALIZATION_FAILED;
+    struct surface *s = w && create ? calloc(1, sizeof *s) : NULL;
+    if (!s) {
+        if (w)
+            cham_window_destroy(w);
+        return w && create ? VK_ERROR_OUT_OF_HOST_MEMORY : VK_ERROR_INITIALIZATION_FAILED;
     }
+    s->w = w;
+    s->x11 = x11;
     VkAndroidSurfaceCreateInfoKHR info = {.sType = VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR,
                                           .window = cham_window_native(s->w)};
     VkResult result = create(inst->o.real, &info, pAllocator, &s->real);
@@ -114,6 +127,42 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateWaylandSurfaceKHR(VkInstance instanc
     pthread_mutex_unlock(&inst->lock);
     *pSurface = s->real;
     return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateWaylandSurfaceKHR(VkInstance instance,
+                                                             const VkWaylandSurfaceCreateInfoKHR *pCreateInfo,
+                                                             const VkAllocationCallbacks *pAllocator,
+                                                             VkSurfaceKHR *pSurface)
+{
+    struct instance *inst = (struct instance *)instance;
+    /* The reader's size is the swapchain's later; with alpha, which the
+     * swapchain may ask to have ignored. */
+    struct cham_window *w =
+        inst->android_surface ? cham_window_create(pCreateInfo->display, pCreateInfo->surface, 1, 1, 0) : NULL;
+    return make_surface(inst, w, 0, pAllocator, pSurface);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateXcbSurfaceKHR(VkInstance instance,
+                                                         const VkXcbSurfaceCreateInfoKHR *pCreateInfo,
+                                                         const VkAllocationCallbacks *pAllocator,
+                                                         VkSurfaceKHR *pSurface)
+{
+    struct instance *inst = (struct instance *)instance;
+    struct cham_window *w =
+        inst->android_surface ? cham_window_create_x11(pCreateInfo->connection, pCreateInfo->window) : NULL;
+    return make_surface(inst, w, 1, pAllocator, pSurface);
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL cham_vkCreateXlibSurfaceKHR(VkInstance instance,
+                                                          const VkXlibSurfaceCreateInfoKHR *pCreateInfo,
+                                                          const VkAllocationCallbacks *pAllocator,
+                                                          VkSurfaceKHR *pSurface)
+{
+    struct instance *inst = (struct instance *)instance;
+    void *c = cham_window_xlib_connection(pCreateInfo->dpy);
+    struct cham_window *w =
+        inst->android_surface && c ? cham_window_create_x11(c, (uint32_t)pCreateInfo->window) : NULL;
+    return make_surface(inst, w, 1, pAllocator, pSurface);
 }
 
 static void surface_free(struct surface *s)
@@ -154,6 +203,26 @@ VKAPI_ATTR VkBool32 VKAPI_CALL cham_vkGetPhysicalDeviceWaylandPresentationSuppor
     return cham_window_connect(display) == 0;
 }
 
+/* An X server that takes its clients' buffers (DRI3) and shows them
+ * (Present). Which visual doesn't matter here: the surface takes windows of
+ * 24 and 32 bits. */
+VKAPI_ATTR VkBool32 VKAPI_CALL cham_vkGetPhysicalDeviceXcbPresentationSupportKHR(VkPhysicalDevice physicalDevice,
+                                                                                uint32_t queueFamilyIndex,
+                                                                                xcb_connection_t *connection,
+                                                                                xcb_visualid_t visual_id)
+{
+    (void)physicalDevice, (void)queueFamilyIndex, (void)visual_id;
+    return cham_window_x11_connect(connection) == 0;
+}
+
+VKAPI_ATTR VkBool32 VKAPI_CALL cham_vkGetPhysicalDeviceXlibPresentationSupportKHR(VkPhysicalDevice physicalDevice,
+                                                                                 uint32_t queueFamilyIndex,
+                                                                                 Display *dpy, VisualID visualID)
+{
+    (void)physicalDevice, (void)queueFamilyIndex, (void)visualID;
+    return cham_window_x11_connect(cham_window_xlib_connection(dpy)) == 0;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL cham_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     VkPhysicalDevice physicalDevice, VkSurfaceKHR surface, VkSurfaceCapabilitiesKHR *pSurfaceCapabilities)
 {
@@ -168,6 +237,22 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
     pSurfaceCapabilities->currentTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     pSurfaceCapabilities->supportedCompositeAlpha =
         VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    struct surface *s = surface_for(((struct physical *)physicalDevice)->instance, surface, 0);
+    if (s && s->x11) {
+        /* The window's own size is the swapchain's; alpha only where the
+         * window has it (32 bits). */
+        int width, height, depth;
+        pthread_mutex_lock(&s->lock);
+        int lost = cham_window_x11_size(s->w, 1, &width, &height, &depth) != 0;
+        pthread_mutex_unlock(&s->lock);
+        if (lost)
+            return VK_ERROR_SURFACE_LOST_KHR;
+        pSurfaceCapabilities->currentExtent = (VkExtent2D){(uint32_t)width, (uint32_t)height};
+        pSurfaceCapabilities->minImageExtent = pSurfaceCapabilities->currentExtent;
+        pSurfaceCapabilities->maxImageExtent = pSurfaceCapabilities->currentExtent;
+        if (depth != 32)
+            pSurfaceCapabilities->supportedCompositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    }
     return VK_SUCCESS;
 }
 
@@ -311,14 +396,25 @@ VKAPI_ATTR VkResult VKAPI_CALL cham_vkQueuePresentKHR(VkQueue queue, const VkPre
         struct swapchain *sc = swapchain_for(q->device, pPresentInfo->pSwapchains[i], 0);
         if (!sc || !sc->surface || (one != VK_SUCCESS && one != VK_SUBOPTIMAL_KHR))
             continue;
+        int width = 0, height = 0, now_w = 0, now_h = 0;
         pthread_mutex_lock(&sc->surface->lock);
-        int lost = cham_window_commit(sc->surface->w, sc->fifo, 0, 0, NULL, 0, 0, NULL, NULL) != 0;
+        int lost = cham_window_commit(sc->surface->w, sc->fifo, 0, 0, NULL, 0, 0, &width, &height) != 0;
+        /* An X11 window that has changed size: the program should make a
+         * swapchain of its new size. */
+        int resized = !lost && sc->surface->x11 &&
+                      cham_window_x11_size(sc->surface->w, 0, &now_w, &now_h, NULL) == 0 &&
+                      (now_w != width || now_h != height);
         pthread_mutex_unlock(&sc->surface->lock);
         if (lost) {
             if (pPresentInfo->pResults)
                 pPresentInfo->pResults[i] = VK_ERROR_SURFACE_LOST_KHR;
             if (result == VK_SUCCESS || result == VK_SUBOPTIMAL_KHR)
                 result = VK_ERROR_SURFACE_LOST_KHR;
+        } else if (resized) {
+            if (pPresentInfo->pResults && pPresentInfo->pResults[i] == VK_SUCCESS)
+                pPresentInfo->pResults[i] = VK_SUBOPTIMAL_KHR;
+            if (result == VK_SUCCESS)
+                result = VK_SUBOPTIMAL_KHR;
         }
     }
     return result;

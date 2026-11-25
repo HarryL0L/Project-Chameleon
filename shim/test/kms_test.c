@@ -1560,9 +1560,10 @@ int main(int argc, char **argv)
     if (creator == 0) {
         int c = open(dev_path, O_RDWR | O_CLOEXEC);
         struct gbm_device *g = gbm_create_device(c);
-        struct gbm_bo *b = g ? gbm_bo_create(g, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING) : NULL;
+        struct gbm_bo *b = g ? gbm_bo_create(g, 64, 64, GBM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING) : NULL;
         int d = b ? gbm_bo_get_fd(b) : -1;
         struct cham_msg m = {0};
+        m.a = b ? gbm_bo_get_stride(b) : 0;
         int sent = d >= 0 && cham_send(pair[1], &m, d) == 0;
         gbm_bo_destroy(b);
         gbm_device_destroy(g);
@@ -1583,6 +1584,64 @@ int main(int argc, char **argv)
     CHECK(their_ahb != NULL, "...and its AHardwareBuffer comes from chameleon-kernel (EGL import)");
     if (their_ahb)
         ahb_release(their_ahb);
+    /* ...and as a gbm buffer (Xwayland's DRI3 pixmaps): the buffer's own
+     * format, whichever 32-bit one the importer names. */
+    {
+        int g_fd = open(dev_path, O_RDWR | O_CLOEXEC);
+        struct gbm_device *g = gbm_create_device(g_fd);
+        uint32_t their_stride = (uint32_t)cm.a;
+        struct gbm_import_fd_data fdd = {theirs, 64, 64, their_stride, GBM_FORMAT_ARGB8888};
+        struct gbm_bo *imp = got_fd ? gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, GBM_BO_USE_RENDERING) : NULL;
+        int pfd = imp ? gbm_bo_get_fd(imp) : -1;
+        struct stat a, b;
+        int same = pfd >= 0 && fstat(pfd, &a) == 0 && fstat(theirs, &b) == 0 && a.st_ino == b.st_ino &&
+                   a.st_dev == b.st_dev;
+        CHECK(imp && gbm_bo_get_format(imp) == GBM_FORMAT_XBGR8888 && gbm_bo_get_width(imp) == 64 &&
+                  gbm_bo_get_stride(imp) == their_stride && gbm_bo_get_modifier(imp) == DRM_FORMAT_MOD_INVALID &&
+                  gbm_bo_get_handle(imp).u32 != 0 && same,
+              "gbm_bo_import of it: its own format and layout, a handle, the same dmabuf");
+        if (pfd >= 0)
+            close(pfd);
+        struct gbm_import_fd_modifier_data md = {64, 64, GBM_FORMAT_XRGB8888, 1, {theirs}, {their_stride}, {0},
+                                                 DRM_FORMAT_MOD_INVALID};
+        struct gbm_bo *imp2 = gbm_bo_import(g, GBM_BO_IMPORT_FD_MODIFIER, &md, GBM_BO_USE_RENDERING);
+        CHECK(imp2 && imp && gbm_bo_get_handle(imp2).u32 == gbm_bo_get_handle(imp).u32,
+              "...with a modifier list naming the implicit layout too (the same handle)");
+        if (imp2)
+            gbm_bo_destroy(imp2);
+        md.modifier = DRM_FORMAT_MOD_LINEAR;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD_MODIFIER, &md, 0) && errno == EINVAL,
+              "...but not as a linear one: EINVAL");
+        fdd.stride = their_stride + 64;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "another stride: EINVAL");
+        fdd.stride = their_stride;
+        fdd.width = 32;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "another size: EINVAL");
+        fdd.width = 64;
+        fdd.fd = memfd_create("not-a-dmabuf", MFD_CLOEXEC);
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "an fd that is no dmabuf: EINVAL");
+        close(fdd.fd);
+        if (imp)
+            gbm_bo_destroy(imp);
+        struct gbm_bo *own = gbm_bo_create(g, 32, 32, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING);
+        int ofd = own ? gbm_bo_get_fd(own) : -1;
+        struct gbm_import_fd_data od = {ofd, 32, 32, own ? gbm_bo_get_stride(own) : 0, GBM_FORMAT_ABGR8888};
+        struct gbm_bo *again = ofd >= 0 ? gbm_bo_import(g, GBM_BO_IMPORT_FD, &od, 0) : NULL;
+        CHECK(again && gbm_bo_get_handle(again).u32 == gbm_bo_get_handle(own).u32,
+              "this process's own buffer imports as itself");
+        if (again)
+            gbm_bo_destroy(again);
+        if (ofd >= 0)
+            close(ofd);
+        if (own)
+            gbm_bo_destroy(own);
+        gbm_device_destroy(g);
+        close(g_fd);
+    }
     if (theirs >= 0)
         close(theirs);
     int not_dmabuf = memfd_create("not-a-dmabuf", MFD_CLOEXEC);
