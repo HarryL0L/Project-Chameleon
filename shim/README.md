@@ -75,7 +75,9 @@ screen keeps its first size instead of following the app's window),
 `CHAMELEON_VULKAN_DRIVER=/a/driver.so` (another driver below the card's
 Vulkan driver in place of the phone's own; see below),
 `CHAMELEON_ANDROID_NAMESPACE=0` (Android's libraries loaded among the
-program's own, as before there was a namespace for them; see below).
+program's own, as before there was a namespace for them; see below),
+`CHAMELEON_SYNC_WAIT=1` (programs wait for the GPU before handing any frame
+over, whoever reads it; see the buffers' fences below).
 
 ## Status / limits
 
@@ -137,8 +139,21 @@ program's own, as before there was a namespace for them; see below).
   compositor's dmabuf import and PRIME on the card's nodes (wlroots'
   test import) find them, also for apps behind a Wayland
   proxy (Firefox's `wayland-proxy-N`). A second compositor nested inside the
-  session can't import them. The app waits for the GPU before handing a frame over (no
-  explicit sync yet). Apps drawing on the CPU still use `wl_shm`.
+  session can't import them. Apps drawing on the CPU still use `wl_shm`.
+- Session buffers have fences, as dmabufs have on Linux, kept in
+  `chameleon-kernel` (Android's drivers attach none, and its older kernels
+  lack the calls): `poll()` on a buffer's dmabuf says whether GPU work on it
+  is pending, `DMA_BUF_IOCTL_EXPORT_SYNC_FILE` gives the fence to wait for,
+  `DMA_BUF_IOCTL_IMPORT_SYNC_FILE` adds one. An app window's frame carries
+  the fence of its GPU work, and so does a dmabuf a program hands the
+  compositor itself (Xwayland's glamor). No driver makes a reader wait,
+  though: only for a buffer whose reader has asked for its fences (KWin
+  does for each frame) is the wait left to it; otherwise, and for X11
+  windows, the program waits for the GPU before it hands the frame over, as
+  it does for every frame with `CHAMELEON_SYNC_WAIT=1`. Limits: only
+  `poll()` of the dmabuf alone is answered (polled with other files, or
+  with epoll, it always reads as ready), and only fences of GPU work that
+  writes are made.
 - EGL is reported as 1.5 even where the driver says 1.4 (Mali): Android's
   libEGL has every 1.5 function for any driver since Android 10, mapped to
   the KHR ones, and libepoxy users (KWin 6.8's fence waits) need a 1.5
@@ -241,7 +256,9 @@ libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
   stub presenter, simulated vblank without one; and the way older programs
   do: `SETCRTC`, `PAGE_FLIP` with and without events, the legacy cursor,
   `WAIT_VBLANK`, DPMS; dumb buffers drawn into through
-  `mmap` of the card, shown by `SETCRTC`, a flip and `DIRTYFB`;
+  `mmap` of the card, shown by `SETCRTC`, a flip and `DIRTYFB`; the
+  buffers' fences through `poll()` and the two sync-file calls, from another
+  process too;
 - `chameleon-init` adopting and reaping a program that detached, signals and
   the exit status passing through (`init_test`);
 - typed text and `chameleon-ime` against a real libwayland-server with stub

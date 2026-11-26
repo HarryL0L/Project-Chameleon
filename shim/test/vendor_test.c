@@ -386,7 +386,10 @@ int main(void)
           "eglCreateImageKHR via the vendor's dispatch stub");
     PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_fence =
         (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
-    CHECK(dup_fence && dup_fence(dpy, (EGLSyncKHR)1) == 42, "eglDupNativeFenceFDANDROID via dispatch stub");
+    int fence_fd = dup_fence ? dup_fence(dpy, (EGLSyncKHR)0x5ed /* the fake's fence sync */) : -1;
+    CHECK(fence_fd >= 0 && dup_fence(dpy, (EGLSyncKHR)1) == -1, "eglDupNativeFenceFDANDROID via dispatch stub");
+    if (fence_fd >= 0)
+        close(fence_fd);
     void (*query_counter)(GLuint, GLenum) = (void (*)(GLuint, GLenum))eglGetProcAddress("glQueryCounterEXT");
     if (query_counter)
         query_counter(1, 0x8E28 /* GL_TIMESTAMP_EXT */);

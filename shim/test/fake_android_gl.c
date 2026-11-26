@@ -11,6 +11,8 @@
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <GLES3/gl31.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,7 +37,34 @@ API struct {
     GLuint swizzle_a_one; /* the last texture told to read alpha as 1 */
     int fence_waits, fence_waits_flushed; /* eglClientWaitSyncKHR on fences */
     GLuint vao_bound;
+    /* Fence files: one with each frame out of an AImageReader and for each
+     * EGL_SYNC_NATIVE_FENCE_ANDROID sync, signalled gpu_ms after it is made
+     * (set by a test; while 0, frames come without one, as finished). */
+    int gpu_ms, fence_files;
 } fake_state;
+
+static void *fence_signal(void *arg)
+{
+    int *a = arg;
+    usleep((useconds_t)a[1] * 1000);
+    close(a[0]); /* the read end is readable from then (hung up) */
+    free(a);
+    return NULL;
+}
+
+static int fence_file(void)
+{
+    int p[2], *a = malloc(2 * sizeof *a);
+    pthread_t t;
+    if (!a || pipe2(p, O_CLOEXEC) != 0)
+        return -1;
+    a[0] = p[1];
+    a[1] = fake_state.gpu_ms;
+    pthread_create(&t, NULL, fence_signal, a);
+    pthread_detach(t);
+    fake_state.fence_files++;
+    return p[0];
+}
 
 static EGLDisplay const k_display = (EGLDisplay)0x1234;
 static EGLContext const k_context = (EGLContext)0x5678;
@@ -99,6 +128,8 @@ API EGLDisplay eglGetCurrentDisplay(void) { return g_current_ctx ? k_display : E
 API EGLSyncKHR eglCreateSyncKHR(EGLDisplay d, EGLenum type, const EGLint *attribs)
 {
     (void)attribs;
+    if (d == k_display && type == EGL_SYNC_NATIVE_FENCE_ANDROID)
+        return (EGLSyncKHR)0x5ed;
     return d == k_display && type == EGL_SYNC_FENCE_KHR ? (EGLSyncKHR)0x5ec : EGL_NO_SYNC_KHR;
 }
 API EGLint eglClientWaitSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLint flags, EGLTimeKHR timeout)
@@ -110,7 +141,11 @@ API EGLint eglClientWaitSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLint flags, EGLTim
     fake_state.fence_waits_flushed += (flags & EGL_SYNC_FLUSH_COMMANDS_BIT_KHR) != 0;
     return EGL_CONDITION_SATISFIED_KHR;
 }
-API EGLBoolean eglDestroySyncKHR(EGLDisplay d, EGLSyncKHR s) { (void)d; return s == (EGLSyncKHR)0x5ec; }
+API EGLBoolean eglDestroySyncKHR(EGLDisplay d, EGLSyncKHR s)
+{
+    (void)d;
+    return s == (EGLSyncKHR)0x5ec || s == (EGLSyncKHR)0x5ed;
+}
 API EGLBoolean eglSwapInterval(EGLDisplay d, EGLint interval)
 {
     (void)d;
@@ -264,7 +299,7 @@ API int AImageReader_acquireNextImageAsync(AImageReader *r, AImage **image, int 
             *image = calloc(1, sizeof **image);
             (*image)->reader = r;
             (*image)->slot = i;
-            *fence = -1;
+            *fence = fake_state.gpu_ms ? fence_file() : -1;
             return 0;
         }
     }
@@ -400,8 +435,8 @@ API EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer
 }
 API EGLint eglDupNativeFenceFDANDROID(EGLDisplay d, EGLSyncKHR s)
 {
-    (void)d, (void)s;
-    return 42;
+    (void)d;
+    return s == (EGLSyncKHR)0x5ed ? fence_file() : -1;
 }
 static void fake_query_counter(GLuint id, GLenum target)
 {
@@ -564,6 +599,7 @@ API void glCopyTexSubImage2D(GLenum t, GLint l, GLint xo, GLint yo, GLint x, GLi
     fake_state.copy_source = g_fb_tex[g_read_fb];
 }
 API void glFinish(void) { fake_state.finishes++; }
+API void glFlush(void) {}
 API void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *src, const GLint *len)
 {
     (void)shader, (void)len;

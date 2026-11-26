@@ -23,6 +23,7 @@
 #include <EGL/eglext.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,6 +32,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
@@ -85,6 +87,7 @@ static struct {
     uint8_t shown[4]; /* the first pixel of the buffer on screen */
     uint32_t last_format;
     uint64_t last_modifier;
+    int last_fd, last_ready; /* the buffer of the last commit, and whether poll() called it readable then */
     volatile int stop;
 } srv;
 
@@ -253,6 +256,10 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
             memcpy(srv.shown, pixels, 4);
             munmap(pixels, 4);
         }
+        /* ...after asking whether it is finished, as KWin does */
+        struct pollfd ready = {.fd = b->fd, .events = POLLIN};
+        srv.last_ready = poll(&ready, 1, 0);
+        srv.last_fd = b->fd;
     }
     srv.commits++;
     struct wl_resource *cb, *tmp;
@@ -688,7 +695,8 @@ int main(void)
     struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
              query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls;
              void *current_draw; int native_images, images_destroyed, copies, finishes; unsigned copy_source;
-             unsigned swizzle_a_one; int fence_waits, fence_waits_flushed; } *fake =
+             unsigned swizzle_a_one; int fence_waits, fence_waits_flushed; unsigned vao_bound;
+             int gpu_ms, fence_files; } *fake =
         getenv("CHAMELEON_ANDROID_MEDIANDK") /* the fake driver, loaded by the vendor */
             ? dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state")
             : NULL;
@@ -698,6 +706,34 @@ int main(void)
 
     CHECK(fake && fake->fence_waits == 0, "the EGL window's own buffers wait in the vendor, not at attach (%d waits)",
           fake ? fake->fence_waits : -1);
+
+    /* The frames' fences (core/dmabuf.c). The compositor here asks, as
+     * KWin does, whether a buffer is finished when it gets it. */
+    printf("frames the GPU is still drawing\n");
+    if (fake) {
+        const char *keep = getenv("FENCE_TEST_FORCE_WAIT"); /* the run with CHAMELEON_SYNC_WAIT=1 */
+        for (int i = 0; i < 6; i++) /* every buffer of this size has been asked about once */
+            eglSwapBuffers(dpy, surf);
+        wl_display_roundtrip(display);
+        fake->gpu_ms = 60;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        ok = eglSwapBuffers(dpy, surf) == EGL_TRUE;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        wl_display_roundtrip(display);
+        struct pollfd later = {.fd = srv.last_fd, .events = POLLIN};
+        if (keep) {
+            CHECK(ok && ms >= 55 && srv.last_ready == 1,
+                  "CHAMELEON_SYNC_WAIT=1: the swap waits for the GPU itself (%ld ms), the buffer arrives finished", ms);
+        } else {
+            CHECK(ok && ms < 40, "the swap returns without waiting for the GPU (%ld ms of 60)", ms);
+            CHECK(srv.last_ready == 0, "the compositor is told the buffer isn't finished yet");
+            CHECK(poll(&later, 1, 500) == 1, "...and when it is");
+        }
+        fake->gpu_ms = 0;
+        usleep(80000);
+    }
 
     /* A client rendering into gbm buffers and handing them over itself, as
      * Xwayland's glamor does: attaching such a buffer waits for the GPU work
@@ -729,21 +765,38 @@ int main(void)
           "its wl_buffer reaches KWin as sent: %dx%d stride %d format %08x modifier %016llx", srv.last_width,
           srv.last_height, srv.last_stride, srv.last_format, (unsigned long long)srv.last_modifier);
     struct wl_surface *xsurface = wl_compositor_create_surface(g_compositor);
-    int commits = srv.commits;
+    int commits = srv.commits, files = fake ? fake->fence_files : 0;
+    struct timespec g0, g1;
     wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
     wl_surface_commit(xsurface);
     wl_display_roundtrip(display);
-    CHECK(fake && fake->fence_waits == 1 && fake->fence_waits_flushed == 1 && srv.commits == commits + 1,
-          "attaching it waited for the GPU once, with a flush (%d waits, %d flushed)", fake ? fake->fence_waits : -1,
-          fake ? fake->fence_waits_flushed : -1);
+    CHECK(fake && fake->fence_files == files + 1 && fake->fence_waits == 0 && srv.commits == commits + 1 &&
+              srv.last_ready == 1,
+          "attaching it made one fence of the GPU work for it and waited (nobody asked about the buffer yet): %d",
+          fake ? fake->fence_files - files : -1);
+    if (fake)
+        fake->gpu_ms = 60;
+    clock_gettime(CLOCK_MONOTONIC, &g0);
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    clock_gettime(CLOCK_MONOTONIC, &g1);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    long gms = (g1.tv_sec - g0.tv_sec) * 1000 + (g1.tv_nsec - g0.tv_nsec) / 1000000;
+    if (getenv("FENCE_TEST_FORCE_WAIT"))
+        CHECK(gms >= 55 && srv.last_ready == 1, "CHAMELEON_SYNC_WAIT=1: the next attach waits too (%ld ms)", gms);
+    else
+        CHECK(gms < 40 && srv.last_ready == 0, "the compositor asks: the next attach leaves the wait to it (%ld ms)", gms);
+    if (fake)
+        fake->gpu_ms = 0;
+    usleep(80000);
+    files = fake ? fake->fence_files : 0;
     wl_surface_attach(xsurface, NULL, 0, 0);
     wl_surface_commit(xsurface);
     eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
     wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
     wl_surface_commit(xsurface);
     wl_display_roundtrip(display);
-    CHECK(fake && fake->fence_waits == 1, "no wait for a NULL buffer, nor without a current context (%d waits)",
-          fake ? fake->fence_waits : -1);
+    CHECK(fake && fake->fence_files == files, "nothing for a NULL buffer, nor without a current context");
     eglMakeCurrent(dpy, surf, surf, ctx);
     wl_buffer_destroy((struct wl_buffer *)buffer);
     wl_surface_destroy(xsurface);

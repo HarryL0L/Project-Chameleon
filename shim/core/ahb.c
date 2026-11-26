@@ -459,6 +459,9 @@ static void bo_free_locked(struct cham_bo *bo)
     }
     if (bo->release_fence >= 0)
         close(bo->release_fence);
+    for (int i = 0; i < 2; i++)
+        if (bo->fence[i] >= 0)
+            close(bo->fence[i]);
     close(bo->dmabuf_fd);
     if (bo->release)
         bo->release(bo->ahb);
@@ -480,6 +483,8 @@ static void reap_locked(void)
         }
     }
 }
+
+dev_t g_dmabuf_dev;
 
 struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
 {
@@ -514,22 +519,27 @@ struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
     return bo;
 }
 
-struct cham_bo *ahb_bo_for_fd(int fd)
+struct cham_bo *ahb_bo_for_dmabuf(dev_t dev, ino_t ino)
 {
-    struct stat st;
-    if (fd < 0 || real_fstat(fd, &st) != 0)
-        return NULL;
     struct cham_bo *found = NULL;
     pthread_mutex_lock(&g_lock);
     reap_locked();
     for (struct cham_bo *bo = g_bos; bo && !found; bo = bo->next) {
-        if (bo->dmabuf_dev == st.st_dev && bo->dmabuf_ino == st.st_ino) {
+        if (bo->dmabuf_dev == dev && bo->dmabuf_ino == ino) {
             bo_ref_locked(bo);
             found = bo;
         }
     }
     pthread_mutex_unlock(&g_lock);
     return found;
+}
+
+struct cham_bo *ahb_bo_for_fd(int fd)
+{
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0)
+        return NULL;
+    return ahb_bo_for_dmabuf(st.st_dev, st.st_ino);
 }
 
 int ahb_is_dmabuf(int fd)
@@ -569,9 +579,11 @@ static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, 
     bo->dmabuf_fd = fd;
     bo->dmabuf_dev = st.st_dev;
     bo->dmabuf_ino = st.st_ino;
+    __atomic_store_n(&g_dmabuf_dev, st.st_dev, __ATOMIC_RELAXED);
     bo->refs = 1;
     bo->slot = -1;
     bo->release_fence = -1;
+    bo->fence[0] = bo->fence[1] = -1;
 
     pthread_mutex_lock(&g_lock);
     bo->next = g_bos;
@@ -684,6 +696,7 @@ struct cham_bo *bo_new_dumb(uint64_t size)
     bo->refs = 1;
     bo->slot = -1;
     bo->release_fence = -1;
+    bo->fence[0] = bo->fence[1] = -1;
     bo->dmabuf_fd = -1;
     return bo;
 }

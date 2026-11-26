@@ -64,6 +64,7 @@ static struct {
     /* for Wayland windows' buffers */
     struct cham_bo *(*bo_wrap)(AHardwareBuffer *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
                                void (*)(AHardwareBuffer *));
+    int (*dmabuf_write_fence)(int, int);
 } core;
 
 static void resolve(void)
@@ -80,6 +81,7 @@ static void resolve(void)
     *(void **)&core.bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
     *(void **)&core.bo_handle_close = dlsym(RTLD_DEFAULT, "cham_bo_handle_close");
     *(void **)&core.bo_wrap = dlsym(RTLD_DEFAULT, "cham_bo_wrap");
+    *(void **)&core.dmabuf_write_fence = dlsym(RTLD_DEFAULT, "cham_dmabuf_write_fence");
     if (!core.bo_create || !core.bo_unref || !core.bo_export_fd || !core.bo_handle_open || !core.bo_handle_close)
         core.bo_create = NULL; /* no texture export (cham_bo_create() answers NULL) */
     if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.buffer_ahb_acquire || !core.buffer_ahb_release)
@@ -188,6 +190,11 @@ uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
 void cham_bo_handle_close(int fd, uint32_t handle)
 {
     core.bo_handle_close(fd, handle);
+}
+
+int cham_dmabuf_write_fence(int dmabuf, int fence)
+{
+    return cham_core_present() && core.dmabuf_write_fence ? core.dmabuf_write_fence(dmabuf, fence) : 0;
 }
 
 static int g_render_fd = -1;

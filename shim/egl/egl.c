@@ -26,11 +26,14 @@
 #include <GLES3/gl31.h>
 #include <dlfcn.h>
 #include <drm_fourcc.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "../../common/chameleon_drm.h"
 #include "../core/cham_shim.h"
@@ -57,7 +60,7 @@ static void load(void)
     *(void **)&real_get_proc = dlsym(g_lib, "eglGetProcAddress");
     /* Clients of the session wait for their GPU work when they hand a
      * dmabuf to the compositor (core/wlsync.c, in libchameleon.so). */
-    void (*set_present_wait)(void (*)(void));
+    void (*set_present_wait)(void (*)(int));
     *(void **)&set_present_wait = dlsym(RTLD_DEFAULT, "cham_set_present_wait");
     if (set_present_wait)
         set_present_wait(cham_egl_present_wait);
@@ -1238,22 +1241,29 @@ void *cham_egl_get_proc(const char *name)
     return fn;
 }
 
-/* For libchameleon's Wayland hook (core/wlsync.c), when a client attaches a
- * dmabuf buffer: waits until the GPU has done the work the thread's current
- * context submitted so far (the fence is flushed with it). No current
- * context of Android's driver: nothing to wait for. */
-void cham_egl_present_wait(void)
+/* core/wlsync.c: the calling thread is about to hand the compositor the
+ * buffer `dmabuf` (-1 if unknown), which it drew into itself. The fence of
+ * the work the thread's current context submitted so far (flushed with it)
+ * is given to the session for the buffer; if the compositor doesn't ask for
+ * fences, or the driver has no fence files, the GPU is waited for here. No
+ * current context of Android's driver: nothing to do. */
+void cham_egl_present_wait(int dmabuf)
 {
     static EGLContext (*get_context)(void);
     static EGLDisplay (*get_display)(void);
     static EGLSyncKHR (*create_sync)(EGLDisplay, EGLenum, const EGLint *);
     static EGLint (*client_wait)(EGLDisplay, EGLSyncKHR, EGLint, EGLTimeKHR);
     static EGLBoolean (*destroy_sync)(EGLDisplay, EGLSyncKHR);
+    static EGLint (*dup_fence)(EGLDisplay, EGLSyncKHR);
+    static void (*flush)(void);
+    static int fence_files = -1;
     if (!destroy_sync) {
         *(void **)&get_context = real("eglGetCurrentContext");
         *(void **)&get_display = real("eglGetCurrentDisplay");
         *(void **)&create_sync = real("eglCreateSyncKHR");
         *(void **)&client_wait = real("eglClientWaitSyncKHR");
+        *(void **)&dup_fence = real("eglDupNativeFenceFDANDROID");
+        *(void **)&flush = cham_gl_real("glFlush");
         if (!get_context || !get_display || !create_sync || !client_wait)
             return;
         *(void **)&destroy_sync = real("eglDestroySyncKHR");
@@ -1263,7 +1273,31 @@ void cham_egl_present_wait(void)
     if (get_context() == EGL_NO_CONTEXT)
         return;
     EGLDisplay dpy = get_display();
-    EGLSyncKHR sync = create_sync(dpy, EGL_SYNC_FENCE_KHR, NULL);
+    if (fence_files < 0) {
+        const char *(*query)(EGLDisplay, EGLint) = real("eglQueryString");
+        const char *exts = query ? query(dpy, EGL_EXTENSIONS) : NULL;
+        fence_files = exts && dup_fence && flush && strstr(exts, "EGL_ANDROID_native_fence_sync") != NULL;
+    }
+    EGLSyncKHR sync = dmabuf >= 0 && fence_files ? create_sync(dpy, EGL_SYNC_NATIVE_FENCE_ANDROID, NULL)
+                                                  : EGL_NO_SYNC_KHR;
+    if (sync != EGL_NO_SYNC_KHR) {
+        flush(); /* the fence file exists from then */
+        int fence = dup_fence(dpy, sync);
+        destroy_sync(dpy, sync);
+        if (fence >= 0) {
+            if (!cham_dmabuf_write_fence(dmabuf, fence)) {
+                struct pollfd p = {.fd = fence, .events = POLLIN};
+                int r;
+                while ((r = poll(&p, 1, 1000)) < 0 && errno == EINTR)
+                    ;
+                if (r == 0)
+                    cham_log("the GPU took over 1 s on a buffer handed to the compositor");
+            }
+            close(fence);
+            return;
+        }
+    }
+    sync = create_sync(dpy, EGL_SYNC_FENCE_KHR, NULL);
     if (sync == EGL_NO_SYNC_KHR)
         return;
     if (client_wait(dpy, sync, EGL_SYNC_FLUSH_COMMANDS_BIT_KHR, 1000000000ull) == EGL_TIMEOUT_EXPIRED_KHR)

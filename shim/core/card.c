@@ -327,6 +327,15 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
             close(mem);
         break;
     }
+    case CARD_DMABUF: {
+        int out = -1;
+        int fence = fd >= 0 ? fcntl(fd, F_DUPFD_CLOEXEC, 0) : -1; /* ours to keep */
+        int64_t ret = dmabuf_sync((dev_t)m->a, (ino_t)m->b, (int)(m->id & 0xff), m->id >> 8, fence, &out);
+        answer(c, ret, out);
+        if (out >= 0)
+            close(out);
+        break;
+    }
     case CARD_SEND_FD:
         if (c->sent_fd[1] >= 0)
             close(c->sent_fd[1]);

@@ -30,6 +30,10 @@ AHardwareBuffer *ahb_recv(int sock);
 struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format);
 /* The known bo whose dmabuf `fd` is, with a reference for the caller, or NULL. */
 struct cham_bo *ahb_bo_for_fd(int fd);
+struct cham_bo *ahb_bo_for_dmabuf(dev_t dev, ino_t ino); /* the same, by the dmabuf's identity */
+/* The device number every dmabuf's stat() gives (they share a filesystem);
+ * 0 until this process has had a buffer. */
+extern dev_t g_dmabuf_dev;
 int ahb_is_dmabuf(int fd); /* a dmabuf at all (as /proc names it) */
 void ahb_acquire(AHardwareBuffer *b);
 void ahb_release(AHardwareBuffer *b);
@@ -231,6 +235,9 @@ enum {
                     * CARD_IOCTL names (a commit's other fence); no answer */
     CARD_MMAP,     /* id = file, a = offset, b = length: mmap() of the card. -> 0 and
                     * the memory to map from its start, or -errno */
+    CARD_DMABUF,   /* id = DMABUF_* | argument << 8, a and b = st_dev and st_ino of a
+                    * dmabuf, maybe + a fence: see dmabuf.c. -ENOENT if it isn't
+                    * one of the session's buffers */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */
@@ -256,6 +263,17 @@ int card_fd_install(int fd, int cloexec);
 /* The session's buffer whose dmabuf `fd` is (any process's gbm buffer, an
  * app's registered one), with a reference for the caller, or NULL. */
 struct cham_bo *card_session_buffer(int fd);
+
+/* ---- dmabuf.c: the fences of the session's buffers ---- */
+enum {
+    DMABUF_POLL,   /* argument = poll events. -> those that are ready; if not all, + a fence to wait for */
+    DMABUF_EXPORT, /* argument = DMA_BUF_SYNC_* flags. -> 0 + the fence */
+    DMABUF_IMPORT, /* argument = flags, + the fence to add. -> 0 */
+    DMABUF_WRITE,  /* + the fence of what was just drawn into it. -> 1 if who reads it asks for fences */
+};
+/* Takes over `fence` (-1 if none came); *out gets an fd for the caller, or -1. */
+int64_t dmabuf_sync(dev_t dev, ino_t ino, int op, unsigned arg, int fence, int *out);
+int is_sync_file(int fd); /* kms.c */
 
 /* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
 /* A card file's event pipe holds one page, as the kernel gives a DRM file

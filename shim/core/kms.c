@@ -947,7 +947,7 @@ static int g_cursor_fence = -1; /* ...the cursor plane's */
 
 /* sync_file_get_fence() takes sync files only. The host tests' fences are
  * pipes, sockets and eventfds, which become readable. */
-static int is_sync_file(int fd)
+int is_sync_file(int fd)
 {
 #ifdef CHAM_HOST_TEST
     struct stat st;

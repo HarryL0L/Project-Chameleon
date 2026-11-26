@@ -39,6 +39,8 @@
 #define DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE 7
 #endif
 
+#include <linux/dma-buf.h>
+
 #include "../../common/cham_io.h"
 
 static int failures;
@@ -1514,6 +1516,76 @@ int main(int argc, char **argv)
         usleep(100000); /* the app reads that frame's message before the next test closes its connection */
         drmModeFreeConnector(dc);
         drmModeFreeResources(res);
+    }
+
+    printf("the buffers' fences\n");
+    {
+        /* The host tests' fences are files that become readable: here pipes. */
+        struct gbm_bo *sbo = gbm_bo_create(gbm, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING);
+        int sfd = sbo ? gbm_bo_get_fd(sbo) : -1;
+        struct pollfd sp = {.fd = sfd, .events = POLLIN | POLLOUT};
+        int w[2] = {-1, -1}, r[2] = {-1, -1}, w2[2] = {-1, -1};
+        int (*cham_dmabuf_write_fence)(int, int) = dlsym(RTLD_DEFAULT, "cham_dmabuf_write_fence"); /* libchameleon's */
+        ok = pipe(w) == 0 && pipe(r) == 0 && pipe(w2) == 0;
+        CHECK(ok && sfd >= 0 && cham_dmabuf_write_fence && cham_dmabuf_write_fence(sfd, w[0]) == 0,
+              "a writer's fence for a buffer nobody has asked about: the writer is told to wait itself");
+        CHECK(poll(&sp, 1, 0) == 0, "poll() of the buffer: not ready while that work is pending");
+        struct dma_buf_export_sync_file ex = {.flags = DMA_BUF_SYNC_READ, .fd = -1};
+        struct pollfd fp = {.events = POLLIN};
+        ok = ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0 && ex.fd >= 0;
+        fp.fd = ex.fd;
+        CHECK(ok && fcntl(ex.fd, F_GETFD) == FD_CLOEXEC && poll(&fp, 1, 0) == 0,
+              "EXPORT_SYNC_FILE gives its fence, close-on-exec, not signalled yet");
+        uint64_t t0 = now_ns();
+        CHECK(poll(&sp, 1, 60) == 0 && now_ns() - t0 >= 55000000ull, "poll() with a timeout waits that long");
+        CHECK(cham_dmabuf_write_fence && cham_dmabuf_write_fence(sfd, w2[0]) == 1, "the next writer is told its fence is asked for");
+        ok = write(w[1], "x", 1) == 1;
+        CHECK(ok && poll(&sp, 1, 0) == 0, "the first work done: still not ready, the second is pending");
+        pid_t waiter = fork();
+        if (waiter == 0) { /* another program with the buffer waits for it */
+            struct pollfd cp = {.fd = sfd, .events = POLLIN};
+            _exit(poll(&cp, 1, 2000) == 1 && cp.revents == POLLIN ? 0 : 1);
+        }
+        usleep(50000);
+        ok = write(w2[1], "x", 1) == 1;
+        int wst = -1;
+        waitpid(waiter, &wst, 0);
+        CHECK(ok && WIFEXITED(wst) && WEXITSTATUS(wst) == 0, "another process's poll() returns when the work is done");
+        CHECK(poll(&sp, 1, 0) == 1 && sp.revents == (POLLIN | POLLOUT) && poll(&fp, 1, 0) == 1,
+              "then the buffer is readable and writable, and the exported fence has signalled");
+        close(ex.fd);
+        struct dma_buf_import_sync_file im = {.flags = DMA_BUF_SYNC_READ, .fd = r[0]};
+        CHECK(ioctl(sfd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &im) == 0 && poll(&sp, 1, 0) == 1 && sp.revents == POLLIN,
+              "IMPORT_SYNC_FILE of a reader's fence: readable, not writable");
+        ex.flags = DMA_BUF_SYNC_READ;
+        ex.fd = -1;
+        ok = ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0;
+        fp.fd = ex.fd;
+        ok = ok && poll(&fp, 1, 0) == 1;
+        close(ex.fd);
+        ex.flags = DMA_BUF_SYNC_WRITE;
+        ex.fd = -1;
+        ok = ok && ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0;
+        fp.fd = ex.fd;
+        CHECK(ok && poll(&fp, 1, 0) == 0, "a reader has nothing to wait for (a signalled fence), a writer has");
+        ok = write(r[1], "x", 1) == 1;
+        CHECK(ok && poll(&fp, 1, 100) == 1 && poll(&sp, 1, 0) == 1 && sp.revents == (POLLIN | POLLOUT),
+              "the reader done: writable again");
+        close(ex.fd);
+        struct pollfd two[2] = {{.fd = sfd, .events = POLLIN}, {.fd = w[0], .events = POLLIN}};
+        int mem = memfd_create("not-a-buffer", MFD_CLOEXEC);
+        ex.flags = DMA_BUF_SYNC_READ;
+        CHECK(poll(two, 2, 0) == 2 && ioctl(mem, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) != 0 && errno == ENOTTY,
+              "polled with other files, and files that are no buffers: the kernel's own answers");
+        close(mem);
+        for (int i = 0; i < 2; i++) {
+            close(w[i]);
+            close(r[i]);
+            close(w2[i]);
+        }
+        close(sfd);
+        if (sbo)
+            gbm_bo_destroy(sbo);
     }
 
     printf("second producer takes over\n");

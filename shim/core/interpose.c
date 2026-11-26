@@ -43,6 +43,8 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <linux/dma-buf.h>
+#include <time.h>
 #include <xf86drm.h>
 
 #include "../../common/cham_io.h"
@@ -341,6 +343,9 @@ AHardwareBuffer *cham_buffer_ahb_acquire(int dmabuf)
     if (call_locked(req, dmabuf, NULL, NULL) == 1 && !(b = ahb_recv(g_conn)))
         disconnect_locked(); /* out of step */
     unlock_conn();
+    struct stat st;
+    if (b && real_fstat(dmabuf, &st) == 0)
+        __atomic_store_n(&g_dmabuf_dev, st.st_dev, __ATOMIC_RELAXED);
     return b;
 }
 
@@ -571,6 +576,153 @@ int fstat64(int fd, struct stat64 *st)
     return fstat(fd, (struct stat *)st);
 }
 
+/* ---- the fences of the session's buffers (dmabuf.c) ---- */
+
+#define NOT_OURS (-2)
+
+/* Asks the service about the dmabuf `fd`; NOT_OURS unless it can be one of
+ * the session's buffers and the service knows it. A dmabuf's stat() names the
+ * one filesystem all dmabufs are on, so any other file costs an fstat(). */
+static int64_t dmabuf_call(int fd, int op, unsigned arg, int fence, int *out)
+{
+    dev_t dev = __atomic_load_n(&g_dmabuf_dev, __ATOMIC_RELAXED);
+    struct stat st;
+    if (out)
+        *out = -1;
+    if (!dev || fd < 0 || real_fstat(fd, &st) != 0 || st.st_dev != dev)
+        return NOT_OURS;
+    struct cham_msg req = {CARD_DMABUF, (uint32_t)op | arg << 8, (uint64_t)st.st_dev, (uint64_t)st.st_ino};
+    lock_conn();
+    int64_t ret = call_locked(req, fence, NULL, out);
+    unlock_conn();
+    return ret == -ENOENT || ret == -ENODEV ? NOT_OURS : ret;
+}
+
+int cham_dmabuf_write_fence(int dmabuf, int fence)
+{
+    static int always = -1; /* CHAMELEON_SYNC_WAIT=1: writers never leave the wait to the reader */
+    if (always < 0) {
+        const char *e = getenv("CHAMELEON_SYNC_WAIT");
+        always = e && *e == '1';
+    }
+    return dmabuf_call(dmabuf, DMABUF_WRITE, 0, fence, NULL) == 1 && !always;
+}
+
+/* DMA_BUF_IOCTL_EXPORT_SYNC_FILE and _IMPORT_SYNC_FILE on one of the
+ * session's buffers. */
+static int dmabuf_ioctl(int fd, unsigned int request, void *arg)
+{
+    int64_t ret;
+    if (request == DMA_BUF_IOCTL_EXPORT_SYNC_FILE) {
+        struct dma_buf_export_sync_file a;
+        int fence;
+        if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a))
+            return NOT_OURS; /* the kernel says what it says of that */
+        ret = dmabuf_call(fd, DMABUF_EXPORT, a.flags, -1, &fence);
+        if (ret == 0)
+            ((struct dma_buf_export_sync_file *)arg)->fd = fence;
+        else if (fence >= 0)
+            close(fence);
+    } else if (request == DMA_BUF_IOCTL_IMPORT_SYNC_FILE) {
+        struct dma_buf_import_sync_file a;
+        if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a))
+            return NOT_OURS;
+        ret = dmabuf_call(fd, DMABUF_IMPORT, a.flags, a.fd >= 0 && fcntl(a.fd, F_GETFD) >= 0 ? a.fd : -1, NULL);
+    } else {
+        return NOT_OURS;
+    }
+    if (ret == NOT_OURS)
+        return NOT_OURS;
+    if (ret < 0) {
+        errno = (int)-ret;
+        return -1;
+    }
+    return 0;
+}
+
+/* poll() itself: nothing looked up, nothing locked (see real_mmap()). */
+static int real_ppoll(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask)
+{
+    struct timespec t; /* the kernel writes the time left into its copy */
+    if (timeout)
+        t = *timeout;
+    return (int)syscall(__NR_ppoll, fds, n, timeout ? &t : NULL, mask, mask ? 8 /* the kernel's sigset_t */ : 0);
+}
+
+static int64_t now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* poll() of one of the session's buffers alone (dma_buf_poll): readable once
+ * nothing is writing it, writable once nothing uses it. `timeout` in ms, <0
+ * for none. The result, or NOT_OURS. A dmabuf polled together with other
+ * files isn't looked at (each file of every poll() would cost an fstat()):
+ * the kernel answers, for Android's fenceless buffers always "ready". */
+static int dmabuf_poll(struct pollfd *p, int64_t timeout)
+{
+    int64_t end = timeout > 0 ? now_ms() + timeout : 0;
+    for (;;) {
+        int fence;
+        int64_t ret = dmabuf_call(p->fd, DMABUF_POLL, (unsigned)p->events & (POLLIN | POLLOUT), -1, &fence);
+        if (ret < 0) {
+            if (fence >= 0)
+                close(fence);
+            return NOT_OURS;
+        }
+        int64_t left = timeout > 0 ? end - now_ms() : timeout;
+        if (ret || fence < 0 || timeout == 0 || (timeout > 0 && left <= 0)) {
+            if (fence >= 0)
+                close(fence);
+            p->revents = (short)ret;
+            return ret ? 1 : 0;
+        }
+        struct pollfd w = {.fd = fence, .events = POLLIN};
+        struct timespec t = {left / 1000, left % 1000 * 1000000};
+        int r = real_ppoll(&w, 1, left < 0 ? NULL : &t, NULL);
+        int saved = errno;
+        close(fence);
+        errno = saved;
+        if (r < 0)
+            return -1;
+        /* signalled or out of time: ask again what is ready */
+    }
+}
+
+int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask)
+{
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized" /* glibc declares the array write-only */
+#endif
+    if (n == 1 && fds && !mask && (fds[0].events & (POLLIN | POLLOUT))) {
+        int ret = dmabuf_poll(fds, timeout ? (int64_t)timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000 : -1);
+        if (ret != NOT_OURS)
+            return ret;
+    }
+    return real_ppoll(fds, n, timeout, mask);
+}
+
+int poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+    struct timespec t = {timeout / 1000, timeout % 1000 * 1000000};
+    return ppoll(fds, n, timeout < 0 ? NULL : &t, NULL);
+}
+
+/* What a fortified program calls. */
+int __poll_chk(struct pollfd *fds, nfds_t n, int timeout, size_t size)
+{
+    (void)size;
+    return poll(fds, n, timeout);
+}
+
+int __ppoll_chk(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask, size_t size)
+{
+    (void)size;
+    return ppoll(fds, n, timeout, mask);
+}
+
 /* ---- ioctl ---- */
 
 int ioctl(int fd, int request, ...)
@@ -579,6 +731,12 @@ int ioctl(int fd, int request, ...)
     va_start(ap, request);
     void *arg = va_arg(ap, void *);
     va_end(ap);
+
+    if (_IOC_TYPE((unsigned int)request) == DMA_BUF_BASE && _IOC_NR((unsigned int)request) >= 2) {
+        int ret = dmabuf_ioctl(fd, (unsigned int)request, arg);
+        if (ret != NOT_OURS)
+            return ret;
+    }
 
     /* DRM ioctls go to the card; every other ioctl passes untouched, at no
      * cost: the GPU driver's (many per frame) and FIONREAD, which Qt and

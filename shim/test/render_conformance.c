@@ -30,6 +30,7 @@
 #include <drm/drm.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_mode.h>
+#include <linux/dma-buf.h>
 
 static void result(const char *what, int ret)
 {
@@ -216,6 +217,46 @@ int main(void)
     printf("%-60s %s\n", "  the same dmabuf",
            yes(fstat(theirs, &a) == 0 && fstat(again.fd, &b) == 0 && a.st_ino == b.st_ino));
     close(again.fd);
+
+    /* The buffer is idle: what its dmabuf says of the work pending on it. */
+    printf("== the buffer's fences\n");
+    struct pollfd bp = {theirs, POLLIN | POLLOUT, 0};
+    polled = poll(&bp, 1, 0);
+    printf("%-60s %d, 0x%x\n", "poll of the dmabuf: ready / revents", polled, bp.revents);
+    struct dma_buf_export_sync_file exs = {.flags = DMA_BUF_SYNC_READ, .fd = -1};
+    result("EXPORT_SYNC_FILE for a reader", ioctl(theirs, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exs));
+    struct pollfd sf = {exs.fd, POLLIN, 0};
+    printf("%-60s %s\n", "  the fence has signalled", yes(poll(&sf, 1, 0) == 1));
+    printf("%-60s %s\n", "  close-on-exec", yes(fcntl(exs.fd, F_GETFD) == FD_CLOEXEC));
+    int done = exs.fd;
+    exs.flags = DMA_BUF_SYNC_WRITE;
+    result("...for a writer", ioctl(theirs, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exs));
+    close(exs.fd);
+    exs.flags = DMA_BUF_SYNC_RW;
+    result("...for both", ioctl(theirs, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exs));
+    close(exs.fd);
+    exs.flags = 0;
+    result("...with no flags", ioctl(theirs, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exs));
+    exs.flags = 8;
+    result("...with unknown flags", ioctl(theirs, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exs));
+    struct dma_buf_import_sync_file ims = {.flags = DMA_BUF_SYNC_WRITE, .fd = done};
+    result("IMPORT_SYNC_FILE of that fence as a writer's", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    ims.flags = DMA_BUF_SYNC_READ;
+    result("...as a reader's", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    ims.flags = 0;
+    result("...with no flags", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    ims.flags = 8;
+    result("...with unknown flags", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    ims.flags = DMA_BUF_SYNC_WRITE;
+    ims.fd = open("/dev/null", O_RDWR | O_CLOEXEC);
+    result("IMPORT_SYNC_FILE of a file that is no fence", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    close(ims.fd);
+    ims.fd = 999;
+    result("...of a closed fd", ioctl(theirs, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &ims));
+    bp.revents = 0;
+    polled = poll(&bp, 1, 100);
+    printf("%-60s %d, 0x%x\n", "poll again, with a timeout: ready / revents", polled, bp.revents);
+    close(done);
     close(theirs);
     close(fd3);
     return 0;

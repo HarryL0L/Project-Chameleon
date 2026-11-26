@@ -1006,12 +1006,16 @@ int cham_window_commit(struct cham_window *s, int callback, int dx, int dy, cons
     if (b->image) /* can't happen: the reader hands out a buffer once */
         android.image_delete(b->image);
     b->image = image;
-    /* The compositor samples the buffer with no fence of ours: wait for the
-     * GPU here. */
+    /* The fence of the frame's GPU work goes with the buffer, as a driver's
+     * does on Linux, for a compositor that asks for it (core/dmabuf.c).
+     * Nothing makes a reader wait that doesn't ask, so for those, and for
+     * an X server, the GPU is waited for here. */
     if (fence >= 0) {
-        struct pollfd p = {.fd = fence, .events = POLLIN};
-        while (poll(&p, 1, -1) < 0 && errno == EINTR)
-            ;
+        if (!s->d || !b->bo || !cham_dmabuf_write_fence(b->bo->dmabuf_fd, fence)) {
+            struct pollfd p = {.fd = fence, .events = POLLIN};
+            while (poll(&p, 1, -1) < 0 && errno == EINTR)
+                ;
+        }
         close(fence);
     }
 

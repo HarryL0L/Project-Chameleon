@@ -73,6 +73,8 @@ struct cham_bo {
     int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */
     int in_service;    /* chameleon-kernel has it (a GEM handle): its dmabuf keeps it alive there */
     struct cham_dumb *dumb; /* chameleon-kernel: a dumb buffer's memory; such a bo has no AHardwareBuffer */
+    int fence[2];      /* chameleon-kernel (dmabuf.c): GPU work pending on it, [0] writing, [1] reading; -1 none */
+    int watched;       /* ...and whether who reads it has asked for them (poll, EXPORT_SYNC_FILE) */
     struct cham_bo *next;
 };
 
@@ -146,6 +148,12 @@ CHAM_EXPORT void cham_buffer_ahb_release(AHardwareBuffer *b);
  * (with a reference for the caller, cham_bo_unref): gbm_bo_import's.
  * NULL with errno ENODEV for another dmabuf, EINVAL for anything else. */
 CHAM_EXPORT struct cham_bo *cham_bo_import(int fd);
+/* Tells the session that what was just drawn into the buffer `dmabuf` is
+ * done when `fence` (a sync file, the caller's still) signals: what a GPU
+ * driver does on Linux. 1 if whoever reads the buffer asks for its fences
+ * (poll(), DMA_BUF_IOCTL_EXPORT_SYNC_FILE); if 0 the caller waits for the
+ * fence itself before it hands the buffer on. */
+CHAM_EXPORT int cham_dmabuf_write_fence(int dmabuf, int fence);
 
 CHAM_EXPORT void cham_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
