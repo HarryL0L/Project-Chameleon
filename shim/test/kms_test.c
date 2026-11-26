@@ -1349,8 +1349,13 @@ int main(int argc, char **argv)
         usleep(100000);
         CHECK(ok && g_presents == presents + 1, "legacy: SETCRTC shows its framebuffer (%d presents)",
               g_presents - presents);
+        /* The first flips after a modeset may complete at once: the busy
+         * check wants the card in step with its vblanks. */
+        for (int i = 0; i < 3; i++)
+            ok = ok && drmModePageFlip(fd, lcrtc, lfb[i & 1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0 && wait_flip(fd, 1000);
+        usleep(50000);
         presents = g_presents;
-        ok = drmModePageFlip(fd, lcrtc, lfb[1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
+        ok = ok && drmModePageFlip(fd, lcrtc, lfb[1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
         int busy = drmModePageFlip(fd, lcrtc, lfb[0], DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0 && errno == EBUSY;
         ok = ok && wait_flip(fd, 1000);
         CHECK(ok && busy && g_presents == presents + 1, "...PAGE_FLIP shows the next, one at a time, and its event comes");

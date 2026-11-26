@@ -345,12 +345,23 @@ static int recv_pong(int c, struct cham_msg *out)
     return 0;
 }
 
+/* Reads a pipe to its end (5 s at most), keeping the compositor running
+ * meanwhile: what fills the pipe may be this program's own compositor side,
+ * which hasn't seen the request yet. */
 static void read_all(int fd, char *buf, size_t size)
 {
     size_t n = 0;
-    ssize_t r;
-    while (n < size - 1 && (r = read(fd, buf + n, size - 1 - n)) > 0)
-        n += (size_t)r;
+    for (int i = 0; i < 250 && n < size - 1; i++) {
+        struct pollfd p = {fd, POLLIN, 0};
+        if (poll(&p, 1, 0) == 1) {
+            ssize_t r = read(fd, buf + n, size - 1 - n);
+            if (r <= 0)
+                break;
+            n += (size_t)r;
+        } else {
+            pump(1);
+        }
+    }
     buf[n] = 0;
 }
 
