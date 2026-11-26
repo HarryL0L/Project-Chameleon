@@ -316,6 +316,17 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
             input_note_socket(c->pid, path);
         break;
     }
+    case CARD_MMAP: {
+        struct fake_fd *f = file_get(m->id);
+        int mem = -1;
+        int ret = f ? kms_mmap(f, m->a, m->b, &mem) : -EBADF;
+        if (f)
+            file_put(f);
+        answer(c, ret, mem);
+        if (mem >= 0)
+            close(mem);
+        break;
+    }
     case CARD_SEND_FD:
         if (c->sent_fd[1] >= 0)
             close(c->sent_fd[1]);

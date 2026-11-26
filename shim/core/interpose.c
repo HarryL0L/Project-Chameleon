@@ -36,7 +36,9 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <sys/prctl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -623,6 +625,53 @@ int ioctl(int fd, int request, ...)
     }
     resolve_ioctl();
     return REAL(ioctl)(fd, request, arg);
+}
+
+/* ---- mmap ---- */
+
+/* The system call itself: every program maps memory all the time, also
+ * before this library is ready and in a forked child, so nothing is looked
+ * up and nothing locked on the way. */
+static void *real_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+#ifdef __NR_mmap
+    return (void *)syscall(__NR_mmap, addr, len, prot, flags, fd, off);
+#else
+    return (void *)syscall(__NR_mmap2, addr, len, prot, flags, fd, off >> 12);
+#endif
+}
+
+/* mmap() of the card maps a dumb buffer's memory, at the offset MAP_DUMB
+ * gave for it (drm_gem_mmap); shared only, as a shmem driver's. */
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+    int render;
+    uint32_t id = fd >= 0 && !(flags & MAP_ANONYMOUS) ? card_file(fd, &render) : 0;
+    if (!id)
+        return real_mmap(addr, len, prot, flags, fd, off);
+    struct cham_msg req = {CARD_MMAP, id, (uint64_t)off, (uint64_t)len};
+    int mem = -1;
+    lock_conn();
+    int64_t ret = call_locked(req, -1, NULL, &mem);
+    unlock_conn();
+    if (ret == 0 && (flags & MAP_TYPE) != MAP_SHARED)
+        ret = -EINVAL;
+    void *p = MAP_FAILED;
+    if (ret == 0 && mem >= 0)
+        p = real_mmap(addr, len, prot, flags, mem, 0);
+    else
+        errno = ret < 0 ? (int)-ret : EINVAL;
+    if (mem >= 0) {
+        int saved = errno;
+        close(mem);
+        errno = saved;
+    }
+    return p;
+}
+
+void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off64_t off)
+{
+    return mmap(addr, len, prot, flags, fd, (off_t)off);
 }
 
 /* ---- the compositor's Wayland socket ---- */

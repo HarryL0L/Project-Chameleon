@@ -152,6 +152,10 @@ session running.
   other properties by `SETPROPERTY`, `ADDFB`/`GETFB`, and waiting for or
   counting vblanks. A program that sets a mode and flips pages the old way
   runs as its own display master.
+- Dumb buffers work: memory a program maps through the card and draws into
+  on the CPU, without GBM or EGL. The card copies it into a buffer Android
+  can show when its framebuffer goes on screen and when `DIRTYFB` says it
+  changed.
 - **Screen size:** rotating the phone, or the keyboard shrinking the
   desktop, changes the connector's mode and sends a hotplug event, exactly
   like a monitor whose modes changed. The compositor re-reads the connector

@@ -240,7 +240,8 @@ libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
   properties, gbm → prime → framebuffer, modesets, 60 page flips through a
   stub presenter, simulated vblank without one; and the way older programs
   do: `SETCRTC`, `PAGE_FLIP` with and without events, the legacy cursor,
-  `WAIT_VBLANK`, DPMS;
+  `WAIT_VBLANK`, DPMS; dumb buffers drawn into through
+  `mmap` of the card, shown by `SETCRTC`, a flip and `DIRTYFB`;
 - `chameleon-init` adopting and reaping a program that detached, signals and
   the exit status passing through (`init_test`);
 - typed text and `chameleon-ime` against a real libwayland-server with stub

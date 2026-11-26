@@ -39,6 +39,16 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino);
 int ahb_send(const AHardwareBuffer *b, int sock);
 /* The bo's AHardwareBuffer, as ahb_send (to chameleon-kernel). */
 int bo_send(const struct cham_bo *bo, int sock);
+/* A dumb buffer (kms.c): zeroed shared memory the program maps through the
+ * card (its `offset` there) and draws into. A GEM object without an
+ * AHardwareBuffer: what goes on screen is a framebuffer's copy of it. */
+struct cham_dumb {
+    int fd;
+    uint8_t *mem;
+    uint64_t size, offset;
+};
+/* With one reference; NULL if there is no memory for it. */
+struct cham_bo *bo_new_dumb(uint64_t size);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);
@@ -195,6 +205,10 @@ struct cham_bo *kms_screen_bo_locked(void);
 int kms_screen_off_locked(void);
 /* `arg` is an address in the calling process. 0 / >=0 or -errno. */
 int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg);
+/* mmap() of the card: the memory of the file's dumb buffer at `offset`
+ * (MAP_DUMB's), as a new fd; -EACCES for another file's, -EINVAL for none
+ * or more than it has. */
+int kms_mmap(struct fake_fd *f, uint64_t offset, uint64_t length, int *fd);
 /* A GEM handle in `f` for a buffer its process sent (card.c); 0 if none. */
 uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo);
 
@@ -215,6 +229,8 @@ enum {
                       * app's registered one), or -ENOENT */
     CARD_SEND_FD,  /* + an fd, a = its number in the caller: a second fd the next
                     * CARD_IOCTL names (a commit's other fence); no answer */
+    CARD_MMAP,     /* id = file, a = offset, b = length: mmap() of the card. -> 0 and
+                    * the memory to map from its start, or -errno */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */

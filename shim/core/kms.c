@@ -137,6 +137,8 @@ struct fb {
     uint32_t width, height;
     uint32_t format, pitch; /* as ADDFB2 gave them */
     struct cham_bo *bo; /* holds a ref */
+    struct cham_bo *mem; /* of a dumb buffer (holds a ref): bo is the card's copy of it, */
+    uint32_t offset;     /* from here in its memory, made when it is shown */
     struct fake_fd *owner; /* the file that created it; NULL once it let go (CLOSEFB) */
     struct fb *next;
 };
@@ -693,28 +695,145 @@ uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo)
     return h;
 }
 
+/* ---- dumb buffers (drm_dumb_buffers.c, a shmem driver's) ----
+ * Memory the program maps and draws into. The card can't show memory, so a
+ * framebuffer of it has a buffer of its own that the memory is copied into
+ * whenever the framebuffer is put on a plane, and when DIRTYFB says it
+ * changed, as on cards that must be told (virtio-gpu, USB displays). */
+
+static uint64_t page_align(uint64_t n)
+{
+    uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    return (n + page - 1) / page * page;
+}
+
+static int create_dumb(struct fake_fd *f, struct drm_mode_create_dumb *d)
+{
+    if (!d->width || !d->height || !d->bpp)
+        return -EINVAL;
+    uint32_t cpp = (d->bpp + 7) / 8;
+    if (cpp > UINT32_MAX / d->width || d->height > UINT32_MAX / (cpp * d->width))
+        return -EINVAL;
+    d->handle = 0;
+    d->pitch = (uint32_t)(((uint64_t)d->width * d->bpp + 7) / 8);
+    d->size = page_align((uint64_t)d->pitch * d->height);
+    struct cham_bo *bo = bo_new_dumb(d->size);
+    if (!bo)
+        return -ENOMEM;
+    d->handle = handle_for(f, bo);
+    bo_unref_locked(bo); /* the handle holds it */
+    return d->handle ? 0 : -ENOMEM;
+}
+
+static int map_dumb(const struct fake_fd *f, struct drm_mode_map_dumb *m)
+{
+    const struct cham_bo *bo = handle_bo(f, m->handle);
+    if (!bo)
+        return -ENOENT;
+    if (!bo->dumb)
+        return -EINVAL; /* a GPU buffer has no memory to map */
+    m->offset = bo->dumb->offset;
+    return 0;
+}
+
+int kms_mmap(struct fake_fd *f, uint64_t offset, uint64_t length, int *fd)
+{
+    int ret = -EINVAL;
+    *fd = -1;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < f->nhandles; i++) {
+        const struct cham_dumb *d = f->handles[i].bo->dumb;
+        if (!d || d->offset != offset)
+            continue;
+        *fd = length <= d->size ? fcntl(d->fd, F_DUPFD_CLOEXEC, 0) : -1;
+        ret = length > d->size ? -EINVAL : *fd < 0 ? -ENOMEM : 0;
+        goto out;
+    }
+    /* Someone else's, as drm_vma_node_is_allowed says: this file has no handle to it. */
+    for (const struct fake_fd *o = g_files; o; o = o->kms_next)
+        for (int i = 0; i < o->nhandles; i++)
+            if (o->handles[i].bo->dumb && o->handles[i].bo->dumb->offset == offset)
+                ret = -EACCES;
+    for (const struct fb *fb = g_fbs; fb; fb = fb->next)
+        if (fb->mem && fb->mem->dumb->offset == offset)
+            ret = -EACCES;
+out:
+    pthread_mutex_unlock(&g_lock);
+    return ret;
+}
+
+/* Copies a dumb buffer's framebuffer (rows y1..y2, all of them wide: a row
+ * costs little) into the buffer that is shown. XRGB's unused byte becomes
+ * opaque alpha, which Android's buffer of that layout has. */
+static void dumb_show(const struct fb *fb, uint32_t y1, uint32_t y2)
+{
+    if (!fb->mem)
+        return;
+    uint8_t *to = cham_bo_lock(fb->bo);
+    if (!to)
+        return;
+    const uint8_t *from = fb->mem->dumb->mem + fb->offset;
+    if (y2 > fb->height)
+        y2 = fb->height;
+    for (uint32_t y = y1; y < y2; y++) {
+        const uint32_t *s = (const uint32_t *)(const void *)(from + (uint64_t)y * fb->pitch);
+        uint32_t *t = (uint32_t *)(void *)(to + (uint64_t)y * fb->bo->stride);
+        if (fb->format == DRM_FORMAT_XRGB8888)
+            for (uint32_t x = 0; x < fb->width; x++)
+                t[x] = s[x] | 0xff000000u;
+        else
+            memcpy(t, s, (size_t)fb->width * 4);
+    }
+    cham_bo_unlock(fb->bo);
+}
+
 /* ---- framebuffers ---- */
 
 static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
 {
     if (!plane_has_format(c->pixel_format))
         return -EINVAL; /* as the kernel: a format no plane can show */
-    struct cham_bo *bo = handle_bo(f, c->handles[0]);
+    if (!c->width || !c->height || (uint64_t)c->pitches[0] < (uint64_t)c->width * 4)
+        return -EINVAL; /* framebuffer_check: a row holds the width */
+    struct cham_bo *bo = handle_bo(f, c->handles[0]), *mem = NULL;
     if (!bo)
         return -ENOENT;
-    if (c->width > bo->width || c->height > bo->height)
+    if (bo->dumb) {
+        /* What the memory holds may be a framebuffer (drm_gem_fb_init_with_funcs);
+         * the card's copy of it is the buffer that goes on screen. */
+        if ((uint64_t)(c->height - 1) * c->pitches[0] + (uint64_t)c->width * 4 + c->offsets[0] > bo->dumb->size)
+            return -EINVAL;
+        mem = bo;
+        bo_ref_locked(mem);
+        pthread_mutex_unlock(&g_lock); /* allocating takes it */
+        bo = cham_bo_create(c->width, c->height, c->pixel_format, CHAM_USE_WRITE);
+        pthread_mutex_lock(&g_lock);
+        if (!bo) {
+            bo_unref_locked(mem);
+            return -ENOMEM;
+        }
+    } else if (c->width > bo->width || c->height > bo->height) {
         return -EINVAL;
+    }
     struct fb *fb = calloc(1, sizeof *fb);
-    if (!fb)
+    if (!fb) {
+        if (mem) {
+            bo_unref_locked(bo);
+            bo_unref_locked(mem);
+        }
         return -ENOMEM;
+    }
     fb->id = g_next_object_id++;
     fb->width = c->width;
     fb->height = c->height;
     fb->format = c->pixel_format;
     fb->pitch = c->pitches[0];
     fb->bo = bo;
+    fb->mem = mem;
+    fb->offset = c->offsets[0];
     fb->owner = f;
-    bo_ref_locked(bo);
+    if (!mem) /* the copy's first reference is the framebuffer's */
+        bo_ref_locked(bo);
     fb->next = g_fbs;
     g_fbs = fb;
     c->fb_id = fb->id;
@@ -730,6 +849,8 @@ static void free_unused_fbs(void)
         if (!fb->owner && fb->id != g_state.primary.fb && fb->id != g_state.cursor.fb) {
             *p = fb->next;
             bo_unref_locked(fb->bo);
+            if (fb->mem)
+                bo_unref_locked(fb->mem);
             free(fb);
         } else {
             p = &fb->next;
@@ -804,6 +925,8 @@ static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
     struct cham_bo *bo = handle_bo(f, p->handle);
     if (!bo)
         return -ENOENT;
+    if (bo->dumb)
+        return -ENOSYS; /* its memory is no dmabuf */
     int fd = cham_bo_export_fd(bo);
     if (fd < 0)
         return -errno;
@@ -1223,6 +1346,14 @@ static int apply(struct fake_fd *f, struct kms_state s, int touched, uint32_t fl
      * one is being scanned out), so a new framebuffer is a new image. */
     int cursor_new = cp->fb != g_state.cursor.fb;
     struct fb *cfb = cp->fb ? fb_find(cp->fb) : NULL;
+    /* A dumb buffer's framebuffer is shown as its memory is now. */
+    int modeset_or = modeset || s.dpms != g_state.dpms;
+    if (fb && fb->mem && ((touched & 1) || modeset_or))
+        dumb_show(fb, 0, fb->height);
+    if (cfb && cfb->mem && (touched & 2)) {
+        dumb_show(cfb, 0, cfb->height);
+        cursor_new = 1;
+    }
     struct cham_bo *cbo = cfb ? cfb->bo : NULL;
     if (cbo)
         bo_ref_locked(cbo);
@@ -1580,8 +1711,9 @@ static int fb_handle(struct fake_fd *f, const struct fb *fb, uint32_t *handle)
     if (!t)
         return -ENOMEM;
     f->handles = t;
-    f->handles[f->nhandles++] = (struct gem_handle){h, fb->bo};
-    bo_ref_locked(fb->bo);
+    struct cham_bo *bo = fb->mem ? fb->mem : fb->bo;
+    f->handles[f->nhandles++] = (struct gem_handle){h, bo};
+    bo_ref_locked(bo);
     *handle = h;
     return 0;
 }
@@ -1614,11 +1746,14 @@ static int get_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
     return fb_handle(f, fb, &c->handles[0]);
 }
 
-/* A framebuffer without a way to be told of changes (drm_mode_dirtyfb_ioctl
- * with no .dirty): the card shows a buffer when it is flipped to. */
+/* drm_mode_dirtyfb_ioctl. A GPU buffer's framebuffer has no way to be told
+ * of changes (no .dirty): the card shows it when it is flipped to. A dumb
+ * buffer's is copied again, the rows the rectangles name or all of it, and
+ * shown if it is on a plane. */
 static int dirty_fb(const struct drm_mode_fb_dirty_cmd *c)
 {
-    if (!fb_find(c->fb_id))
+    const struct fb *fb = fb_find(c->fb_id);
+    if (!fb)
         return -ENOENT;
     if (!c->num_clips != !c->clips_ptr)
         return -EINVAL;
@@ -1626,12 +1761,33 @@ static int dirty_fb(const struct drm_mode_fb_dirty_cmd *c)
         return -EINVAL;
     if (c->num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS)
         return -EINVAL;
+    uint32_t y1 = c->num_clips ? UINT32_MAX : 0, y2 = c->num_clips ? 0 : UINT32_MAX;
     for (uint32_t i = 0; i < c->num_clips; i++) {
         struct drm_clip_rect r;
         if (copy_from_user(&r, c->clips_ptr + i * sizeof r, sizeof r))
             return -EFAULT;
+        if (r.y1 < y1)
+            y1 = r.y1;
+        if (r.y2 > y2)
+            y2 = r.y2;
     }
-    return -ENOSYS;
+    if (!fb->mem)
+        return -ENOSYS;
+    if (c->flags & DRM_MODE_FB_DIRTY_ANNOTATE_COPY) /* pairs of source and destination: all of it */
+        y1 = 0, y2 = UINT32_MAX;
+    if (y1 < y2)
+        dumb_show(fb, y1, y2);
+    int on = g_state.active && state_mode(&g_state) && g_state.dpms == 0;
+    if (fb->id == g_state.cursor.fb && g_has_cursor && g_cursor_bo && on)
+        link_cursor_locked(&(struct link_cursor){g_cursor_bo, 1, g_state.cursor.crtc_x, g_state.cursor.crtc_y,
+                                                 g_state.cursor.src_x >> 16, g_state.cursor.src_y >> 16,
+                                                 g_state.cursor.crtc_w, g_state.cursor.crtc_h, -1});
+    /* Now, without a page flip. */
+    if (g_plane_shown && fb->id == g_state.primary.fb)
+        link_present_locked(fb->bo, -1, 0);
+    else if (g_plane_shown && fb->id == g_state.cursor.fb)
+        link_present_locked(NULL, -1, 0);
+    return 0;
 }
 
 /* ---- vblanks (drm_vblank.c) ---- */
@@ -1745,7 +1901,7 @@ static int get_cap(struct drm_get_cap *c)
 {
     c->value = 0;
     switch (c->capability) {
-    case DRM_CAP_DUMB_BUFFER: c->value = 0; return 0;
+    case DRM_CAP_DUMB_BUFFER: c->value = 1; return 0;
     case DRM_CAP_VBLANK_HIGH_CRTC: c->value = 1; return 0;
     case DRM_CAP_DUMB_PREFERRED_DEPTH: c->value = 24; return 0;
     case DRM_CAP_DUMB_PREFER_SHADOW: c->value = 0; return 0;
@@ -2015,8 +2171,12 @@ static int op_noop(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; }
 /* The syncobj ioctls of a driver without DRIVER_SYNCOBJ. */
 static int op_no_syncobj(struct fake_fd *f, void *d) { (void)f; (void)d; return -EOPNOTSUPP; }
 static int op_invalid(struct fake_fd *f, void *d) { (void)f; (void)d; return -EINVAL; }
-/* The dumb-buffer ioctls of a driver without dumb_create. */
-static int op_no_dumb(struct fake_fd *f, void *d) { (void)f; (void)d; return -ENOSYS; }
+static int op_create_dumb(struct fake_fd *f, void *d) { return create_dumb(f, d); }
+static int op_map_dumb(struct fake_fd *f, void *d) { return map_dumb(f, d); }
+static int op_destroy_dumb(struct fake_fd *f, void *d)
+{
+    return gem_close(f, ((struct drm_mode_destroy_dumb *)d)->handle); /* drm_gem_handle_delete */
+}
 static int op_get_stats(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; /* all zero */ }
 static int op_get_client(struct fake_fd *f, void *d)
 {
@@ -2127,9 +2287,9 @@ static const struct ioctl_def k_ioctls[DRM_CORE_IOCTL_COUNT] = {
     DEF(DRM_IOCTL_MODE_CLOSEFB, op_closefb, 0),
     DEF(DRM_IOCTL_MODE_PAGE_FLIP, op_page_flip, MASTER),
     DEF(DRM_IOCTL_MODE_DIRTYFB, op_dirty_fb, MASTER),
-    DEF(DRM_IOCTL_MODE_CREATE_DUMB, op_no_dumb, 0),
-    DEF(DRM_IOCTL_MODE_MAP_DUMB, op_no_dumb, 0),
-    DEF(DRM_IOCTL_MODE_DESTROY_DUMB, op_no_dumb, 0),
+    DEF(DRM_IOCTL_MODE_CREATE_DUMB, op_create_dumb, 0),
+    DEF(DRM_IOCTL_MODE_MAP_DUMB, op_map_dumb, 0),
+    DEF(DRM_IOCTL_MODE_DESTROY_DUMB, op_destroy_dumb, 0),
     DEF(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, op_obj_get_properties, 0),
     DEF(DRM_IOCTL_MODE_OBJ_SETPROPERTY, op_obj_set_property, MASTER),
     DEF(DRM_IOCTL_MODE_CURSOR2, op_cursor2, MASTER),

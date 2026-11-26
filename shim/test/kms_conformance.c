@@ -484,6 +484,137 @@ static void legacy_checks(int fd)
     crtc_state(fd, "after", fb_a);
 }
 
+/* ---- dumb buffers: memory the program draws into itself ---- */
+
+static void dumb_checks(int fd)
+{
+    printf("== dumb buffers\n");
+    struct drm_get_cap cap = {.capability = DRM_CAP_DUMB_BUFFER};
+    ioctl(fd, DRM_IOCTL_GET_CAP, &cap);
+    printf("%-60s %llu\n", "DRM_CAP_DUMB_BUFFER", (unsigned long long)cap.value);
+#define CREATE(w, h, b) ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &(struct drm_mode_create_dumb){.width = (w), .height = (h), .bpp = (b)})
+    result("no width", CREATE(0, 64, 32));
+    result("no height", CREATE(64, 0, 32));
+    result("no bits a pixel", CREATE(64, 64, 0));
+    result("a size that overflows", CREATE(0x40000000, 0x40000000, 32));
+    result("a pitch that overflows", CREATE(0xffffffff, 1, 32));
+#undef CREATE
+    static const uint32_t sizes[][3] = {{64, 64, 32}, {100, 10, 32}, {50, 50, 16}, {33, 3, 24}, {1, 1, 8}};
+    for (unsigned i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+        struct drm_mode_create_dumb d = {.width = sizes[i][0], .height = sizes[i][1], .bpp = sizes[i][2]};
+        char what[64];
+        snprintf(what, sizeof what, "%ux%u at %u bits", d.width, d.height, d.bpp);
+        int ret = ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &d);
+        result(what, ret);
+        printf("%-60s pitch %u, size %llu, handle %s\n", "", d.pitch, (unsigned long long)d.size, yes(d.handle));
+        if (!ret)
+            ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){d.handle});
+    }
+
+    struct drm_mode_create_dumb d = {.width = 64, .height = 64, .bpp = 32};
+    ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &d);
+    struct drm_mode_map_dumb m = {.handle = d.handle + 77};
+    result("MAP_DUMB of an unknown handle", ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m));
+    m = (struct drm_mode_map_dumb){.handle = d.handle};
+    result("MAP_DUMB", ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m));
+    struct drm_mode_map_dumb m2 = {.handle = d.handle};
+    ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m2);
+    printf("%-60s %s, %s\n", "  an offset, the same each time", yes(m.offset != 0), yes(m.offset == m2.offset));
+    printf("%-60s %s\n", "  a whole number of pages", yes(m.offset % 4096 == 0));
+
+#define MAP(len, prot, flags, off) mmap(NULL, (len), (prot), (flags), fd, (off_t)(off))
+#define TRY(what, len, prot, flags, off)                         \
+    do {                                                         \
+        void *t_ = MAP(len, prot, flags, off);                   \
+        result(what, t_ == MAP_FAILED ? -1 : 0);                 \
+        if (t_ != MAP_FAILED)                                    \
+            munmap(t_, (len));                                   \
+    } while (0)
+    uint32_t *a = MAP(d.size, PROT_READ | PROT_WRITE, MAP_SHARED, m.offset);
+    result("mmap of the card at that offset", a == MAP_FAILED ? -1 : 0);
+    if (a == MAP_FAILED)
+        return;
+    int zero = 1;
+    for (unsigned i = 0; i < d.size / 4; i++)
+        zero &= a[i] == 0;
+    printf("%-60s %s\n", "  new memory is zero", yes(zero));
+    a[0] = 0x11223344;
+    a[64 * 64 - 1] = 0x55667788;
+    uint32_t *b = MAP(d.size, PROT_READ, MAP_SHARED, m.offset);
+    result("a second mapping", b == MAP_FAILED ? -1 : 0);
+    if (b != MAP_FAILED) {
+        printf("%-60s %s\n", "  shows what the first wrote", yes(b[0] == 0x11223344 && b[64 * 64 - 1] == 0x55667788));
+        munmap(b, d.size);
+    }
+    TRY("a mapping of its first page only", 4096, PROT_READ, MAP_SHARED, m.offset);
+    TRY("a mapping longer than the buffer", d.size + 4096, PROT_READ, MAP_SHARED, m.offset);
+    TRY("a mapping from its second page", 4096, PROT_READ, MAP_SHARED, m.offset + 4096);
+    TRY("a mapping at an offset nothing has", 4096, PROT_READ, MAP_SHARED, m.offset + (1ull << 30));
+    TRY("a mapping at offset 0", 4096, PROT_READ, MAP_SHARED, 0);
+    TRY("a private writable mapping", d.size, PROT_READ | PROT_WRITE, MAP_PRIVATE, m.offset);
+    TRY("a private read-only mapping", d.size, PROT_READ, MAP_PRIVATE, m.offset);
+    const char *path = getenv("CHAMELEON_DRM_PATH");
+    int other = open(path ? path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    void *o = mmap(NULL, d.size, PROT_READ, MAP_SHARED, other, (off_t)m.offset);
+    result("a mapping through another open file of the card", o == MAP_FAILED ? -1 : 0);
+    if (o != MAP_FAILED)
+        munmap(o, d.size);
+    struct drm_mode_map_dumb om = {.handle = d.handle};
+    result("MAP_DUMB of the handle in that file", ioctl(other, DRM_IOCTL_MODE_MAP_DUMB, &om));
+    close(other);
+
+    printf("== framebuffers of dumb buffers\n");
+#define ADDFB(w, h, p, bpp_, depth_) \
+    ioctl(fd, DRM_IOCTL_MODE_ADDFB, &(struct drm_mode_fb_cmd){.width = (w), .height = (h), .pitch = (p), .bpp = (bpp_), .depth = (depth_), .handle = d.handle})
+    struct drm_mode_fb_cmd f = {.width = 64, .height = 64, .pitch = d.pitch, .bpp = 32, .depth = 24, .handle = d.handle};
+    result("ADDFB 64x64", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &f));
+    result("ADDFB with a pitch below the width", ADDFB(64, 64, 128, 32, 24));
+    result("ADDFB with a pitch above it, too tall for the memory", ADDFB(64, 64, 512, 32, 24));
+    result("ADDFB with a pitch above it that fits", ADDFB(64, 32, 512, 32, 24));
+    result("ADDFB taller than the buffer", ADDFB(64, 65, d.pitch, 32, 24));
+    result("ADDFB wider than the buffer, in its memory", ADDFB(128, 32, 512, 32, 24));
+    result("ADDFB of part of it", ADDFB(32, 32, d.pitch, 32, 24));
+#undef ADDFB
+    struct drm_mode_fb_cmd2 f2 = {.width = 64, .height = 64, .pixel_format = DRM_FORMAT_ARGB8888,
+                                  .handles = {d.handle}, .pitches = {d.pitch}};
+    result("ADDFB2 ARGB8888", ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &f2));
+    f2.offsets[0] = 4096;
+    result("ADDFB2 from its second page", ioctl(fd, DRM_IOCTL_MODE_ADDFB2, &f2));
+
+    printf("== a dumb buffer on the screen\n");
+    struct drm_mode_create_dumb s = {.width = g_mode.hdisplay, .height = g_mode.vdisplay, .bpp = 32};
+    ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &s);
+    struct drm_mode_fb_cmd sf = {.width = s.width, .height = s.height, .pitch = s.pitch, .bpp = 32, .depth = 24,
+                                 .handle = s.handle};
+    result("ADDFB of a screen-sized one", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &sf));
+    result("SETCRTC with it", set_crtc(fd, g_crtc, sf.fb_id, 0, 0, &g_conn, 1, &g_mode));
+    usleep(200000);
+    result("a page flip to itself", page_flip(fd, g_crtc, sf.fb_id, DRM_MODE_PAGE_FLIP_EVENT, 7));
+    event(fd, "its event", 7);
+    result("DESTROY_DUMB while it is shown", ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){s.handle}));
+    usleep(200000);
+    result("a page flip to its framebuffer after that", page_flip(fd, g_crtc, sf.fb_id, DRM_MODE_PAGE_FLIP_EVENT, 8));
+    event(fd, "its event", 8);
+    result("RMFB", ioctl(fd, DRM_IOCTL_MODE_RMFB, &sf.fb_id));
+
+    printf("== destroying\n");
+    result("DESTROY_DUMB of an unknown handle",
+           ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){d.handle + 77}));
+    result("DESTROY_DUMB", ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){d.handle}));
+    result("again", ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){d.handle}));
+    printf("%-60s %s\n", "  the mapping still reads", yes(a[0] == 0x11223344));
+    TRY("a new mapping (a framebuffer still has the buffer)", d.size, PROT_READ, MAP_SHARED, m.offset);
+    result("MAP_DUMB of the closed handle", ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &m));
+    ioctl(fd, DRM_IOCTL_MODE_RMFB, &f.fb_id);
+    f2.offsets[0] = 0;
+    munmap(a, d.size);
+    struct drm_mode_create_dumb g = {.width = 16, .height = 16, .bpp = 32};
+    ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &g);
+    result("GEM_CLOSE of a dumb buffer's handle", ioctl(fd, DRM_IOCTL_GEM_CLOSE, &(struct drm_gem_close){.handle = g.handle}));
+#undef TRY
+#undef MAP
+}
+
 static void find_objects(int fd)
 {
     uint32_t crtcs[4], conns[4], encs[4], planes[8];
@@ -728,5 +859,6 @@ int main(void)
     ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &e);
     printf("%-60s %s\n", "  encoder crtc_id (unbound)", e.crtc_id ? "set" : "0");
     legacy_checks(fd);
+    dumb_checks(fd);
     return 0;
 }

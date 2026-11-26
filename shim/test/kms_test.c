@@ -154,6 +154,18 @@ static void *signal_later(void *arg) /* a GPU copy finishing: {eventfd, after ms
 static int g_held_fd[STUB_SLOTS];
 static volatile int g_held;
 
+static volatile uint32_t g_present_slot; /* the buffer of the last frame to show */
+
+/* A pixel of a buffer the app holds (the test build's buffers are files of
+ * `width` pixels a row); 0xdeadbeef if it holds none there. */
+static uint32_t stub_pixel(uint32_t slot, uint32_t width, uint32_t x, uint32_t y)
+{
+    uint32_t v = 0xdeadbeef;
+    if (slot < STUB_SLOTS && g_held_fd[slot] >= 0)
+        pread(g_held_fd[slot], &v, sizeof v, ((off_t)y * width + x) * 4);
+    return v;
+}
+
 static void stub_drop_all(void)
 {
     for (int i = 0; i < STUB_SLOTS; i++) {
@@ -285,6 +297,8 @@ static void *presenter_main(void *arg)
         } else if (m.type == CHAM_PRESENT && !g_frozen) {
             g_present_placed = placed;
             placed = 0;
+            if (m.id != CHAM_PRESENT_UNCHANGED)
+                g_present_slot = m.id;
             g_presents++;
             g_unchanged_presents += m.id == CHAM_PRESENT_UNCHANGED;
             int slow_copy_ms = g_slow_copy_ms;
@@ -1410,6 +1424,98 @@ int main(int argc, char **argv)
         drmModeFreeResources(res);
     }
 
+    printf("dumb buffers\n");
+    /* Memory the program draws into itself (the calls' answers are compared
+     * with the kernel's by kms_conformance.c; here: what the app gets). */
+    {
+        drmModeRes *res = drmModeGetResources(fd);
+        drmModeConnector *dc = res ? drmModeGetConnector(fd, res->connectors[0]) : NULL;
+        uint32_t dcrtc = res ? res->crtcs[0] : 0, dconn = res ? res->connectors[0] : 0;
+        drmModeModeInfo dmode = dc ? dc->modes[0] : (drmModeModeInfo){0};
+        uint32_t w = dmode.hdisplay, h = dmode.vdisplay, handle = 0, pitch = 0, dfb = 0;
+        uint64_t size = 0, offset = 0;
+        int ok = dc && drmModeCreateDumbBuffer(fd, w, h, 32, 0, &handle, &pitch, &size) == 0 &&
+                 drmModeMapDumbBuffer(fd, handle, &offset) == 0;
+        uint32_t *px = ok ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)offset) : MAP_FAILED;
+        ok = ok && px != MAP_FAILED;
+        CHECK(ok && pitch == w * 4 && size >= (uint64_t)pitch * h, "a dumb buffer is made and mapped through the card");
+        if (!ok)
+            px = calloc(w * h, 4);
+        for (uint32_t i = 0; i < w * h; i++)
+            px[i] = 0x00112233; /* XRGB with nothing in X */
+        int presents = g_presents;
+        ok = drmModeAddFB(fd, w, h, 24, 32, pitch, handle, &dfb) == 0 &&
+             drmModeSetCrtc(fd, dcrtc, dfb, 0, 0, &dconn, 1, &dmode) == 0;
+        usleep(100000);
+        uint32_t slot = g_present_slot;
+        CHECK(ok && g_presents == presents + 1 && stub_pixel(slot, w, 0, 0) == 0xff112233 &&
+                  stub_pixel(slot, w, w - 1, h - 1) == 0xff112233,
+              "...SETCRTC shows what was drawn, opaque (0x%08x)", stub_pixel(slot, w, 0, 0));
+
+        /* Drawing more shows once the card is told. */
+        for (uint32_t y = 10; y < 20; y++)
+            for (uint32_t x = 0; x < w; x++)
+                px[y * w + x] = 0x00445566;
+        px[30 * w] = 0x00778899;
+        usleep(100000);
+        CHECK(g_presents == presents + 1 && stub_pixel(slot, w, 5, 10) == 0xff112233,
+              "...drawing into it alone changes nothing on screen");
+        drmModeClip clip = {0, 10, (unsigned short)w, 20};
+        ok = drmModeDirtyFB(fd, dfb, &clip, 1) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 2 && g_present_slot == slot && stub_pixel(slot, w, 5, 10) == 0xff445566 &&
+                  stub_pixel(slot, w, w - 1, 19) == 0xff445566 && stub_pixel(slot, w, 0, 30) == 0xff112233 &&
+                  stub_pixel(slot, w, 0, 9) == 0xff112233,
+              "...DIRTYFB shows the rows it names, at once");
+        ok = drmModeDirtyFB(fd, dfb, NULL, 0) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 3 && stub_pixel(slot, w, 0, 30) == 0xff778899,
+              "...DIRTYFB without rectangles shows all of it");
+        px[0] = 0x00abcdef;
+        ok = drmModePageFlip(fd, dcrtc, dfb, DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0 && wait_flip(fd, 1000);
+        usleep(50000);
+        CHECK(ok && stub_pixel(slot, w, 0, 0) == 0xffabcdef, "...a page flip shows it as it is then");
+
+        /* A cursor image from a dumb buffer, as programs without GBM make it. */
+        uint32_t chandle = 0, cpitch = 0;
+        uint64_t csize = 0, coffset = 0;
+        ok = drmModeCreateDumbBuffer(fd, 64, 64, 32, 0, &chandle, &cpitch, &csize) == 0 &&
+             drmModeMapDumbBuffer(fd, chandle, &coffset) == 0;
+        uint32_t *cpx = ok ? mmap(NULL, csize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)coffset) : MAP_FAILED;
+        ok = ok && cpx != MAP_FAILED;
+        for (uint32_t i = 0; ok && i < 64 * 64; i++)
+            cpx[i] = 0x80ff0000;
+        int msgs = g_cursor_msgs;
+        ok = ok && drmModeSetCursor(fd, dcrtc, chandle, 64, 64) == 0;
+        usleep(50000);
+        uint32_t cslot = g_cursor_id & ~(uint32_t)CHAM_CURSOR_NEW;
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) &&
+                  stub_pixel(cslot, 64, 63, 63) == 0x80ff0000,
+              "...a cursor image from one reaches the app with its alpha (0x%08x)", stub_pixel(cslot, 64, 63, 63));
+        drmModeSetCursor(fd, dcrtc, 0, 0, 0);
+
+        int prime = -1;
+        CHECK(drmPrimeHandleToFD(fd, handle, DRM_CLOEXEC, &prime) != 0, "...its memory is no dmabuf to export");
+        /* The handle goes; the framebuffer and the mapping keep the memory. */
+        ok = drmModeDestroyDumbBuffer(fd, handle) == 0;
+        px[1] = 0x00010203;
+        ok = ok && drmModeDirtyFB(fd, dfb, NULL, 0) == 0;
+        usleep(100000);
+        CHECK(ok && stub_pixel(slot, w, 1, 0) == 0xff010203, "...destroyed, its framebuffer still shows the memory");
+        if (cpx != MAP_FAILED)
+            munmap(cpx, csize);
+        drmModeDestroyDumbBuffer(fd, chandle);
+        ok = drmModeSetCrtc(fd, dcrtc, fbs[0], 0, 0, &dconn, 1, &dmode) == 0;
+        drmModeRmFB(fd, dfb);
+        if (px != MAP_FAILED)
+            munmap(px, size);
+        CHECK(ok && mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, (off_t)offset) == MAP_FAILED && errno == EINVAL,
+              "...and once that is gone too, nothing is at its offset");
+        usleep(100000); /* the app reads that frame's message before the next test closes its connection */
+        drmModeFreeConnector(dc);
+        drmModeFreeResources(res);
+    }
+
     printf("second producer takes over\n");
     accepts = g_accepts;
     int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);
@@ -1567,8 +1673,9 @@ int main(int argc, char **argv)
     errno = 0;
     CHECK(drmIoctl(rfd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 && errno == EACCES, "CREATE_DUMB: EACCES");
     errno = 0;
-    CHECK(drmIoctl(master, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 && errno == ENOSYS,
-          "...and ENOSYS on the primary node (no dumb buffers)");
+    CHECK(drmIoctl(master, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) == 0 &&
+              drmModeDestroyDumbBuffer(master, dumb.handle) == 0,
+          "...and made on the primary node");
     struct drm_gem_flink flink = {.handle = 1};
     errno = 0;
     CHECK(drmIoctl(rfd, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == EACCES, "GEM_FLINK: EACCES");

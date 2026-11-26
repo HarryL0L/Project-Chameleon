@@ -17,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <drm_fourcc.h>
@@ -104,6 +106,8 @@ static void host_release(AHardwareBuffer *b)
 {
     if (--b->refs > 0)
         return;
+    if (b->map)
+        munmap(b->map, (size_t)b->desc.width * b->desc.height * 4);
     close(b->nh->data[0]);
     free(b->nh);
     free(b);
@@ -160,8 +164,25 @@ static int host_send(const AHardwareBuffer *b, int sock)
 {
     return host_send_desc(&b->desc, b->nh->data[0], sock);
 }
+/* CPU access: the file's pages, mapped once for the buffer's life. */
+static int host_lock(AHardwareBuffer *b, uint64_t usage, int32_t fence, const void *rect, void **out)
+{
+    (void)usage, (void)fence, (void)rect;
+    size_t size = (size_t)b->desc.width * b->desc.height * 4;
+    if (!b->map && (b->map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, b->nh->data[0], 0)) == MAP_FAILED)
+        b->map = NULL;
+    *out = b->map;
+    return b->map ? 0 : -1;
+}
+static int host_unlock(AHardwareBuffer *b, int32_t *fence)
+{
+    (void)b, (void)fence;
+    return 0;
+}
 static int ahb_load(void)
 {
+    ahb.lock = host_lock;
+    ahb.unlock = host_unlock;
     ahb.send_handle = host_send;
     ahb.allocate = host_allocate;
     ahb.acquire = host_acquire;
@@ -429,6 +450,13 @@ static int own_refs(const struct cham_bo *bo)
 static void bo_free_locked(struct cham_bo *bo)
 {
     link_forget_bo_locked(bo);
+    if (bo->dumb) { /* plain memory: no AHardwareBuffer */
+        munmap(bo->dumb->mem, bo->dumb->size);
+        close(bo->dumb->fd);
+        free(bo->dumb);
+        free(bo);
+        return;
+    }
     if (bo->release_fence >= 0)
         close(bo->release_fence);
     close(bo->dmabuf_fd);
@@ -628,6 +656,35 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
         ahb.release(buffer);
     else
         bo->base_refs = own_refs(bo);
+    return bo;
+}
+
+struct cham_bo *bo_new_dumb(uint64_t size)
+{
+    static uint64_t next_offset = 0x100000000ull; /* as the kernel's: past any file offset */
+    struct cham_bo *bo = calloc(1, sizeof *bo);
+    struct cham_dumb *d = calloc(1, sizeof *d);
+    int fd = (int)syscall(__NR_memfd_create, "chameleon-dumb", 1u /* MFD_CLOEXEC */);
+    void *mem = fd >= 0 && ftruncate(fd, (off_t)size) == 0
+                    ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (!bo || !d || mem == MAP_FAILED) {
+        if (mem != MAP_FAILED)
+            munmap(mem, size);
+        if (fd >= 0)
+            close(fd);
+        free(d);
+        free(bo);
+        return NULL;
+    }
+    d->offset = __atomic_fetch_add(&next_offset, size, __ATOMIC_RELAXED);
+    d->fd = fd;
+    d->mem = mem;
+    d->size = size;
+    bo->dumb = d;
+    bo->refs = 1;
+    bo->slot = -1;
+    bo->release_fence = -1;
+    bo->dmabuf_fd = -1;
     return bo;
 }
 

@@ -51,6 +51,7 @@ extern "C" {
 #endif
 
 typedef struct AHardwareBuffer AHardwareBuffer;
+struct cham_dumb;
 
 /* An AHardwareBuffer standing in for a GEM buffer object. */
 struct cham_bo {
@@ -71,6 +72,7 @@ struct cham_bo {
     int base_refs;     /* cham_bo_create(): references to the dmabuf the buffer holds itself */
     int exported;      /* its dmabuf was handed out (gbm_bo_get_fd, PRIME) */
     int in_service;    /* chameleon-kernel has it (a GEM handle): its dmabuf keeps it alive there */
+    struct cham_dumb *dumb; /* chameleon-kernel: a dumb buffer's memory; such a bo has no AHardwareBuffer */
     struct cham_bo *next;
 };
 
