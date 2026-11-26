@@ -186,6 +186,304 @@ static int commit(int fd, uint32_t flags, uint32_t n, const uint32_t *objs, cons
     return ioctl(fd, DRM_IOCTL_MODE_ATOMIC, &a);
 }
 
+/* ---- the legacy calls (the kernel serves them through atomic helpers) ---- */
+
+static int set_crtc(int fd, uint32_t crtc, uint32_t fb, uint32_t x, uint32_t y, const uint32_t *conns, uint32_t n,
+                    const struct drm_mode_modeinfo *mode)
+{
+    struct drm_mode_crtc c = {.set_connectors_ptr = (uintptr_t)conns, .count_connectors = n, .crtc_id = crtc,
+                              .fb_id = fb, .x = x, .y = y, .mode_valid = mode != NULL};
+    if (mode)
+        c.mode = *mode;
+    return ioctl(fd, DRM_IOCTL_MODE_SETCRTC, &c);
+}
+
+static int page_flip(int fd, uint32_t crtc, uint32_t fb, uint32_t flags, uint64_t user_data)
+{
+    struct drm_mode_crtc_page_flip f = {.crtc_id = crtc, .fb_id = fb, .flags = flags, .user_data = user_data};
+    return ioctl(fd, DRM_IOCTL_MODE_PAGE_FLIP, &f);
+}
+
+/* Waits for the card's next event and prints what kind it is. */
+static void event(int fd, const char *what, uint64_t user_data)
+{
+    struct drm_event_vblank ev = {0};
+    struct pollfd pfd = {fd, POLLIN, 0};
+    int got = poll(&pfd, 1, 2000) == 1 && read(fd, &ev, sizeof ev) == (ssize_t)sizeof ev;
+    printf("%-60s %s, type %u, user data %s, crtc %s, sequence %s\n", what, got ? "arrives" : "MISSING",
+           ev.base.type, yes(ev.user_data == user_data), yes(ev.crtc_id == g_crtc), ev.sequence ? "set" : "0");
+}
+
+static void no_event(int fd, const char *what)
+{
+    struct pollfd pfd = {fd, POLLIN, 0};
+    printf("%-60s %s\n", what, yes(poll(&pfd, 1, 200) == 0));
+}
+
+static void crtc_state(int fd, const char *when, uint32_t fb)
+{
+    struct drm_mode_crtc c = {.crtc_id = g_crtc};
+    ioctl(fd, DRM_IOCTL_MODE_GETCRTC, &c);
+    uint64_t dpms = 9, active = 9, pfb = 9, pcrtc = 9, ccrtc = 9;
+    prop(fd, g_conn, DRM_MODE_OBJECT_CONNECTOR, "DPMS", &dpms);
+    prop(fd, g_conn, DRM_MODE_OBJECT_CONNECTOR, "CRTC_ID", &ccrtc);
+    prop(fd, g_crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE", &active);
+    prop(fd, g_plane, DRM_MODE_OBJECT_PLANE, "FB_ID", &pfb);
+    prop(fd, g_plane, DRM_MODE_OBJECT_PLANE, "CRTC_ID", &pcrtc);
+    struct drm_mode_get_encoder e = {.encoder_id = g_enc};
+    ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &e);
+    struct drm_mode_get_plane pl = {.plane_id = g_plane};
+    ioctl(fd, DRM_IOCTL_MODE_GETPLANE, &pl);
+    printf("  %s: mode_valid %u, crtc fb %s, x %u y %u, ACTIVE %llu, DPMS %llu, connector crtc %s, encoder crtc %s, "
+           "plane fb %s crtc %s, GETPLANE fb %s crtc %s\n",
+           when, c.mode_valid, !c.fb_id ? "0" : c.fb_id == fb ? "it" : "another", c.x, c.y,
+           (unsigned long long)active, (unsigned long long)dpms, ccrtc ? "set" : "0", e.crtc_id ? "set" : "0",
+           !pfb ? "0" : pfb == fb ? "it" : "another", pcrtc ? "set" : "0",
+           !pl.fb_id ? "0" : pl.fb_id == fb ? "it" : "another", pl.crtc_id ? "set" : "0");
+}
+
+static void legacy_checks(int fd)
+{
+    const uint32_t w = g_mode.hdisplay, h = g_mode.vdisplay;
+    uint32_t fb_a = framebuffer(fd), fb_b = framebuffer(fd);
+    uint32_t fb_small = sized_framebuffer(fd, w / 2, h / 2, DRM_FORMAT_XRGB8888);
+    uint32_t fb_big = sized_framebuffer(fd, w + 64, h + 64, DRM_FORMAT_XRGB8888);
+    uint32_t fb_argb = sized_framebuffer(fd, w, h, DRM_FORMAT_ARGB8888);
+    uint32_t unknown = 999999;
+    struct drm_mode_modeinfo bad_mode = g_mode;
+    bad_mode.hdisplay = 0;
+
+    printf("== SETCRTC\n");
+    crtc_state(fd, "before", fb_a);
+    result("mode, framebuffer, connector", set_crtc(fd, g_crtc, fb_a, 0, 0, &g_conn, 1, &g_mode));
+    crtc_state(fd, "after", fb_a);
+    result("unknown CRTC", set_crtc(fd, unknown, fb_a, 0, 0, &g_conn, 1, &g_mode));
+    result("unknown framebuffer", set_crtc(fd, g_crtc, unknown, 0, 0, &g_conn, 1, &g_mode));
+    result("unknown connector", set_crtc(fd, g_crtc, fb_a, 0, 0, &unknown, 1, &g_mode));
+    result("a mode without connectors", set_crtc(fd, g_crtc, fb_a, 0, 0, NULL, 0, &g_mode));
+    result("connectors without a mode", set_crtc(fd, g_crtc, fb_a, 0, 0, &g_conn, 1, NULL));
+    result("connector count 1, NULL pointer", set_crtc(fd, g_crtc, fb_a, 0, 0, NULL, 1, &g_mode));
+    result("a mode 0 wide", set_crtc(fd, g_crtc, fb_a, 0, 0, &g_conn, 1, &bad_mode));
+    result("a framebuffer smaller than the mode", set_crtc(fd, g_crtc, fb_small, 0, 0, &g_conn, 1, &g_mode));
+    result("x 1 with a framebuffer of the mode's size", set_crtc(fd, g_crtc, fb_a, 1, 0, &g_conn, 1, &g_mode));
+    result("x 64 y 64 into a bigger framebuffer", set_crtc(fd, g_crtc, fb_big, 64, 64, &g_conn, 1, &g_mode));
+    crtc_state(fd, "after", fb_big);
+    result("x 65 into it", set_crtc(fd, g_crtc, fb_big, 65, 0, &g_conn, 1, &g_mode));
+    result("framebuffer -1 (the current one)", set_crtc(fd, g_crtc, (uint32_t)-1, 0, 0, &g_conn, 1, &g_mode));
+    crtc_state(fd, "after", fb_big);
+    result("back to the first framebuffer", set_crtc(fd, g_crtc, fb_a, 0, 0, &g_conn, 1, &g_mode));
+
+    printf("== PAGE_FLIP\n");
+    result("unknown flag", page_flip(fd, g_crtc, fb_b, 0x100, 0));
+    result("ASYNC", page_flip(fd, g_crtc, fb_b, DRM_MODE_PAGE_FLIP_ASYNC, 0));
+    result("TARGET_ABSOLUTE", page_flip(fd, g_crtc, fb_b, DRM_MODE_PAGE_FLIP_TARGET_ABSOLUTE, 0));
+    result("unknown CRTC", page_flip(fd, unknown, fb_b, 0, 0));
+    result("unknown framebuffer", page_flip(fd, g_crtc, unknown, 0, 0));
+    result("a smaller framebuffer", page_flip(fd, g_crtc, fb_small, 0, 0));
+    result("a bigger framebuffer", page_flip(fd, g_crtc, fb_big, 0, 0));
+    result("...another at once (the first hasn't completed)", page_flip(fd, g_crtc, fb_a, 0, 0));
+    result("a framebuffer of another format", page_flip(fd, g_crtc, fb_argb, 0, 0));
+    usleep(200000);
+    crtc_state(fd, "after", fb_big);
+    result("back to the first framebuffer", page_flip(fd, g_crtc, fb_a, 0, 0));
+    usleep(200000);
+    result("with an event", page_flip(fd, g_crtc, fb_b, DRM_MODE_PAGE_FLIP_EVENT, 0x1234));
+    result("...again while it is pending", page_flip(fd, g_crtc, fb_a, DRM_MODE_PAGE_FLIP_EVENT, 1));
+    result("...and without an event", page_flip(fd, g_crtc, fb_a, 0, 0));
+    event(fd, "  its event", 0x1234);
+    crtc_state(fd, "after", fb_b);
+    result("without an event", page_flip(fd, g_crtc, fb_a, 0, 0));
+    no_event(fd, "  no event comes");
+    crtc_state(fd, "after", fb_a);
+    result("the framebuffer already shown, with an event", page_flip(fd, g_crtc, fb_a, DRM_MODE_PAGE_FLIP_EVENT, 7));
+    event(fd, "  its event", 7);
+    usleep(200000);
+
+    printf("== vblanks\n");
+    union drm_wait_vblank vb = {.request = {.type = _DRM_VBLANK_RELATIVE, .sequence = 0}};
+    result("WAIT_VBLANK relative 0", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    uint32_t seq0 = vb.reply.sequence;
+    printf("%-60s %s, %s\n", "  sequence / time set", yes(seq0 > 0), yes(vb.reply.tval_sec || vb.reply.tval_usec));
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE, .sequence = 2}};
+    result("WAIT_VBLANK relative 2", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    printf("%-60s %s\n", "  sequence is 2 or 3 later", yes(vb.reply.sequence - seq0 >= 2 && vb.reply.sequence - seq0 <= 3));
+    seq0 = vb.reply.sequence;
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_ABSOLUTE, .sequence = seq0 - 5}};
+    result("WAIT_VBLANK absolute, in the past", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    printf("%-60s %s\n", "  answered with the current sequence", yes(vb.reply.sequence - seq0 <= 1));
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE | _DRM_VBLANK_EVENT, .sequence = 1,
+                                             .signal = 0x77}};
+    result("WAIT_VBLANK with an event", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    event(fd, "  its event", 0x77);
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE | (1 << _DRM_VBLANK_HIGH_CRTC_SHIFT)}};
+    result("WAIT_VBLANK on a second CRTC", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE | _DRM_VBLANK_SECONDARY}};
+    result("WAIT_VBLANK SECONDARY", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE | 0x00800000}};
+    result("WAIT_VBLANK unknown flag", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    vb = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE | _DRM_VBLANK_SIGNAL}};
+    result("WAIT_VBLANK SIGNAL", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &vb));
+    struct drm_crtc_get_sequence gs = {.crtc_id = g_crtc};
+    result("CRTC_GET_SEQUENCE", ioctl(fd, DRM_IOCTL_CRTC_GET_SEQUENCE, &gs));
+    printf("%-60s %u, %s, %s\n", "  active / sequence set / time set", gs.active, yes(gs.sequence > 0),
+           yes(gs.sequence_ns > 0));
+    result("CRTC_GET_SEQUENCE unknown CRTC",
+           ioctl(fd, DRM_IOCTL_CRTC_GET_SEQUENCE, &(struct drm_crtc_get_sequence){.crtc_id = unknown}));
+    struct drm_crtc_queue_sequence qs = {.crtc_id = g_crtc, .flags = DRM_CRTC_SEQUENCE_RELATIVE, .sequence = 1,
+                                         .user_data = 0x99};
+    result("CRTC_QUEUE_SEQUENCE relative 1", ioctl(fd, DRM_IOCTL_CRTC_QUEUE_SEQUENCE, &qs));
+    printf("%-60s %s\n", "  sequence answered is later", yes(qs.sequence > gs.sequence));
+    struct drm_event_crtc_sequence se = {0};
+    struct pollfd pfd = {fd, POLLIN, 0};
+    int got = poll(&pfd, 1, 2000) == 1 && read(fd, &se, sizeof se) == (ssize_t)sizeof se;
+    printf("%-60s %s, type %u, user data %s, sequence %s\n", "  its event", got ? "arrives" : "MISSING", se.base.type,
+           yes(se.user_data == 0x99), yes(se.sequence == qs.sequence));
+    qs = (struct drm_crtc_queue_sequence){.crtc_id = g_crtc, .flags = 0x10, .sequence = 1};
+    result("CRTC_QUEUE_SEQUENCE unknown flag", ioctl(fd, DRM_IOCTL_CRTC_QUEUE_SEQUENCE, &qs));
+    qs = (struct drm_crtc_queue_sequence){.crtc_id = g_crtc, .flags = 0, .sequence = 1};
+    result("CRTC_QUEUE_SEQUENCE absolute, in the past", ioctl(fd, DRM_IOCTL_CRTC_QUEUE_SEQUENCE, &qs));
+    got = poll(&pfd, 1, 2000) == 1 && read(fd, &se, sizeof se) == (ssize_t)sizeof se;
+    printf("%-60s %s\n", "  its event", got ? "arrives" : "MISSING");
+
+    printf("== ADDFB, GETFB\n");
+    uint32_t pitch, handle = buffer(fd, &pitch);
+    struct drm_mode_fb_cmd a = {.width = w, .height = h, .pitch = pitch, .bpp = 32, .depth = 24, .handle = handle};
+    result("ADDFB depth 24, 32 bits a pixel", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &a));
+    struct drm_mode_fb_cmd2 g2 = {.fb_id = a.fb_id};
+    result("GETFB2 of it", ioctl(fd, DRM_IOCTL_MODE_GETFB2, &g2));
+    printf("%-60s %s, %ux%u %s, handle %s, pitch %s\n", "  format / size / handle / pitch",
+           g2.pixel_format == DRM_FORMAT_XRGB8888 ? "XRGB8888" : "another", g2.width == w ? 1 : 0, g2.height == h ? 1 : 0,
+           "as made", !g2.handles[0] ? "0" : g2.handles[0] == handle ? "the same" : "a new one",
+           yes(g2.pitches[0] == pitch));
+    struct drm_mode_fb_cmd a32 = {.width = w, .height = h, .pitch = pitch, .bpp = 32, .depth = 32, .handle = handle};
+    result("ADDFB depth 32, 32 bits a pixel", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &a32));
+    g2 = (struct drm_mode_fb_cmd2){.fb_id = a32.fb_id};
+    ioctl(fd, DRM_IOCTL_MODE_GETFB2, &g2);
+    printf("%-60s %s\n", "  its format", g2.pixel_format == DRM_FORMAT_ARGB8888 ? "ARGB8888" : "another");
+    struct drm_mode_fb_cmd a15 = {.width = w, .height = h, .pitch = pitch, .bpp = 16, .depth = 15, .handle = handle};
+    result("ADDFB depth 15", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &a15));
+    struct drm_mode_fb_cmd a7 = {.width = w, .height = h, .pitch = pitch, .bpp = 7, .depth = 7, .handle = handle};
+    result("ADDFB 7 bits a pixel", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &a7));
+    struct drm_mode_fb_cmd a0 = {.width = w, .height = h, .pitch = pitch, .bpp = 32, .depth = 24, .handle = 7777};
+    result("ADDFB unknown handle", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &a0));
+    struct drm_mode_fb_cmd g = {.fb_id = fb_a};
+    result("GETFB", ioctl(fd, DRM_IOCTL_MODE_GETFB, &g));
+    printf("%-60s %s, %u, %u, handle %s\n", "  size as made / bpp / depth / handle", yes(g.width == w && g.height == h),
+           g.bpp, g.depth, g.handle ? "set" : "0");
+    struct drm_mode_fb_cmd gg = {.fb_id = fb_a};
+    ioctl(fd, DRM_IOCTL_MODE_GETFB, &gg);
+    printf("%-60s %s\n", "  a second GETFB gives the same handle", yes(g.handle && g.handle == gg.handle));
+    result("GETFB unknown framebuffer", ioctl(fd, DRM_IOCTL_MODE_GETFB, &(struct drm_mode_fb_cmd){.fb_id = unknown}));
+    result("GETFB2 unknown framebuffer", ioctl(fd, DRM_IOCTL_MODE_GETFB2, &(struct drm_mode_fb_cmd2){.fb_id = unknown}));
+
+    printf("== SETPROPERTY, DPMS\n");
+    uint32_t p_dpms = prop(fd, g_conn, DRM_MODE_OBJECT_CONNECTOR, "DPMS", NULL);
+    uint32_t p_edid = prop(fd, g_conn, DRM_MODE_OBJECT_CONNECTOR, "EDID", NULL);
+    uint32_t p_active = prop(fd, g_crtc, DRM_MODE_OBJECT_CRTC, "ACTIVE", NULL);
+    uint32_t p_fb = prop(fd, g_plane, DRM_MODE_OBJECT_PLANE, "FB_ID", NULL);
+#define SETPROP(conn, p, v) \
+    ioctl(fd, DRM_IOCTL_MODE_SETPROPERTY, &(struct drm_mode_connector_set_property){.value = (v), .prop_id = (p), .connector_id = (conn)})
+#define OBJPROP(obj, type, p, v) \
+    ioctl(fd, DRM_IOCTL_MODE_OBJ_SETPROPERTY, &(struct drm_mode_obj_set_property){.value = (v), .prop_id = (p), .obj_id = (obj), .obj_type = (type)})
+    result("DPMS 7 (not a value of it)", SETPROP(g_conn, p_dpms, 7));
+    crtc_state(fd, "after", fb_a);
+    result("DPMS on", SETPROP(g_conn, p_dpms, DRM_MODE_DPMS_ON));
+    result("unknown connector", SETPROP(unknown, p_dpms, 0));
+    result("unknown property", SETPROP(g_conn, unknown, 0));
+    result("a property of another object", SETPROP(g_conn, p_active, 0));
+    result("EDID (immutable)", SETPROP(g_conn, p_edid, 0));
+    result("DPMS off", SETPROP(g_conn, p_dpms, DRM_MODE_DPMS_OFF));
+    crtc_state(fd, "after", fb_a);
+    result("a page flip with an event while off", page_flip(fd, g_crtc, fb_b, DRM_MODE_PAGE_FLIP_EVENT, 3));
+    result("a page flip without one while off", page_flip(fd, g_crtc, fb_b, 0, 0));
+    union drm_wait_vblank voff = {.request = {.type = _DRM_VBLANK_RELATIVE, .sequence = 0}};
+    result("WAIT_VBLANK relative 0 while off", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &voff));
+    voff = (union drm_wait_vblank){.request = {.type = _DRM_VBLANK_RELATIVE, .sequence = 1}};
+    result("WAIT_VBLANK relative 1 while off", ioctl(fd, DRM_IOCTL_WAIT_VBLANK, &voff));
+    gs = (struct drm_crtc_get_sequence){.crtc_id = g_crtc};
+    result("CRTC_GET_SEQUENCE while off", ioctl(fd, DRM_IOCTL_CRTC_GET_SEQUENCE, &gs));
+    printf("%-60s %u\n", "  active", gs.active);
+    result("DPMS standby", SETPROP(g_conn, p_dpms, DRM_MODE_DPMS_STANDBY));
+    crtc_state(fd, "after", fb_a);
+    result("DPMS on", SETPROP(g_conn, p_dpms, DRM_MODE_DPMS_ON));
+    crtc_state(fd, "after", fb_a);
+    result("OBJ_SETPROPERTY DPMS off", OBJPROP(g_conn, DRM_MODE_OBJECT_CONNECTOR, p_dpms, DRM_MODE_DPMS_OFF));
+    result("OBJ_SETPROPERTY DPMS on", OBJPROP(g_conn, DRM_MODE_OBJECT_CONNECTOR, p_dpms, DRM_MODE_DPMS_ON));
+    result("OBJ_SETPROPERTY wrong object type", OBJPROP(g_conn, DRM_MODE_OBJECT_CRTC, p_dpms, 0));
+    result("OBJ_SETPROPERTY the plane's framebuffer", OBJPROP(g_plane, DRM_MODE_OBJECT_PLANE, p_fb, fb_b));
+    crtc_state(fd, "after", fb_b);
+    result("OBJ_SETPROPERTY ACTIVE 0", OBJPROP(g_crtc, DRM_MODE_OBJECT_CRTC, p_active, 0));
+    crtc_state(fd, "after", fb_b);
+    result("OBJ_SETPROPERTY ACTIVE 1", OBJPROP(g_crtc, DRM_MODE_OBJECT_CRTC, p_active, 1));
+    crtc_state(fd, "after", fb_b);
+
+    printf("== SETPLANE\n");
+#define SETPLANE(plane, crtc, fb, x, y, cw, ch, sx, sy, sw, sh)                                              \
+    ioctl(fd, DRM_IOCTL_MODE_SETPLANE,                                                                       \
+          &(struct drm_mode_set_plane){.plane_id = (plane), .crtc_id = (crtc), .fb_id = (fb), .crtc_x = (x),  \
+                                       .crtc_y = (y), .crtc_w = (cw), .crtc_h = (ch), .src_x = (sx) << 16,    \
+                                       .src_y = (sy) << 16, .src_w = (uint32_t)(sw) << 16,                    \
+                                       .src_h = (uint32_t)(sh) << 16})
+    result("the primary plane, another framebuffer", SETPLANE(g_plane, g_crtc, fb_a, 0, 0, w, h, 0, 0, w, h));
+    crtc_state(fd, "after", fb_a);
+    result("unknown plane", SETPLANE(unknown, g_crtc, fb_a, 0, 0, w, h, 0, 0, w, h));
+    result("unknown CRTC", SETPLANE(g_plane, unknown, fb_a, 0, 0, w, h, 0, 0, w, h));
+    result("unknown framebuffer", SETPLANE(g_plane, g_crtc, unknown, 0, 0, w, h, 0, 0, w, h));
+    result("a source past the framebuffer", SETPLANE(g_plane, g_crtc, fb_a, 0, 0, w, h, 1, 0, w, h));
+    result("a size past INT_MAX", SETPLANE(g_plane, g_crtc, fb_a, 0, 0, 0x80000000u, h, 0, 0, w, h));
+    result("an x and width past INT_MAX", SETPLANE(g_plane, g_crtc, fb_a, 0x7fffff00, 0, w, h, 0, 0, w, h));
+    result("the plane off (framebuffer 0)", SETPLANE(g_plane, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0));
+    crtc_state(fd, "after", fb_a);
+    result("a page flip with the plane off", page_flip(fd, g_crtc, fb_a, 0, 0));
+    result("the plane on again", SETPLANE(g_plane, g_crtc, fb_a, 0, 0, w, h, 0, 0, w, h));
+
+    printf("== the legacy cursor\n");
+    uint32_t cpitch, chandle = sized_buffer(fd, 64, 64, DRM_FORMAT_ARGB8888, &cpitch);
+#define CURSOR(f, x_, y_, w_, h_, hnd) \
+    ioctl(fd, DRM_IOCTL_MODE_CURSOR, &(struct drm_mode_cursor){.flags = (f), .crtc_id = g_crtc, .x = (x_), .y = (y_), .width = (w_), .height = (h_), .handle = (hnd)})
+    result("no flags", CURSOR(0, 0, 0, 0, 0, 0));
+    result("unknown flag", CURSOR(4, 0, 0, 0, 0, 0));
+    result("unknown CRTC", ioctl(fd, DRM_IOCTL_MODE_CURSOR,
+                                 &(struct drm_mode_cursor){.flags = DRM_MODE_CURSOR_MOVE, .crtc_id = unknown}));
+    result("an image, unknown handle", CURSOR(DRM_MODE_CURSOR_BO, 0, 0, 64, 64, 7777));
+    result("an image 64x64", CURSOR(DRM_MODE_CURSOR_BO, 0, 0, 64, 64, chandle));
+    result("moved to 100,200", CURSOR(DRM_MODE_CURSOR_MOVE, 100, 200, 0, 0, 0));
+    result("moved off the top left", CURSOR(DRM_MODE_CURSOR_MOVE, -30, -30, 0, 0, 0));
+    result("an image and a move at once", CURSOR(DRM_MODE_CURSOR_BO | DRM_MODE_CURSOR_MOVE, 10, 10, 64, 64, chandle));
+    result("an image of a size the buffer doesn't hold", CURSOR(DRM_MODE_CURSOR_BO, 0, 0, 128, 128, chandle));
+    result("an image wider than the cursor limit", CURSOR(DRM_MODE_CURSOR_BO, 0, 0, 4096, 64, chandle));
+    result("CURSOR2 with a hot spot",
+           ioctl(fd, DRM_IOCTL_MODE_CURSOR2,
+                 &(struct drm_mode_cursor2){.flags = DRM_MODE_CURSOR_BO, .crtc_id = g_crtc, .width = 64, .height = 64,
+                                            .handle = chandle, .hot_x = 3, .hot_y = 4}));
+    result("the image off (handle 0)", CURSOR(DRM_MODE_CURSOR_BO, 0, 0, 0, 0, 0));
+    result("moved while off", CURSOR(DRM_MODE_CURSOR_MOVE, 50, 50, 0, 0, 0));
+
+    printf("== DIRTYFB\n");
+    struct drm_clip_rect clip = {0, 0, 16, 16};
+    result("the shown framebuffer, no rectangles", ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &(struct drm_mode_fb_dirty_cmd){.fb_id = fb_a}));
+    result("one rectangle",
+           ioctl(fd, DRM_IOCTL_MODE_DIRTYFB,
+                 &(struct drm_mode_fb_dirty_cmd){.fb_id = fb_a, .num_clips = 1, .clips_ptr = (uintptr_t)&clip}));
+    result("a framebuffer not shown", ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &(struct drm_mode_fb_dirty_cmd){.fb_id = fb_b}));
+    result("unknown framebuffer", ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &(struct drm_mode_fb_dirty_cmd){.fb_id = unknown}));
+    result("rectangles counted, NULL pointer",
+           ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &(struct drm_mode_fb_dirty_cmd){.fb_id = fb_a, .num_clips = 1}));
+    result("unknown flag", ioctl(fd, DRM_IOCTL_MODE_DIRTYFB, &(struct drm_mode_fb_dirty_cmd){.fb_id = fb_a, .flags = 8}));
+
+    printf("== the CRTC off\n");
+    result("SETCRTC without a mode", set_crtc(fd, g_crtc, 0, 0, 0, NULL, 0, NULL));
+    crtc_state(fd, "after", fb_a);
+    result("a page flip", page_flip(fd, g_crtc, fb_a, 0, 0));
+    result("SETCRTC framebuffer -1", set_crtc(fd, g_crtc, (uint32_t)-1, 0, 0, &g_conn, 1, &g_mode));
+    result("DPMS on", SETPROP(g_conn, p_dpms, DRM_MODE_DPMS_ON));
+    crtc_state(fd, "after", fb_a);
+    result("on again", set_crtc(fd, g_crtc, fb_a, 0, 0, &g_conn, 1, &g_mode));
+    crtc_state(fd, "after", fb_a);
+    result("RMFB of the shown framebuffer", ioctl(fd, DRM_IOCTL_MODE_RMFB, &fb_a));
+    crtc_state(fd, "after", fb_a);
+}
+
 static void find_objects(int fd)
 {
     uint32_t crtcs[4], conns[4], encs[4], planes[8];
@@ -429,5 +727,6 @@ int main(void)
     struct drm_mode_get_encoder e = {.encoder_id = g_enc};
     ioctl(fd, DRM_IOCTL_MODE_GETENCODER, &e);
     printf("%-60s %s\n", "  encoder crtc_id (unbound)", e.crtc_id ? "set" : "0");
+    legacy_checks(fd);
     return 0;
 }

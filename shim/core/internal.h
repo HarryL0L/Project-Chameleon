@@ -83,8 +83,18 @@ void link_screen_off_locked(int off);
 int link_flip_pending_locked(void);
 /* The pending flip's event would go to a file being closed: drop it. */
 void link_cancel_flip_locked(int event_fd);
+/* event_fd -1: a flip nobody is told of (a legacy flip without an event). */
 void link_queue_flip_locked(uint64_t user_data, uint32_t crtc_id, int event_fd, uint64_t frame, int presented,
                             uint32_t refresh_mhz);
+/* The CRTC's vblank counter: the last vblank's number and time (of a mode
+ * of refresh_mhz, while nothing has flipped yet). */
+void link_vblank_locked(uint32_t refresh_mhz, uint32_t *seq, uint64_t *ns);
+/* An event (DRM_EVENT_VBLANK or DRM_EVENT_CRTC_SEQUENCE) for event_fd at
+ * vblank `seq`, at once if that has been; -ENOMEM if too many wait. */
+int link_vblank_event_locked(uint32_t seq, uint32_t type, uint64_t user_data, uint32_t crtc_id, int event_fd);
+/* Sleeps (without g_lock) until vblank `seq` is due or something happens;
+ * -EBUSY once give_up_ns has passed. */
+int link_vblank_sleep_locked(uint32_t seq, uint64_t give_up_ns);
 /* CHAM_CLIPBOARD_DATA/REQUEST with a duplicate of fd; dropped without a presenter. */
 void link_clipboard(uint32_t type, uint64_t a, int fd);
 

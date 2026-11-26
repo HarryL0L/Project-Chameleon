@@ -81,7 +81,19 @@ static uint64_t g_latch_ns;         /* last latch: the vblank grid's phase */
 static uint64_t g_latched_frame;    /* newest frame Android has latched (or skipped) */
 static uint64_t g_copied_frame;     /* newest frame the app has copied (FRAME_QUEUED) */
 static uint64_t g_presented_frame, g_presented_prev; /* newest frames handed to the app */
-static uint32_t g_sequence;
+/* The CRTC's vblank counter: one a refresh period, also while nothing flips
+ * (g_vbl_ns: the last one counted). A completed flip is a vblank. */
+static uint32_t g_vbl_seq;
+static uint64_t g_vbl_ns, g_vbl_period;
+#define VBL_EVENTS 16
+static struct vbl_event {
+    int active;
+    uint32_t type;                  /* DRM_EVENT_VBLANK or DRM_EVENT_CRTC_SEQUENCE */
+    uint32_t seq;                   /* the vblank it waits for */
+    uint64_t user_data;
+    uint32_t crtc_id;
+    int fd;
+} g_vbl_events[VBL_EVENTS];
 static uint64_t g_last_flip_ns;     /* the last page-flip event's time */
 
 /* Activity counters, logged every 5 s while something happens. */
@@ -333,19 +345,132 @@ static uint64_t tick_locked(uint64_t t, int nearest)
     return tick;
 }
 
+/* ---- vblanks ---- */
+
+static uint64_t vbl_period(void)
+{
+    return g_mode_period ? g_mode_period : g_vbl_period ? g_vbl_period : 16666667;
+}
+
+/* Counts the vblanks up to `now`. */
+static void vbl_advance_locked(uint64_t now)
+{
+    uint64_t p = vbl_period();
+    if (!g_vbl_ns) {
+        g_vbl_ns = now;
+        g_vbl_seq = 1;
+    } else if (now >= g_vbl_ns + p) {
+        uint64_t n = (now - g_vbl_ns) / p;
+        g_vbl_seq += (uint32_t)n;
+        g_vbl_ns += n * p;
+    }
+}
+
+/* A flip completed at `ts`: that was a vblank, and the counter follows it. */
+static void vbl_flip_locked(uint64_t ts)
+{
+    vbl_advance_locked(ts);
+    if (ts > g_vbl_ns) {
+        if (ts - g_vbl_ns > vbl_period() / 2)
+            g_vbl_seq++;
+        g_vbl_ns = ts;
+    }
+}
+
+static void vbl_send(const struct vbl_event *e, uint64_t ns)
+{
+    ssize_t n, want;
+    if (e->type == DRM_EVENT_VBLANK) {
+        struct drm_event_vblank ev = {.base = {.type = DRM_EVENT_VBLANK, .length = sizeof ev},
+                                      .user_data = e->user_data,
+                                      .tv_sec = (uint32_t)(ns / 1000000000ull),
+                                      .tv_usec = (uint32_t)(ns % 1000000000ull / 1000),
+                                      .sequence = e->seq,
+                                      .crtc_id = e->crtc_id};
+        want = sizeof ev, n = write(e->fd, &ev, sizeof ev);
+    } else {
+        struct drm_event_crtc_sequence ev = {.base = {.type = DRM_EVENT_CRTC_SEQUENCE, .length = sizeof ev},
+                                             .user_data = e->user_data,
+                                             .time_ns = (int64_t)ns,
+                                             .sequence = e->seq};
+        want = sizeof ev, n = write(e->fd, &ev, sizeof ev);
+    }
+    if (n != want)
+        cham_log("cannot deliver a vblank event: %s", strerror(errno));
+}
+
+/* Sends the events whose vblank has come (each with that vblank's number and
+ * time); returns when the next one is due, 0 if none waits. */
+static uint64_t vbl_fire_locked(uint64_t now)
+{
+    uint64_t next = 0, p = vbl_period();
+    vbl_advance_locked(now);
+    for (int i = 0; i < VBL_EVENTS; i++) {
+        struct vbl_event *e = &g_vbl_events[i];
+        if (!e->active)
+            continue;
+        int32_t behind = (int32_t)(g_vbl_seq - e->seq);
+        if (behind >= 0) {
+            vbl_send(e, g_vbl_ns - (uint64_t)behind * p);
+            e->active = 0;
+        } else {
+            uint64_t due = g_vbl_ns + (uint64_t)-behind * p;
+            if (!next || due < next)
+                next = due;
+        }
+    }
+    return next;
+}
+
+void link_vblank_locked(uint32_t refresh_mhz, uint32_t *seq, uint64_t *ns)
+{
+    g_vbl_period = 1000000000000ull / (refresh_mhz ? refresh_mhz : 60000);
+    vbl_advance_locked(now_ns());
+    *seq = g_vbl_seq;
+    *ns = g_vbl_ns;
+}
+
+int link_vblank_event_locked(uint32_t seq, uint32_t type, uint64_t user_data, uint32_t crtc_id, int event_fd)
+{
+    for (int i = 0; i < VBL_EVENTS; i++) {
+        if (!g_vbl_events[i].active) {
+            g_vbl_events[i] = (struct vbl_event){1, type, seq, user_data, crtc_id, event_fd};
+            vbl_fire_locked(now_ns()); /* at once, if that vblank has been */
+            pthread_cond_broadcast(&g_cond); /* the vblank thread: something to wait for */
+            return 0;
+        }
+    }
+    return -ENOMEM;
+}
+
+int link_vblank_sleep_locked(uint32_t seq, uint64_t give_up_ns)
+{
+    vbl_advance_locked(now_ns());
+    int32_t ahead = (int32_t)(seq - g_vbl_seq);
+    if (ahead <= 0)
+        return 0;
+    uint64_t due = g_vbl_ns + (uint64_t)ahead * vbl_period();
+    struct timespec ts;
+    timespec_at(&ts, due < give_up_ns ? due : give_up_ns);
+    pthread_cond_timedwait(&g_cond, &g_lock, &ts);
+    return now_ns() >= give_up_ns ? -EBUSY : 0;
+}
+
 /* ---- page flips ---- */
 
 static void emit_flip_locked(uint64_t ts_ns)
 {
+    vbl_flip_locked(ts_ns);
     struct drm_event_vblank ev = {
         .base = {.type = DRM_EVENT_FLIP_COMPLETE, .length = sizeof ev},
         .user_data = g_flip.user_data,
         .tv_sec = (uint32_t)(ts_ns / 1000000000ull),
         .tv_usec = (uint32_t)(ts_ns % 1000000000ull / 1000),
-        .sequence = ++g_sequence,
+        .sequence = g_vbl_seq,
         .crtc_id = g_flip.crtc_id,
     };
-    if (write(g_flip.event_fd, &ev, sizeof ev) != (ssize_t)sizeof ev)
+    /* A legacy flip without an event (no file to tell) completes the same. */
+    if (g_flip.event_fd >= 0 && write(g_flip.event_fd, &ev, sizeof ev) != (ssize_t)sizeof ev)
         cham_log("cannot deliver page-flip event: %s", strerror(errno));
     g_flip.active = 0;
     g_flip.on_tick = g_flip.held = 0;
@@ -399,6 +524,9 @@ void link_cancel_flip_locked(int event_fd)
         g_flip.on_tick = g_flip.held = 0;
         pthread_cond_broadcast(&g_cond);
     }
+    for (int i = 0; i < VBL_EVENTS; i++)
+        if (g_vbl_events[i].fd == event_fd)
+            g_vbl_events[i].active = 0;
 }
 
 /* Completes the pending flip on the next vblank tick once the previous
@@ -468,13 +596,13 @@ static void *vblank_main(void *arg)
     pthread_mutex_lock(&g_lock);
     for (;;) {
         stats_maybe_log_locked();
+        uint64_t now = now_ns(), vbl = vbl_fire_locked(now);
         if (!g_flip.active) {
             struct timespec idle;
-            timespec_at(&idle, now_ns() + 1000000000ull);
+            timespec_at(&idle, vbl ? vbl : now + 1000000000ull);
             pthread_cond_timedwait(&g_cond, &g_lock, &idle);
             continue;
         }
-        uint64_t now = now_ns();
         if (now >= g_flip.deadline_ns) {
             if (g_flip.on_tick) {
                 complete_flip_locked(g_flip.deadline_ns);
@@ -487,7 +615,7 @@ static void *vblank_main(void *arg)
             continue;
         }
         struct timespec ts;
-        timespec_at(&ts, g_flip.deadline_ns);
+        timespec_at(&ts, vbl && vbl < g_flip.deadline_ns ? vbl : g_flip.deadline_ns);
         pthread_cond_timedwait(&g_cond, &g_lock, &ts);
     }
     return NULL;

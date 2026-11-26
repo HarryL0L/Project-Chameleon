@@ -1311,6 +1311,105 @@ int main(int argc, char **argv)
 #undef RECT_IS
     }
 
+    printf("the legacy calls\n");
+    /* The legacy calls, as a program that sets a mode and flips the old way
+     * (their answers are compared with the kernel's by kms_conformance.c;
+     * here: what the app gets to show). */
+    {
+        drmModeRes *res = drmModeGetResources(fd);
+        drmModeConnector *lc = res ? drmModeGetConnector(fd, res->connectors[0]) : NULL;
+        uint32_t lcrtc = res ? res->crtcs[0] : 0, lconn = res ? res->connectors[0] : 0;
+        drmModeModeInfo lmode = lc ? lc->modes[0] : (drmModeModeInfo){0};
+        struct gbm_bo *lb[2] = {0}, *lcur = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR);
+        uint32_t lfb[2] = {0};
+        int ok = lc != NULL;
+        for (int i = 0; i < 2; i++) {
+            lb[i] = gbm_bo_create(gbm, lmode.hdisplay, lmode.vdisplay, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+            ok = ok && lb[i] && drmModeAddFB(fd, lmode.hdisplay, lmode.vdisplay, 24, 32, gbm_bo_get_stride(lb[i]),
+                                              gbm_bo_get_handle(lb[i]).u32, &lfb[i]) == 0;
+        }
+        int presents = g_presents;
+        ok = ok && drmModeSetCrtc(fd, lcrtc, lfb[0], 0, 0, &lconn, 1, &lmode) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 1, "legacy: SETCRTC shows its framebuffer (%d presents)",
+              g_presents - presents);
+        presents = g_presents;
+        ok = drmModePageFlip(fd, lcrtc, lfb[1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
+        int busy = drmModePageFlip(fd, lcrtc, lfb[0], DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0 && errno == EBUSY;
+        ok = ok && wait_flip(fd, 1000);
+        CHECK(ok && busy && g_presents == presents + 1, "...PAGE_FLIP shows the next, one at a time, and its event comes");
+        presents = g_presents;
+        ok = drmModePageFlip(fd, lcrtc, lfb[0], 0, NULL) == 0;
+        busy = drmModePageFlip(fd, lcrtc, lfb[1], 0, NULL) != 0 && errno == EBUSY;
+        usleep(100000);
+        struct pollfd lp = {fd, POLLIN, 0};
+        ok = ok && poll(&lp, 1, 0) == 0 && drmModePageFlip(fd, lcrtc, lfb[1], 0, NULL) == 0;
+        usleep(100000);
+        CHECK(ok && busy && g_presents == presents + 2,
+              "...a flip without an event completes too: busy until then, nothing to read (%d presents)",
+              g_presents - presents);
+
+        /* The vblank counter runs at the mode's rate. */
+        drmVBlank vb = {.request = {.type = DRM_VBLANK_RELATIVE, .sequence = 1}};
+        ok = drmWaitVBlank(fd, &vb) == 0;
+        uint32_t seq1 = vb.reply.sequence;
+        uint64_t t1 = now_ns();
+        vb = (drmVBlank){.request = {.type = DRM_VBLANK_RELATIVE, .sequence = 6}};
+        ok = ok && drmWaitVBlank(fd, &vb) == 0;
+        double took = ms_since(t1), period = 1000.0 / lmode.vrefresh;
+        CHECK(ok && vb.reply.sequence - seq1 >= 6 && vb.reply.sequence - seq1 <= 7 && took > 4.5 * period &&
+                  took < 9 * period,
+              "...WAIT_VBLANK for 6 vblanks takes 6 refresh periods (%.1f ms at %u Hz, sequence +%u)", took,
+              lmode.vrefresh, vb.reply.sequence - seq1);
+
+        /* The cursor, the old way: an image, moves, off. */
+        int msgs = g_cursor_msgs;
+        presents = g_presents;
+        ok = lcur && drmModeSetCursor(fd, lcrtc, gbm_bo_get_handle(lcur).u32, 64, 64) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE &&
+                  g_presents == presents + 1,
+              "...SetCursor: the app gets the image");
+        msgs = g_cursor_msgs;
+        ok = drmModeMoveCursor(fd, lcrtc, 30, 40) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && !(g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == 30 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 40,
+              "...MoveCursor: the same image at 30,40");
+        ok = drmModeSetCursor(fd, lcrtc, 0, 0, 0) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "...SetCursor without an image: hidden");
+
+        /* DPMS: the screen off and on again with what it showed. */
+        uint32_t p_dpms = prop_id(fd, lconn, DRM_MODE_OBJECT_CONNECTOR, "DPMS", NULL);
+        presents = g_presents;
+        ok = p_dpms && drmModeConnectorSetProperty(fd, lconn, p_dpms, DRM_MODE_DPMS_OFF) == 0;
+        int refused = drmModePageFlip(fd, lcrtc, lfb[0], 0, NULL) != 0 && errno == EINVAL;
+        ok = ok && drmModeConnectorSetProperty(fd, lconn, p_dpms, DRM_MODE_DPMS_ON) == 0;
+        usleep(100000);
+        CHECK(ok && refused && g_presents == presents + 1,
+              "...DPMS off and on: no flips while off, the frame shown again after (%d presents)",
+              g_presents - presents);
+
+        ok = drmModeSetCrtc(fd, lcrtc, 0, 0, 0, NULL, 0, NULL) == 0;
+        drmModeCrtc *off = drmModeGetCrtc(fd, lcrtc);
+        CHECK(ok && off && !off->mode_valid && !off->buffer_id, "...SETCRTC without a mode: the CRTC off");
+        drmModeFreeCrtc(off);
+        /* on again, for what follows */
+        ok = drmModeSetCrtc(fd, lcrtc, fbs[0], 0, 0, &lconn, 1, &lmode) == 0;
+        CHECK(ok, "...and on again");
+        usleep(100000); /* the app reads that frame's message before the next test closes its connection */
+        for (int i = 0; i < 2; i++) {
+            drmModeRmFB(fd, lfb[i]);
+            if (lb[i])
+                gbm_bo_destroy(lb[i]);
+        }
+        if (lcur)
+            gbm_bo_destroy(lcur);
+        drmModeFreeConnector(lc);
+        drmModeFreeResources(res);
+    }
+
     printf("second producer takes over\n");
     accepts = g_accepts;
     int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);

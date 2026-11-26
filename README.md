@@ -147,6 +147,11 @@ session running.
 - Atomic commits behave as the kernel's do: `TEST_ONLY`, `EBUSY` while a
   flip is pending, fences in and events out. Each open file has its own DRM
   state, released when its last copy closes, even in a process that died.
+- The older calls work too, through the same path as the kernel serves
+  them: `SETCRTC`, `PAGE_FLIP`, the legacy cursor, `SETPLANE`, DPMS and the
+  other properties by `SETPROPERTY`, `ADDFB`/`GETFB`, and waiting for or
+  counting vblanks. A program that sets a mode and flips pages the old way
+  runs as its own display master.
 - **Screen size:** rotating the phone, or the keyboard shrinking the
   desktop, changes the connector's mode and sends a hotplug event, exactly
   like a monitor whose modes changed. The compositor re-reads the connector
