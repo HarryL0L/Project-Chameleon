@@ -59,6 +59,7 @@ static struct {
 
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cham_bo *g_bos;
+static struct cham_bo *g_dumbs; /* chameleon-kernel: the dumb buffers, found by the file of their memory */
 
 void cham_log(const char *fmt, ...)
 {
@@ -391,9 +392,10 @@ static int fds_of(dev_t dev, ino_t ino)
     return n;
 }
 
-#ifdef CHAM_HOST_TEST
-/* The test build's buffers are memfds, which have no count in fdinfo: the
- * fds of every process stand in for the kernel's count of a dmabuf. */
+/* The fds of the file (dev, ino) in every process that can be looked into.
+ * A memfd has no count in fdinfo, so this stands in for the kernel's count
+ * of a dmabuf: for the test build's buffers, and for a dumb buffer's
+ * memory that PRIME handed out. */
 static int fds_everywhere(dev_t dev, ino_t ino)
 {
     DIR *procs = opendir("/proc");
@@ -418,7 +420,6 @@ static int fds_everywhere(dev_t dev, ino_t ino)
         closedir(procs);
     return n;
 }
-#endif
 
 static int dmabuf_refs(const struct cham_bo *bo)
 {
@@ -451,6 +452,12 @@ static void bo_free_locked(struct cham_bo *bo)
 {
     link_forget_bo_locked(bo);
     if (bo->dumb) { /* plain memory: no AHardwareBuffer */
+        for (struct cham_bo **p = &g_dumbs; *p; p = &(*p)->next) {
+            if (*p == bo) {
+                *p = bo->next;
+                break;
+            }
+        }
         munmap(bo->dumb->mem, bo->dumb->size);
         close(bo->dumb->fd);
         free(bo->dumb);
@@ -671,13 +678,25 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     return bo;
 }
 
+/* Frees the handed-out dumb buffers whose file nobody else has open now. */
+static void reap_dumbs_locked(void)
+{
+    for (struct cham_bo *bo = g_dumbs, *next; bo; bo = next) {
+        next = bo->next;
+        if (bo->refs == 0 && fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino) <= 1)
+            bo_free_locked(bo);
+    }
+}
+
 struct cham_bo *bo_new_dumb(uint64_t size)
 {
+    reap_dumbs_locked();
     static uint64_t next_offset = 0x100000000ull; /* as the kernel's: past any file offset */
     struct cham_bo *bo = calloc(1, sizeof *bo);
     struct cham_dumb *d = calloc(1, sizeof *d);
     int fd = (int)syscall(__NR_memfd_create, "chameleon-dumb", 1u /* MFD_CLOEXEC */);
-    void *mem = fd >= 0 && ftruncate(fd, (off_t)size) == 0
+    struct stat st;
+    void *mem = fd >= 0 && ftruncate(fd, (off_t)size) == 0 && real_fstat(fd, &st) == 0
                     ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
     if (!bo || !d || mem == MAP_FAILED) {
         if (mem != MAP_FAILED)
@@ -698,7 +717,29 @@ struct cham_bo *bo_new_dumb(uint64_t size)
     bo->release_fence = -1;
     bo->fence[0] = bo->fence[1] = -1;
     bo->dmabuf_fd = -1;
+    bo->dmabuf_dev = st.st_dev; /* what PRIME hands out of it is this file */
+    bo->dmabuf_ino = st.st_ino;
+    bo->next = g_dumbs;
+    g_dumbs = bo;
     return bo;
+}
+
+struct cham_bo *bo_dumb_for_fd(int fd)
+{
+    struct stat st;
+    struct cham_bo *found = NULL;
+    if (real_fstat(fd, &st) != 0)
+        return NULL;
+    pthread_mutex_lock(&g_lock);
+    reap_dumbs_locked();
+    for (struct cham_bo *bo = g_dumbs; bo && !found; bo = bo->next) {
+        if (bo->dmabuf_dev == st.st_dev && bo->dmabuf_ino == st.st_ino) {
+            bo_ref_locked(bo);
+            found = bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return found;
 }
 
 void bo_ref_locked(struct cham_bo *bo)
@@ -713,6 +754,11 @@ void bo_unref_locked(struct cham_bo *bo)
     /* No handle, framebuffer or plane shows it any more: the app lets go of
      * it, as a display engine would, so its reference doesn't keep it. */
     link_forget_bo_locked(bo);
+    /* A dumb buffer PRIME handed out lives while its file is open anywhere
+     * besides here, as the kernel's object does: Mesa's software driver
+     * exports one, closes the handle and imports the file again later. */
+    if (bo->dumb && bo->exported && fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino) > 1)
+        return; /* freed by reap_dumbs_locked() */
     if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && !bo->in_service && bo->base_refs > 0 &&
         dmabuf_refs(bo) > bo->base_refs)
         return; /* its dmabuf is still held: kept, freed by reap_locked() */

@@ -256,7 +256,8 @@ libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
   stub presenter, simulated vblank without one; and the way older programs
   do: `SETCRTC`, `PAGE_FLIP` with and without events, the legacy cursor,
   `WAIT_VBLANK`, DPMS; dumb buffers drawn into through
-  `mmap` of the card, shown by `SETCRTC`, a flip and `DIRTYFB`; the
+  `mmap` of the card, shown by `SETCRTC`, a flip and `DIRTYFB`, exported
+  and imported by PRIME and kept while the exported file is open; the
   buffers' fences through `poll()` and the two sync-file calls, from another
   process too;
 - `chameleon-init` adopting and reaping a program that detached, signals and

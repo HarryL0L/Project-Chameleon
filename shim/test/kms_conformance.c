@@ -561,6 +561,48 @@ static void dumb_checks(int fd)
         munmap(o, d.size);
     struct drm_mode_map_dumb om = {.handle = d.handle};
     result("MAP_DUMB of the handle in that file", ioctl(other, DRM_IOCTL_MODE_MAP_DUMB, &om));
+
+    printf("== a dumb buffer through PRIME\n");
+    struct drm_prime_handle ex = {.handle = d.handle, .flags = DRM_CLOEXEC};
+    result("PRIME_HANDLE_TO_FD of a dumb buffer", ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &ex));
+    printf("%-60s %s\n", "  as long as the buffer", yes(lseek(ex.fd, 0, SEEK_END) == (off_t)d.size));
+    uint32_t *e = mmap(NULL, d.size, PROT_READ, MAP_SHARED, ex.fd, 0);
+    result("a mapping of what it gave", e == MAP_FAILED ? -1 : 0);
+    if (e != MAP_FAILED) {
+        printf("%-60s %s\n", "  shows the buffer's memory", yes(e[0] == 0x11223344 && e[64 * 64 - 1] == 0x55667788));
+        munmap(e, d.size);
+    }
+    struct pollfd pe = {.fd = ex.fd, .events = POLLIN};
+    printf("%-60s %d\n", "  poll for reading: ready at once", poll(&pe, 1, 0));
+    struct drm_prime_handle im = {.fd = ex.fd};
+    result("PRIME_FD_TO_HANDLE of it", ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &im));
+    printf("%-60s %s\n", "  the same handle", yes(im.handle == d.handle));
+    struct drm_prime_handle oi = {.fd = ex.fd};
+    result("PRIME_FD_TO_HANDLE in another open file", ioctl(other, DRM_IOCTL_PRIME_FD_TO_HANDLE, &oi));
+    om = (struct drm_mode_map_dumb){.handle = oi.handle};
+    result("MAP_DUMB of the handle it got", ioctl(other, DRM_IOCTL_MODE_MAP_DUMB, &om));
+    uint32_t *oe = mmap(NULL, d.size, PROT_READ, MAP_SHARED, other, (off_t)om.offset);
+    result("a mapping through that file", oe == MAP_FAILED ? -1 : 0);
+    if (oe != MAP_FAILED) {
+        printf("%-60s %s\n", "  shows the buffer's memory", yes(oe[0] == 0x11223344));
+        munmap(oe, d.size);
+    }
+    /* What Mesa's software driver does: the handles go, the file stays. */
+    struct drm_mode_create_dumb k = {.width = 32, .height = 32, .bpp = 32};
+    ioctl(fd, DRM_IOCTL_MODE_CREATE_DUMB, &k);
+    struct drm_prime_handle kx = {.handle = k.handle, .flags = DRM_CLOEXEC};
+    ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD, &kx);
+    result("DESTROY_DUMB of an exported buffer", ioctl(fd, DRM_IOCTL_MODE_DESTROY_DUMB, &(struct drm_mode_destroy_dumb){k.handle}));
+    struct drm_prime_handle ki = {.fd = kx.fd};
+    result("PRIME_FD_TO_HANDLE of its file after that", ioctl(fd, DRM_IOCTL_PRIME_FD_TO_HANDLE, &ki));
+    struct drm_mode_map_dumb km = {.handle = ki.handle};
+    result("MAP_DUMB of the handle it got", ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &km));
+    struct drm_mode_fb_cmd kf = {.width = 32, .height = 32, .pitch = 128, .bpp = 32, .depth = 24, .handle = ki.handle};
+    result("ADDFB of it", ioctl(fd, DRM_IOCTL_MODE_ADDFB, &kf));
+    ioctl(fd, DRM_IOCTL_MODE_RMFB, &kf.fb_id);
+    ioctl(fd, DRM_IOCTL_GEM_CLOSE, &(struct drm_gem_close){.handle = ki.handle});
+    close(kx.fd);
+    close(ex.fd);
     close(other);
 
     printf("== framebuffers of dumb buffers\n");

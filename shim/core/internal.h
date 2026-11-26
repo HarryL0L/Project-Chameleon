@@ -51,8 +51,12 @@ struct cham_dumb {
     uint8_t *mem;
     uint64_t size, offset;
 };
-/* With one reference; NULL if there is no memory for it. */
+/* With one reference; NULL if there is no memory for it. Called with g_lock held. */
 struct cham_bo *bo_new_dumb(uint64_t size);
+/* The dumb buffer whose memory `fd` is (what PRIME handed out), with a
+ * reference; NULL if none. Such a buffer is kept while its file is open in
+ * any process, also with no handle left. Takes g_lock itself. */
+struct cham_bo *bo_dumb_for_fd(int fd);
 
 /* ---- link.c: connection to the presenter app ---- */
 void link_start(void);

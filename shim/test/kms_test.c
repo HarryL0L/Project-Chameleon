@@ -1496,8 +1496,40 @@ int main(int argc, char **argv)
               "...a cursor image from one reaches the app with its alpha (0x%08x)", stub_pixel(cslot, 64, 63, 63));
         drmModeSetCursor(fd, dcrtc, 0, 0, 0);
 
+        /* PRIME hands its memory out, as programs without a GPU share it. */
         int prime = -1;
-        CHECK(drmPrimeHandleToFD(fd, handle, DRM_CLOEXEC, &prime) != 0, "...its memory is no dmabuf to export");
+        uint32_t back = 0;
+        uint32_t *pm = drmPrimeHandleToFD(fd, handle, DRM_CLOEXEC, &prime) == 0
+                           ? mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, prime, 0) : MAP_FAILED;
+        CHECK(pm != MAP_FAILED && pm[0] == px[0] && drmPrimeFDToHandle(fd, prime, &back) == 0 && back == handle,
+              "...PRIME exports its memory, which imports as the same handle");
+        if (pm != MAP_FAILED)
+            munmap(pm, (size_t)size);
+        if (prime >= 0)
+            close(prime);
+        /* The handle goes, the file stays and imports again (Mesa's
+         * software driver); once the file is closed too, the memory goes. */
+        uint32_t kh = 0, kh2 = 0, kpitch = 0;
+        uint64_t ksize = 0;
+        int kfd = -1, kfd2 = -1;
+        struct stat kst = {0}, kst2 = {0};
+        ok = drmModeCreateDumbBuffer(fd, 32, 32, 32, 0, &kh, &kpitch, &ksize) == 0 &&
+             drmPrimeHandleToFD(fd, kh, DRM_CLOEXEC, &kfd) == 0 && fstat(kfd, &kst) == 0 &&
+             drmModeDestroyDumbBuffer(fd, kh) == 0;
+        CHECK(ok && drmPrimeFDToHandle(fd, kfd, &kh2) == 0 && kh2 &&
+                  drmPrimeHandleToFD(fd, kh2, DRM_CLOEXEC, &kfd2) == 0 && fstat(kfd2, &kst2) == 0 &&
+                  kst2.st_ino == kst.st_ino,
+              "...an exported one outlives its handle: its file imports again, as the same memory");
+        drmCloseBufferHandle(fd, kh2);
+        if (kfd >= 0)
+            close(kfd);
+        if (kfd2 >= 0)
+            close(kfd2);
+        int held = fds_anywhere(kst.st_dev, kst.st_ino);
+        if (drmModeCreateDumbBuffer(fd, 8, 8, 32, 0, &kh, &kpitch, &ksize) == 0) /* the card looks again */
+            drmModeDestroyDumbBuffer(fd, kh);
+        CHECK(held == 1 && fds_anywhere(kst.st_dev, kst.st_ino) == 0,
+              "...and is freed once its file is closed everywhere (%d, then %d)", held, fds_anywhere(kst.st_dev, kst.st_ino));
         /* The handle goes; the framebuffer and the mapping keep the memory. */
         ok = drmModeDestroyDumbBuffer(fd, handle) == 0;
         px[1] = 0x00010203;

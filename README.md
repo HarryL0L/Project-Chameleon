@@ -155,7 +155,8 @@ session running.
 - Dumb buffers work: memory a program maps through the card and draws into
   on the CPU, without GBM or EGL. The card copies it into a buffer Android
   can show when its framebuffer goes on screen and when `DIRTYFB` says it
-  changed.
+  changed. PRIME exports and imports such a buffer too, which is how
+  Mesa's software renderer shares its frames with a compositor.
 - **Screen size:** rotating the phone, or the keyboard shrinking the
   desktop, changes the connector's mode and sends a hotplug event, exactly
   like a monitor whose modes changed. The compositor re-reads the connector

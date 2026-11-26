@@ -905,6 +905,8 @@ static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
     pthread_mutex_unlock(&g_lock);
     int fd = card_fd_get(p->fd);
     struct cham_bo *bo = fd >= 0 ? card_session_buffer(fd) : NULL;
+    if (fd >= 0 && !bo)
+        bo = bo_dumb_for_fd(fd);
     int dmabuf = fd >= 0 && !bo && ahb_is_dmabuf(fd);
     if (fd >= 0)
         close(fd);
@@ -925,9 +927,11 @@ static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
     struct cham_bo *bo = handle_bo(f, p->handle);
     if (!bo)
         return -ENOENT;
+    /* A dumb buffer's memory is handed out as the file it is: it maps and
+     * imports again like a dmabuf, though it is none to the real kernel. */
+    int fd = bo->dumb ? fcntl(bo->dumb->fd, F_DUPFD_CLOEXEC, 0) : cham_bo_export_fd(bo);
     if (bo->dumb)
-        return -ENOSYS; /* its memory is no dmabuf */
-    int fd = cham_bo_export_fd(bo);
+        bo->exported = 1; /* now its file keeps it (ahb.c) */
     if (fd < 0)
         return -errno;
     pthread_mutex_unlock(&g_lock); /* the caller takes it */
