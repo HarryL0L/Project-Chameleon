@@ -81,6 +81,9 @@ printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' "$OUT
     > "$OUT/chameleon-vendor.json"
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" "$OUT/vendor_test"
+# A driver whose fences tell no time keeps the timer query hidden.
+__EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
+    CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" FAKE_FENCE_NO_TIME=1 "$OUT/vendor_test"
 start_kernel "$OUT/runtime-vendor" "$OUT/presenter-none" 0
 __EGL_VENDOR_LIBRARY_FILENAMES="$OUT/chameleon-vendor.json" CHAMELEON_ANDROID_EGL="$OUT/fake_android_gl.so" \
     CHAMELEON_ANDROID_GLES="$OUT/fake_android_gl.so" XDG_RUNTIME_DIR="$OUT/runtime-vendor" \

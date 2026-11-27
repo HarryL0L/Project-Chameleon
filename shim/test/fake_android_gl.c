@@ -18,6 +18,8 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #define API __attribute__((visibility("default")))
@@ -41,6 +43,9 @@ API struct {
      * EGL_SYNC_NATIVE_FENCE_ANDROID sync, signalled gpu_ms after it is made
      * (set by a test; while 0, frames come without one, as finished). */
     int gpu_ms, fence_files;
+    /* native fences (GPU timestamps); gpu_hold: new fences stay unsignalled
+     * until fake_gpu_release() */
+    int fences_created, fences_destroyed, flushes, gpu_hold, query_deletes;
 } fake_state;
 
 static void *fence_signal(void *arg)
@@ -125,27 +130,6 @@ API EGLSurface eglGetCurrentSurface(EGLint which)
 }
 API EGLContext eglGetCurrentContext(void) { return g_current_ctx; }
 API EGLDisplay eglGetCurrentDisplay(void) { return g_current_ctx ? k_display : EGL_NO_DISPLAY; }
-API EGLSyncKHR eglCreateSyncKHR(EGLDisplay d, EGLenum type, const EGLint *attribs)
-{
-    (void)attribs;
-    if (d == k_display && type == EGL_SYNC_NATIVE_FENCE_ANDROID)
-        return (EGLSyncKHR)0x5ed;
-    return d == k_display && type == EGL_SYNC_FENCE_KHR ? (EGLSyncKHR)0x5ec : EGL_NO_SYNC_KHR;
-}
-API EGLint eglClientWaitSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLint flags, EGLTimeKHR timeout)
-{
-    (void)d, (void)timeout;
-    if (s != (EGLSyncKHR)0x5ec)
-        return EGL_FALSE;
-    fake_state.fence_waits++;
-    fake_state.fence_waits_flushed += (flags & EGL_SYNC_FLUSH_COMMANDS_BIT_KHR) != 0;
-    return EGL_CONDITION_SATISFIED_KHR;
-}
-API EGLBoolean eglDestroySyncKHR(EGLDisplay d, EGLSyncKHR s)
-{
-    (void)d;
-    return s == (EGLSyncKHR)0x5ec || s == (EGLSyncKHR)0x5ed;
-}
 API EGLBoolean eglSwapInterval(EGLDisplay d, EGLint interval)
 {
     (void)d;
@@ -433,10 +417,139 @@ API EGLClientBuffer eglGetNativeClientBufferANDROID(const struct AHardwareBuffer
 {
     return (EGLClientBuffer)b;
 }
-API EGLint eglDupNativeFenceFDANDROID(EGLDisplay d, EGLSyncKHR s)
+/* EGL_SYNC_NATIVE_FENCE_ANDROID syncs: a pipe each, readable once "the GPU"
+ * passed it; its fd exists once flushed, as on Android. */
+#define SYNCS 16
+static EGLSyncKHR const k_plain_sync = (EGLSyncKHR)0x5ec; /* any EGL_SYNC_FENCE_KHR sync */
+static struct fake_sync {
+    int used, flushed, signalled, pipe[2];
+    uint64_t time;
+    ino_t ino; /* the pipe's: its fds outlive the sync, as a sync file does */
+} g_syncs[SYNCS];
+static void sync_signal(struct fake_sync *s)
+{
+    struct timespec t;
+    if (s->signalled)
+        return;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    s->time = (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+    s->signalled = 1;
+    if (write(s->pipe[1], "x", 1) != 1)
+        s->signalled = 0;
+}
+API void fake_gpu_release(void)
+{
+    for (int i = 0; i < SYNCS; i++)
+        if (g_syncs[i].used)
+            sync_signal(&g_syncs[i]);
+}
+API EGLSyncKHR eglCreateSyncKHR(EGLDisplay d, EGLenum type, const EGLint *a)
+{
+    (void)a;
+    if (d == k_display && type == EGL_SYNC_FENCE_KHR)
+        return k_plain_sync;
+    if (d != k_display || type != EGL_SYNC_NATIVE_FENCE_ANDROID)
+        return EGL_NO_SYNC_KHR;
+    for (int i = 0; i < SYNCS; i++) {
+        struct fake_sync *s = &g_syncs[i];
+        if (s->used || pipe(s->pipe) != 0)
+            continue;
+        struct stat st;
+        s->used = 1;
+        s->flushed = s->signalled = 0;
+        s->ino = fstat(s->pipe[0], &st) == 0 ? st.st_ino : 0;
+        fake_state.fences_created++;
+        if (!fake_state.gpu_hold && !fake_state.gpu_ms)
+            sync_signal(s);
+        return (EGLSyncKHR)s;
+    }
+    return EGL_NO_SYNC_KHR;
+}
+static struct fake_sync *fake_sync(EGLSyncKHR s)
+{
+    for (int i = 0; i < SYNCS; i++)
+        if (g_syncs[i].used && (EGLSyncKHR)&g_syncs[i] == s)
+            return &g_syncs[i];
+    return NULL;
+}
+API EGLBoolean eglDestroySyncKHR(EGLDisplay d, EGLSyncKHR sync)
+{
+    struct fake_sync *s = fake_sync(sync);
+    if (d == k_display && sync == k_plain_sync)
+        return EGL_TRUE;
+    if (d != k_display || !s)
+        return EGL_FALSE;
+    close(s->pipe[0]);
+    close(s->pipe[1]);
+    s->used = 0;
+    fake_state.fences_destroyed++;
+    return EGL_TRUE;
+}
+API EGLint eglDupNativeFenceFDANDROID(EGLDisplay d, EGLSyncKHR sync)
 {
     (void)d;
-    return s == (EGLSyncKHR)0x5ed ? fence_file() : -1;
+    struct fake_sync *s = fake_sync(sync);
+    if (!s)
+        return 42; /* any other sync: a number to check the dispatch with */
+    if (!s->flushed)
+        return EGL_NO_NATIVE_FENCE_FD_ANDROID;
+    if (fake_state.gpu_ms && !s->signalled)
+        return fence_file(); /* signalled gpu_ms from now */
+    fake_state.fence_files++;
+    return dup(s->pipe[0]);
+}
+API EGLint eglClientWaitSyncKHR(EGLDisplay d, EGLSyncKHR s, EGLint flags, EGLTimeKHR timeout)
+{
+    (void)d, (void)timeout;
+    if (s != k_plain_sync)
+        return EGL_FALSE;
+    fake_state.fence_waits++;
+    fake_state.fence_waits_flushed += (flags & EGL_SYNC_FLUSH_COMMANDS_BIT_KHR) != 0;
+    return EGL_CONDITION_SATISFIED_KHR;
+}
+API void glFlush(void)
+{
+    fake_state.flushes++;
+    for (int i = 0; i < SYNCS; i++)
+        g_syncs[i].flushed |= g_syncs[i].used;
+}
+/* The vendor's way to read a fence's signal time here (SYNC_IOC_FILE_INFO
+ * needs a real sync file); FAKE_FENCE_NO_TIME: fences tell no time. */
+API int cham_test_fence_time(int fd, uint64_t *ns)
+{
+    struct stat st;
+    if (getenv("FAKE_FENCE_NO_TIME") || fstat(fd, &st) != 0)
+        return -1;
+    for (int i = 0; i < SYNCS; i++) {
+        if (g_syncs[i].ino && g_syncs[i].ino == st.st_ino) {
+            if (!g_syncs[i].signalled)
+                return 0;
+            *ns = g_syncs[i].time;
+            return 1;
+        }
+    }
+    return -1;
+}
+/* The driver's own timer query: Mali r32p1's raw 13 MHz ticks, and a
+ * result for any query. */
+API void glGetInteger64v(GLenum pname, GLint64 *v)
+{
+    *v = pname == 0x8E28 /* GL_TIMESTAMP_EXT */ ? 761072096440 : 0;
+}
+static void fake_query_result(GLuint id, GLenum pname, GLuint64 *v)
+{
+    (void)id, (void)pname;
+    *v = 1234;
+}
+API void glGetQueryObjectuiv(GLuint id, GLenum pname, GLuint *v)
+{
+    (void)id, (void)pname;
+    *v = 1234;
+}
+API void glDeleteQueries(GLsizei n, const GLuint *ids)
+{
+    (void)ids;
+    fake_state.query_deletes += n;
 }
 static void fake_query_counter(GLuint id, GLenum target)
 {
@@ -448,6 +561,8 @@ API void (*eglGetProcAddress(const char *name))(void)
 {
     if (strcmp(name, "glQueryCounterEXT") == 0)
         return (void (*)(void))fake_query_counter;
+    if (strcmp(name, "glGetQueryObjectui64vEXT") == 0)
+        return (void (*)(void))fake_query_result;
     if (strcmp(name, "glEGLImageTargetTexture2DOES") == 0)
         return (void (*)(void))fake_image_target_texture;
     return NULL;
@@ -599,7 +714,6 @@ API void glCopyTexSubImage2D(GLenum t, GLint l, GLint xo, GLint yo, GLint x, GLi
     fake_state.copy_source = g_fb_tex[g_read_fb];
 }
 API void glFinish(void) { fake_state.finishes++; }
-API void glFlush(void) {}
 API void glShaderSource(GLuint shader, GLsizei count, const GLchar *const *src, const GLint *len)
 {
     (void)shader, (void)len;

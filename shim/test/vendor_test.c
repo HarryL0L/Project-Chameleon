@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "check.h"
@@ -34,7 +35,87 @@ struct fake_state {
     GLuint swizzle_a_one;
     int fence_waits, fence_waits_flushed;
     GLuint vao_bound;
+    int gpu_ms, fence_files;
+    int fences_created, fences_destroyed, flushes, gpu_hold, query_deletes;
 };
+
+#define TIMESTAMP 0x8E28    /* GL_TIMESTAMP_EXT */
+#define GPU_DISJOINT 0x8FBB /* GL_GPU_DISJOINT_EXT */
+
+static uint64_t monotonic_ns(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+/* GL_EXT_disjoint_timer_query as KWin uses it: GL_TIMESTAMP when a frame
+ * starts, a timestamp query when its commands end, the result read later. The
+ * stand-in driver's own timestamps are Mali r32p1's (raw 13 MHz ticks). */
+static void timestamp_checks(struct fake_state *st, void *fake, int fences_tell_time)
+{
+    printf("GPU timestamps\n");
+    void (*counter)(GLuint, GLenum) = (void (*)(GLuint, GLenum))eglGetProcAddress("glQueryCounterEXT");
+    void (*result)(GLuint, GLenum, GLuint64 *) =
+        (void (*)(GLuint, GLenum, GLuint64 *))eglGetProcAddress("glGetQueryObjectui64vEXT");
+    void (*release)(void) = (void (*)(void))dlsym(fake, "fake_gpu_release");
+    CHECK(counter && result && release, "glQueryCounterEXT and glGetQueryObjectui64vEXT through glvnd");
+    if (!counter || !result || !release)
+        return;
+    GLint64 now = 0;
+    glGetInteger64v(TIMESTAMP, &now);
+    if (!fences_tell_time) {
+        CHECK(now == 761072096440, "fences without times: GL_TIMESTAMP stays the driver's (%lld)", (long long)now);
+        counter(1, TIMESTAMP);
+        CHECK(st->query_counter_calls == 1, "...and so does glQueryCounterEXT");
+        return;
+    }
+    uint64_t cpu = monotonic_ns();
+    CHECK(now > 0 && (uint64_t)now <= cpu && cpu - (uint64_t)now < 50000000,
+          "GL_TIMESTAMP is CLOCK_MONOTONIC, not the driver's ticks (%lld)", (long long)now);
+    GLint disjoint = -1;
+    glGetIntegerv(GPU_DISJOINT, &disjoint);
+    CHECK(disjoint == 0, "GL_GPU_DISJOINT_EXT is 0");
+
+    int created = st->fences_created, flushes = st->flushes;
+    st->gpu_hold = 1;
+    counter(5, TIMESTAMP);
+    CHECK(st->fences_created == created + 1 && st->query_counter_calls == 0,
+          "a timestamp query is a native fence, not the driver's counter");
+    GLuint64 available = 7;
+    result(5, GL_QUERY_RESULT_AVAILABLE, &available);
+    GLuint available32 = 7;
+    glGetQueryObjectuiv(5, GL_QUERY_RESULT_AVAILABLE, &available32);
+    CHECK(available == 0 && available32 == 0 && st->flushes == flushes + 1,
+          "not available before the GPU passed it (flushed, so its fence exists)");
+    uint64_t before = monotonic_ns();
+    release();
+    GLuint64 t = 0;
+    result(5, GL_QUERY_RESULT_AVAILABLE, &available);
+    result(5, GL_QUERY_RESULT, &t);
+    CHECK(available == 1 && t >= before && t <= monotonic_ns(),
+          "available once passed, the result is the fence's signal time (%llu)", (unsigned long long)t);
+    st->gpu_hold = 0;
+
+    GLint64 start = 0;
+    glGetInteger64v(TIMESTAMP, &start);
+    counter(6, TIMESTAMP);
+    result(6, GL_QUERY_RESULT, &t);
+    CHECK(t >= (GLuint64)start && t - (GLuint64)start < 50000000,
+          "end minus start is the GPU time, not hours (%.3f ms)", (double)(t - (GLuint64)start) / 1e6);
+    GLuint64 other = 0;
+    result(9, GL_QUERY_RESULT, &other);
+    CHECK(other == 1234, "another query's result (GL_TIME_ELAPSED) is the driver's");
+
+    int destroyed = st->fences_destroyed;
+    st->gpu_hold = 1;
+    counter(7, TIMESTAMP);
+    glDeleteQueries(1, (const GLuint[]){7});
+    CHECK(st->fences_destroyed == destroyed + 1 && st->query_deletes == 1,
+          "glDeleteQueries frees an unsignalled fence and reaches the driver");
+    st->gpu_hold = 0;
+    release();
+}
 
 /* A texture as Firefox makes one for WebGL (bound, level 0 only). */
 static GLuint texture(GLenum internal, GLenum format, int width, int height)
@@ -363,9 +444,13 @@ int main(void)
     CHECK(!st->robust_attrib_seen && st->client_version == 2, "robust-access attribute dropped, version kept");
 
     const char *glexts = (const char *)glGetString(GL_EXTENSIONS);
+    int fences_tell_time = !getenv("FAKE_FENCE_NO_TIME");
     CHECK(glexts && strstr(glexts, "GL_OES_a") && strstr(glexts, "GL_OES_b") &&
-              strstr(glexts, "GL_EXT_texture_format_BGRA8888") && !strstr(glexts, "disjoint_timer_query"),
-          "glGetString through glvnd hides the timer query only: '%s'", glexts ? glexts : "(null)");
+              strstr(glexts, "GL_EXT_texture_format_BGRA8888") &&
+              !strstr(glexts, "disjoint_timer_query") == !fences_tell_time,
+          "glGetString through glvnd: the timer query %s: '%s'",
+          fences_tell_time ? "listed (fences tell the time)" : "hidden (fences tell no time)",
+          glexts ? glexts : "(null)");
     CHECK(glexts && strstr(glexts, "GL_EXT_unpack_subimage"),
           "GL_EXT_unpack_subimage added on OpenGL ES 3 (KWin asks for it by name)");
     CHECK(glexts && strstr(glexts, "GL_OES_texture_border_clamp") && strstr(glexts, "GL_OES_vertex_array_object"),
@@ -386,14 +471,8 @@ int main(void)
           "eglCreateImageKHR via the vendor's dispatch stub");
     PFNEGLDUPNATIVEFENCEFDANDROIDPROC dup_fence =
         (PFNEGLDUPNATIVEFENCEFDANDROIDPROC)eglGetProcAddress("eglDupNativeFenceFDANDROID");
-    int fence_fd = dup_fence ? dup_fence(dpy, (EGLSyncKHR)0x5ed /* the fake's fence sync */) : -1;
-    CHECK(fence_fd >= 0 && dup_fence(dpy, (EGLSyncKHR)1) == -1, "eglDupNativeFenceFDANDROID via dispatch stub");
-    if (fence_fd >= 0)
-        close(fence_fd);
-    void (*query_counter)(GLuint, GLenum) = (void (*)(GLuint, GLenum))eglGetProcAddress("glQueryCounterEXT");
-    if (query_counter)
-        query_counter(1, 0x8E28 /* GL_TIMESTAMP_EXT */);
-    CHECK(st->query_counter_calls == 1, "GL extension function through glvnd's GL dispatch");
+    CHECK(dup_fence && dup_fence(dpy, (EGLSyncKHR)1) == 42, "eglDupNativeFenceFDANDROID via dispatch stub");
+    timestamp_checks(st, fake, fences_tell_time);
 
     GLenum (*reset_arb)(void) = (GLenum(*)(void))eglGetProcAddress("glGetGraphicsResetStatusARB");
     CHECK(reset_arb && reset_arb() == GL_NO_ERROR, "glGetGraphicsResetStatusARB (Qt) answers GL_NO_ERROR");

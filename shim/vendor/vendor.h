@@ -35,6 +35,7 @@ void *cham_gl_get_proc(const char *name);
 void *cham_gl_real(const char *name); /* Android's GLES function */
 void *cham_gl_alias(const char *name); /* core function of an OES name we add */
 void cham_egl_present_wait(int dmabuf); /* see core/wlsync.c */
+void *cham_gl_stamp_proc(const char *name); /* GL_EXT_disjoint_timer_query's entry points */
 
 /* bridge.c: is libchameleon.so (the card node, gbm's buffers) in this
  * process? It is in every program of a Chameleon session. */

@@ -1084,10 +1084,6 @@ EGLAPI EGLImage EGLAPIENTRY eglCreateImage(EGLDisplay dpy, EGLContext ctx, EGLen
         CHAM_NOTE_CALL(str);                           \
         return p_tr_##id args;                         \
     }
-TRACED_VOID(QueryCounterEXT, "glQueryCounterEXT", (unsigned id, unsigned target), (id, target))
-TRACED_VOID(GetQueryObjecti64vEXT, "glGetQueryObjecti64vEXT", (unsigned id, unsigned pname, int64_t *v), (id, pname, v))
-TRACED_VOID(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT", (unsigned id, unsigned pname, uint64_t *v),
-            (id, pname, v))
 TRACED_VOID(BeginQueryEXT, "glBeginQueryEXT", (unsigned target, unsigned id), (target, id))
 TRACED_VOID(EndQueryEXT, "glEndQueryEXT", (unsigned target), (target))
 static void (*p_tr_EGLImageTargetTexture2DOES)(unsigned target, void *image);
@@ -1125,9 +1121,6 @@ static const struct {
     void **real;
     void *wrapper;
 } k_traced[] = {
-    TR(QueryCounterEXT, "glQueryCounterEXT"),
-    TR(GetQueryObjecti64vEXT, "glGetQueryObjecti64vEXT"),
-    TR(GetQueryObjectui64vEXT, "glGetQueryObjectui64vEXT"),
     TR(BeginQueryEXT, "glBeginQueryEXT"),
     TR(EndQueryEXT, "glEndQueryEXT"),
     TR(EGLImageTargetTexture2DOES, "glEGLImageTargetTexture2DOES"),
@@ -1231,6 +1224,9 @@ void *cham_egl_get_proc(const char *name)
     void *alias = cham_gl_alias(name);
     if (alias)
         return alias;
+    void *stamp = cham_gl_stamp_proc(name); /* GPU timestamps (gles.c) */
+    if (stamp)
+        return stamp;
     void *fn = real(name);
     for (size_t i = 0; fn && i < sizeof k_traced / sizeof k_traced[0]; i++) {
         if (strcmp(name, k_traced[i].name) == 0) {
