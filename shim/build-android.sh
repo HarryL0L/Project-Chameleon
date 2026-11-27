@@ -9,15 +9,35 @@ mkdir -p "$OUT"
 : "${CC:?set CC to the NDK aarch64-linux-android29-clang}"
 CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=hidden -fno-emulated-tls \
     -Ishim/include -Ishim/include/libdrm"
-"$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" shim/core/*.c -ldl -Wl,-soname,libchameleon.so
+# The card node, gbm's buffers and Wayland clients' implicit sync in every
+# program of the session; the card itself, input, the app link and apps'
+# buffers in chameleon-kernel.
+LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c shim/core/wlsync.c"
+KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c shim/core/dmabuf.c shim/core/report.c"
+"$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" $LIB_SRC -ldl -Wl,-soname,libchameleon.so
+"$CC" $CFLAGS -fPIE -pie -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl
+"$CC" $CFLAGS -shared -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 "$CC" $CFLAGS -shared -o "$OUT/libgbm.so" shim/gbm/gbm.c -L"$OUT" -lchameleon -Wl,-soname,libgbm.so
 # glvnd EGL vendor (EGL + GLES on Android's driver); not linked to
 # libchameleon.so, since it is loaded into every program glvnd routes to it.
-"$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/egl/egl.c \
+"$CC" $CFLAGS -shared -o "$OUT/libEGL_chameleon.so" shim/vendor/vendor.c shim/vendor/bridge.c shim/vendor/wayland.c shim/vendor/window.c shim/egl/egl.c \
     shim/gles/gles.c shim/gles/gles_forward.c shim/gles/glsl_fix.c -ldl \
     -Wl,--version-script=shim/vendor/vendor.map -Wl,-soname,libEGL_chameleon.so
+# The card's Vulkan driver for the Vulkan loader, on Android's (vk_forward.h
+# is generated: shim/vulkan/gen_vk.py), with the windows' code of the EGL
+# vendor and, like it, not linked to libchameleon.so.
+"$CC" $CFLAGS -shared -o "$OUT/libvulkan_chameleon.so" shim/vulkan/vulkan.c shim/vulkan/wsi.c shim/vendor/window.c \
+    shim/vendor/bridge.c -ldl -Wl,--version-script=shim/vulkan/vulkan.map -Wl,-soname,libvulkan_chameleon.so
+# Chameleon's input method, started by the compositor (packaging/kwinrc).
+"$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
+# The session's init: adopts and reaps the programs that detach in it.
+"$CC" $CFLAGS -o "$OUT/chameleon-init" shim/init/init.c
+# The recorder of `chameleon --debug-log`.
+"$CC" $CFLAGS -o "$OUT/chameleon-log" shim/log/log.c
+# The test of the session's graphics stack (chameleon --probe).
+"$CC" $CFLAGS -Ishim/include -o "$OUT/chameleon-probe" shim/probe/probe.c -ldl
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
-mkdir -p "$OUT/bin" && cp shim/bin/kwin_wayland "$OUT/bin/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
 # missing symbol breaks KWin at load time. The vendor exports only its entry.
@@ -30,6 +50,14 @@ if [ "$(cat "$OUT/.exports")" != "__egl_Main" ]; then
 fi
 if "$NM" -D --undefined-only "$OUT/libEGL_chameleon.so" | grep -q 'cham_'; then
     echo "build-android.sh: libEGL_chameleon.so must not depend on libchameleon.so" >&2
+    exit 1
+fi
+# The Vulkan driver is loaded next to the Vulkan loader: a Vulkan function's
+# name among its exports would take the loader's place for other libraries.
+"$NM" -D --defined-only "$OUT/libvulkan_chameleon.so" | awk '{print $3}' | grep -v '^__' | sort | tr '\n' ' ' > "$OUT/.exports"
+if [ "$(cat "$OUT/.exports")" != "vk_icdGetInstanceProcAddr vk_icdGetPhysicalDeviceProcAddr vk_icdNegotiateLoaderICDInterfaceVersion " ]; then
+    echo "build-android.sh: libvulkan_chameleon.so must export only the loader's three entry points, not:" >&2
+    cat "$OUT/.exports" >&2
     exit 1
 fi
 "$NM" -D --defined-only "$OUT/libgbm.so" | awk '{print $3}' | grep -v '^__' | sort > "$OUT/.exports"

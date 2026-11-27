@@ -1,32 +1,51 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Host test of GPU rendering for Wayland apps (vendor/wayland.c + the
- * buffer registry in core/clients.c), end to end in one process:
+ * Host test of GPU rendering for Wayland apps (vendor/wayland.c, whose
+ * buffers reach chameleon-kernel as GEM handles on the render node), end to
+ * end:
  *
  *  - a compositor thread (real libwayland-server) with wl_compositor and a
  *    zwp_linux_dmabuf_v1 that, like KWin's EGL import, only accepts a dmabuf
- *    that libchameleon.so knows as a registered app buffer;
+ *    that chameleon-kernel knows as a session buffer (asked through
+ *    libchameleon.so, which also tells it the socket from our bind()), and
+ *    that imports each one on the render node too, as wlroots does;
  *  - the app: real libwayland-client + libwayland-egl, EGL through the
  *    system's glvnd -> libEGL_chameleon.so -> fake Android driver whose
- *    window surfaces render into (fake) AImageReaders.
+ *    window surfaces render into (fake) AImageReaders;
+ *  - or, with VULKAN_WINDOW_TEST, a Vulkan app: the system's Vulkan loader
+ *    -> libvulkan_chameleon.so -> fake_android_vulkan.c, whose swapchain
+ *    presents into the same kind of reader. Its frames are drawn by a real
+ *    driver, and the compositor looks at their pixels.
  */
 #define _GNU_SOURCE
 #define EGL_EGLEXT_PROTOTYPES
 #include <EGL/egl.h>
 #include <EGL/eglext.h>
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <wayland-client.h>
 #include <wayland-egl.h>
 #include <wayland-server.h>
 
+#include <drm.h>
 #include <drm_fourcc.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+
+#include <vulkan/vulkan.h>
+#include <vulkan/vulkan_wayland.h>
 
 #include "check.h"
 
@@ -60,20 +79,25 @@ static const struct wl_message k_params_events[] = {
 static const struct wl_interface k_params_iface = {"zwp_linux_buffer_params_v1", 3, 4, k_params_requests, 2,
                                                    k_params_events};
 
+static int g_render = -1; /* the compositor's render node */
 static struct {
-    int buffers_created, buffers_known_to_kwin, buffers_unknown;
+    int buffers_created, buffers_known_to_kwin, buffers_unknown, buffers_prime;
     int commits, releases, frames_done;
     int last_width, last_height, last_stride;
+    uint8_t shown[4]; /* the first pixel of the buffer on screen */
     uint32_t last_format;
     uint64_t last_modifier;
+    int last_fd, last_ready; /* the buffer of the last commit, and whether poll() called it readable then */
     volatile int stop;
 } srv;
 
-static void *(*client_ahb_from_fd)(int); /* libchameleon: AHardwareBuffer * or NULL */
+static void *(*buffer_ahb_acquire)(int); /* libchameleon: AHardwareBuffer * or NULL */
+static void (*buffer_ahb_release)(void *);
 
 struct buffer {
     struct wl_resource *resource;
     int width, height;
+    int fd;
 };
 
 struct params {
@@ -90,7 +114,9 @@ static void buffer_destroy(struct wl_client *c, struct wl_resource *r)
 static const struct wl_buffer_interface k_buffer_impl = {.destroy = buffer_destroy};
 static void buffer_free(struct wl_resource *r)
 {
-    free(wl_resource_get_user_data(r));
+    struct buffer *b = wl_resource_get_user_data(r);
+    close(b->fd);
+    free(b);
 }
 
 static void params_destroy(struct wl_client *c, struct wl_resource *r)
@@ -119,10 +145,19 @@ static void params_create_immed(struct wl_client *client, struct wl_resource *r,
     (void)flags;
     struct params *p = wl_resource_get_user_data(r);
     /* What KWin's EGL import does through the vendor: find the AHB. */
-    if (p->fd >= 0 && client_ahb_from_fd && client_ahb_from_fd(p->fd))
+    void *ahb = p->fd >= 0 && buffer_ahb_acquire ? buffer_ahb_acquire(p->fd) : NULL;
+    if (ahb)
         srv.buffers_known_to_kwin++;
     else
         srv.buffers_unknown++;
+    if (ahb)
+        buffer_ahb_release(ahb);
+    struct drm_prime_handle prime = {.fd = p->fd};
+    if (p->fd >= 0 && ioctl(g_render, DRM_IOCTL_PRIME_FD_TO_HANDLE, &prime) == 0 && prime.handle) {
+        srv.buffers_prime++;
+        struct drm_gem_close close_handle = {.handle = prime.handle};
+        ioctl(g_render, DRM_IOCTL_GEM_CLOSE, &close_handle);
+    }
     srv.buffers_created++;
     srv.last_width = w;
     srv.last_height = h;
@@ -132,6 +167,7 @@ static void params_create_immed(struct wl_client *client, struct wl_resource *r,
     struct buffer *b = calloc(1, sizeof *b);
     b->width = w;
     b->height = h;
+    b->fd = dup(p->fd);
     b->resource = wl_resource_create(client, &wl_buffer_interface, 1, id);
     wl_resource_set_implementation(b->resource, &k_buffer_impl, b, buffer_free);
 }
@@ -213,6 +249,18 @@ static void surface_commit(struct wl_client *c, struct wl_resource *r)
         s->current = s->pending;
     }
     s->pending = NULL;
+    if (s->current) { /* what a compositor would sample */
+        struct buffer *b = wl_resource_get_user_data(s->current);
+        uint8_t *pixels = mmap(NULL, 4, PROT_READ, MAP_SHARED, b->fd, 0);
+        if (pixels != MAP_FAILED) {
+            memcpy(srv.shown, pixels, 4);
+            munmap(pixels, 4);
+        }
+        /* ...after asking whether it is finished, as KWin does */
+        struct pollfd ready = {.fd = b->fd, .events = POLLIN};
+        srv.last_ready = poll(&ready, 1, 0);
+        srv.last_fd = b->fd;
+    }
     srv.commits++;
     struct wl_resource *cb, *tmp;
     wl_resource_for_each_safe(cb, tmp, &s->frames) {
@@ -283,17 +331,243 @@ static void *server_main(void *arg)
 /* ---- the app ---- */
 
 static struct wl_compositor *g_compositor;
+static struct wl_proxy *g_dmabuf;
 static void global(void *data, struct wl_registry *registry, uint32_t name, const char *iface, uint32_t version)
 {
     (void)data, (void)version;
     if (strcmp(iface, "wl_compositor") == 0)
         g_compositor = wl_registry_bind(registry, name, &wl_compositor_interface, 4);
+    else if (strcmp(iface, "zwp_linux_dmabuf_v1") == 0)
+        g_dmabuf = wl_registry_bind(registry, name, &k_dmabuf_iface, 3);
 }
 static void global_remove(void *data, struct wl_registry *registry, uint32_t name)
 {
     (void)data, (void)registry, (void)name;
 }
 static const struct wl_registry_listener k_registry_listener = {global, global_remove};
+
+/* ---- the Vulkan app ---- */
+
+static VkDevice vk_dev;
+static VkQueue vk_queue;
+static VkCommandBuffer vk_cmd;
+static VkSemaphore vk_acquired, vk_drawn;
+
+/* One frame: the next image, filled with a colour, presented. */
+static VkResult vk_frame(VkSwapchainKHR swapchain, VkImage *images, float r, float g, float b)
+{
+    uint32_t i = 0;
+    VkResult result = vkAcquireNextImageKHR(vk_dev, swapchain, UINT64_MAX, vk_acquired, VK_NULL_HANDLE, &i);
+    if (result != VK_SUCCESS)
+        return result;
+    VkCommandBufferBeginInfo begin = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    vkBeginCommandBuffer(vk_cmd, &begin);
+    VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageMemoryBarrier to_clear = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+                                     .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
+                                     .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+                                     .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                     .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                     .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = images[i],
+                                     .subresourceRange = whole};
+    vkCmdPipelineBarrier(vk_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                         NULL, 1, &to_clear);
+    VkClearColorValue colour = {.float32 = {r, g, b, 1}};
+    vkCmdClearColorImage(vk_cmd, images[i], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &colour, 1, &whole);
+    VkImageMemoryBarrier to_present = to_clear;
+    to_present.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    to_present.dstAccessMask = 0;
+    to_present.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    to_present.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    vkCmdPipelineBarrier(vk_cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL,
+                         0, NULL, 1, &to_present);
+    vkEndCommandBuffer(vk_cmd);
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSubmitInfo submit = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .waitSemaphoreCount = 1,
+                           .pWaitSemaphores = &vk_acquired, .pWaitDstStageMask = &stage, .commandBufferCount = 1,
+                           .pCommandBuffers = &vk_cmd, .signalSemaphoreCount = 1, .pSignalSemaphores = &vk_drawn};
+    result = vkQueueSubmit(vk_queue, 1, &submit, VK_NULL_HANDLE);
+    if (result != VK_SUCCESS)
+        return result;
+    VkPresentInfoKHR present = {.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1,
+                                .pWaitSemaphores = &vk_drawn, .swapchainCount = 1, .pSwapchains = &swapchain,
+                                .pImageIndices = &i};
+    result = vkQueuePresentKHR(vk_queue, &present);
+    vkQueueWaitIdle(vk_queue); /* the one command buffer is free again */
+    return result;
+}
+
+static int shown(int r, int g, int b)
+{
+    return srv.shown[0] == r && srv.shown[1] == g && srv.shown[2] == b;
+}
+
+static int has_extension(const VkExtensionProperties *list, uint32_t n, const char *name)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (strcmp(list[i].extensionName, name) == 0)
+            return 1;
+    return 0;
+}
+
+static void vulkan_app(struct wl_display *display, struct wl_surface *surface)
+{
+    printf("Vulkan windows\n");
+    VkExtensionProperties exts[256];
+    uint32_t n = 256;
+    vkEnumerateInstanceExtensionProperties(NULL, &n, exts);
+    CHECK(has_extension(exts, n, "VK_KHR_surface") && has_extension(exts, n, "VK_KHR_wayland_surface") &&
+              !has_extension(exts, n, "VK_KHR_android_surface"),
+          "Wayland surfaces offered (Android's own kind not)");
+    const char *instance_exts[] = {"VK_KHR_surface", "VK_KHR_wayland_surface"};
+    /* Vulkan 1.0, as vkcube asks for. */
+    VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .apiVersion = VK_API_VERSION_1_0};
+    VkInstanceCreateInfo ici = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+                                .enabledExtensionCount = 2, .ppEnabledExtensionNames = instance_exts};
+    VkInstance inst;
+    VkResult r = vkCreateInstance(&ici, NULL, &inst);
+    CHECK(r == VK_SUCCESS, "an instance with them (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    n = 1;
+    vkEnumeratePhysicalDevices(inst, &n, &phys);
+    VkWaylandSurfaceCreateInfoKHR wsci = {.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR,
+                                          .display = display, .surface = surface};
+    VkSurfaceKHR vk_surface = VK_NULL_HANDLE;
+    r = vkCreateWaylandSurfaceKHR(inst, &wsci, NULL, &vk_surface);
+    CHECK(r == VK_SUCCESS && vk_surface, "a surface on a wl_surface (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkBool32 can = VK_FALSE;
+    r = vkGetPhysicalDeviceSurfaceSupportKHR(phys, 0, vk_surface, &can);
+    CHECK(r == VK_SUCCESS && can && vkGetPhysicalDeviceWaylandPresentationSupportKHR(phys, 0, display),
+          "the device's queue presents to it and to the compositor");
+    VkSurfaceCapabilitiesKHR caps;
+    r = vkGetPhysicalDeviceSurfaceCapabilitiesKHR(phys, vk_surface, &caps);
+    CHECK(r == VK_SUCCESS && caps.currentExtent.width == UINT32_MAX && caps.minImageExtent.width == 1 &&
+              caps.maxImageExtent.width >= 2048,
+          "a Wayland window: its size is the swapchain's");
+    CHECK(caps.supportedCompositeAlpha == (VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR | VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) &&
+              caps.supportedTransforms == VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR && caps.minImageCount >= 2,
+          "opaque or pre-multiplied alpha, never rotated, at least %u images", caps.minImageCount);
+    VkSurfaceFormatKHR formats[16];
+    n = 16;
+    r = vkGetPhysicalDeviceSurfaceFormatsKHR(phys, vk_surface, &n, formats);
+    CHECK(r == VK_SUCCESS && n == 2 && formats[0].format == VK_FORMAT_R8G8B8A8_UNORM &&
+              formats[1].format == VK_FORMAT_R8G8B8A8_SRGB,
+          "formats: 8-bit RGBA, plain and sRGB (%u)", n);
+    n = 1;
+    r = vkGetPhysicalDeviceSurfaceFormatsKHR(phys, vk_surface, &n, formats);
+    CHECK(r == VK_INCOMPLETE && n == 1, "...a list that doesn't fit is cut and says so");
+    VkPresentModeKHR modes[8];
+    n = 8;
+    r = vkGetPhysicalDeviceSurfacePresentModesKHR(phys, vk_surface, &n, modes);
+    CHECK(r == VK_SUCCESS && n == 2 && modes[0] == VK_PRESENT_MODE_FIFO_KHR && modes[1] == VK_PRESENT_MODE_MAILBOX_KHR,
+          "present modes: FIFO and mailbox");
+
+    n = 256;
+    vkEnumerateDeviceExtensionProperties(phys, NULL, &n, exts);
+    CHECK(has_extension(exts, n, "VK_KHR_swapchain"), "swapchains offered");
+    float priority = 1;
+    VkDeviceQueueCreateInfo qci = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueCount = 1,
+                                   .pQueuePriorities = &priority};
+    const char *device_exts[] = {"VK_KHR_swapchain"};
+    VkDeviceCreateInfo dci = {.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1,
+                              .pQueueCreateInfos = &qci, .enabledExtensionCount = 1,
+                              .ppEnabledExtensionNames = device_exts};
+    r = vkCreateDevice(phys, &dci, NULL, &vk_dev);
+    CHECK(r == VK_SUCCESS, "a device with them (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    vkGetDeviceQueue(vk_dev, 0, 0, &vk_queue);
+    VkCommandPoolCreateInfo cpci = {.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+                                    .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT};
+    VkCommandPool pool;
+    vkCreateCommandPool(vk_dev, &cpci, NULL, &pool);
+    VkCommandBufferAllocateInfo cbai = {.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool,
+                                        .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1};
+    vkAllocateCommandBuffers(vk_dev, &cbai, &vk_cmd);
+    VkSemaphoreCreateInfo sci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
+    vkCreateSemaphore(vk_dev, &sci, NULL, &vk_acquired);
+    vkCreateSemaphore(vk_dev, &sci, NULL, &vk_drawn);
+
+    VkSwapchainCreateInfoKHR scci = {.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = vk_surface,
+                                     .minImageCount = caps.minImageCount, .imageFormat = VK_FORMAT_R8G8B8A8_UNORM,
+                                     .imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR, .imageExtent = {64, 32},
+                                     .imageArrayLayers = 1,
+                                     .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                                     .preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR,
+                                     .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                                     .presentMode = VK_PRESENT_MODE_FIFO_KHR, .clipped = VK_TRUE};
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    r = vkCreateSwapchainKHR(vk_dev, &scci, NULL, &swapchain);
+    CHECK(r == VK_SUCCESS, "an opaque FIFO swapchain of 64x32, which Android only knows as \"inherit\" (%d)", r);
+    if (r != VK_SUCCESS)
+        return;
+    VkImage images[16];
+    uint32_t image_count = 16;
+    vkGetSwapchainImagesKHR(vk_dev, swapchain, &image_count, images);
+
+    static const float k_colours[6][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 1, 0}, {0, 1, 1}, {1, 0, 1}};
+    int right = 0;
+    r = VK_SUCCESS;
+    for (int i = 0; i < 6 && r == VK_SUCCESS; i++) {
+        r = vk_frame(swapchain, images, k_colours[i][0], k_colours[i][1], k_colours[i][2]);
+        wl_display_roundtrip(display);
+        right += shown((int)k_colours[i][0] * 255, (int)k_colours[i][1] * 255, (int)k_colours[i][2] * 255);
+    }
+    CHECK(r == VK_SUCCESS && srv.commits == 6 && right == 6,
+          "6 frames -> %d commits, each with its colour on screen (%d)", srv.commits, right);
+    CHECK(srv.buffers_created >= 2 && srv.buffers_created <= 3 && srv.buffers_unknown == 0 &&
+              srv.buffers_known_to_kwin == srv.buffers_created && srv.buffers_prime == srv.buffers_created,
+          "%d zero-copy buffers, all known to KWin and its render node", srv.buffers_created);
+    CHECK(srv.last_width == 64 && srv.last_height == 32 && srv.last_stride == 256 &&
+              srv.last_format == DRM_FORMAT_XBGR8888 && srv.last_modifier == DRM_FORMAT_MOD_INVALID,
+          "dmabuf %dx%d stride %d, XBGR8888 (opaque), implicit modifier", srv.last_width, srv.last_height,
+          srv.last_stride);
+    CHECK(srv.releases == 5 && srv.frames_done == 6, "buffers released (%d) and frames paced (%d callbacks)",
+          srv.releases, srv.frames_done);
+
+    /* The window gets another size: a new swapchain, this one unpaced and
+     * with alpha. */
+    VkSwapchainKHR old = swapchain;
+    scci.imageExtent = (VkExtent2D){80, 40};
+    scci.compositeAlpha = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+    scci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+    scci.oldSwapchain = old;
+    r = vkCreateSwapchainKHR(vk_dev, &scci, NULL, &swapchain);
+    vkDestroySwapchainKHR(vk_dev, old, NULL);
+    image_count = 16;
+    vkGetSwapchainImagesKHR(vk_dev, swapchain, &image_count, images);
+    int created = srv.buffers_created;
+    right = 0;
+    for (int i = 0; i < 4 && r == VK_SUCCESS; i++) {
+        r = vk_frame(swapchain, images, k_colours[i][0], k_colours[i][1], k_colours[i][2]);
+        wl_display_roundtrip(display);
+        right += shown((int)k_colours[i][0] * 255, (int)k_colours[i][1] * 255, (int)k_colours[i][2] * 255);
+    }
+    CHECK(r == VK_SUCCESS && srv.commits == 10 && right == 4, "a mailbox swapchain of 80x40: 4 more frames shown (%d)",
+          r);
+    CHECK(srv.last_width == 80 && srv.last_height == 40 && srv.last_format == DRM_FORMAT_ABGR8888 &&
+              srv.buffers_created > created && srv.buffers_unknown == 0,
+          "new buffers at %dx%d with alpha reach KWin", srv.last_width, srv.last_height);
+    CHECK(srv.frames_done == 6, "and nothing waited for the compositor's frame callbacks");
+    struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
+             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls; } *fake =
+        dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state");
+    CHECK(fake && fake->readers == 1, "one window for the surface's life (%d)", fake ? fake->readers : -1);
+
+    vkDestroySwapchainKHR(vk_dev, swapchain, NULL);
+    vkDestroySemaphore(vk_dev, vk_acquired, NULL);
+    vkDestroySemaphore(vk_dev, vk_drawn, NULL);
+    vkDestroyCommandPool(vk_dev, pool, NULL);
+    vkDestroyDevice(vk_dev, NULL);
+    vkDestroySurfaceKHR(inst, vk_surface, NULL);
+    vkDestroyInstance(inst, NULL);
+    wl_display_roundtrip(display);
+    CHECK(1, "swapchain, device, surface and instance gone");
+}
 
 int main(void)
 {
@@ -303,10 +577,17 @@ int main(void)
         fprintf(stderr, "run via run-host-test.sh\n");
         return 2;
     }
-    *(void **)&client_ahb_from_fd = dlsym(RTLD_DEFAULT, "cham_client_ahb_from_fd");
+    *(void **)&buffer_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    *(void **)&buffer_ahb_release = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
 
+    /* As a compositor: DRM master first, then its socket, and a second one
+     * the app uses below like a proxy's. */
+    const char *card_path = getenv("CHAMELEON_DRM_PATH");
+    int card = open(card_path ? card_path : "/dev/dri/card0", O_RDWR | O_CLOEXEC);
+    g_render = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
     struct wl_display *server = wl_display_create();
-    if (wl_display_add_socket(server, socket_name) != 0) {
+    if (card < 0 || wl_display_add_socket(server, socket_name) != 0 ||
+        wl_display_add_socket(server, "wayland-proxy-cwl") != 0) {
         fprintf(stderr, "cannot create the Wayland socket\n");
         return 1;
     }
@@ -316,20 +597,33 @@ int main(void)
     pthread_create(&thread, NULL, server_main, server);
 
     printf("GPU rendering for Wayland apps\n");
-    /* libchameleon.so (as in KWin) opens its buffer socket next to KWin's. */
-    char registry[256];
-    snprintf(registry, sizeof registry, "%s/%s.chameleon", runtime, socket_name);
+    char old_socket[256];
+    snprintf(old_socket, sizeof old_socket, "%s/chameleon-buffers", runtime);
     struct stat st;
-    for (int i = 0; i < 100 && stat(registry, &st) != 0; i++)
-        usleep(20 * 1000);
-    CHECK(client_ahb_from_fd && stat(registry, &st) == 0, "KWin side accepts app buffers at %s.chameleon",
-          socket_name);
+    CHECK(buffer_ahb_acquire && stat(old_socket, &st) != 0,
+          "no socket of its own for app buffers: they come through the render node");
+
+    /* The app reaches the compositor through another socket, as behind
+     * Firefox's wayland-proxy-N: its buffers are shared all the same. */
+    setenv("WAYLAND_DISPLAY", "wayland-proxy-cwl", 1);
+    socket_name = "wayland-proxy-cwl";
 
     struct wl_display *display = wl_display_connect(socket_name);
     struct wl_registry *reg = wl_display_get_registry(display);
     wl_registry_add_listener(reg, &k_registry_listener, NULL);
     wl_display_roundtrip(display);
     struct wl_surface *surface = wl_compositor_create_surface(g_compositor);
+    if (getenv("VULKAN_WINDOW_TEST")) {
+        vulkan_app(display, surface);
+        wl_surface_destroy(surface);
+        wl_display_roundtrip(display);
+        wl_display_disconnect(display);
+        srv.stop = 1;
+        pthread_join(thread, NULL);
+        wl_display_destroy(server);
+        printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+        return failures != 0;
+    }
     struct wl_egl_window *window = wl_egl_window_create(surface, 64, 32);
 
     if (getenv("EXPECT_DESKTOP_GL_QT")) {
@@ -380,7 +674,9 @@ int main(void)
     CHECK(ok && srv.commits == 6, "6 swaps -> %d commits", srv.commits);
     CHECK(srv.buffers_created >= 2 && srv.buffers_created <= 3 && srv.buffers_unknown == 0 &&
               srv.buffers_known_to_kwin == srv.buffers_created,
-          "%d zero-copy buffers, all registered with KWin (%d unknown)", srv.buffers_created, srv.buffers_unknown);
+          "%d zero-copy buffers, all known to KWin (%d unknown)", srv.buffers_created, srv.buffers_unknown);
+    CHECK(srv.buffers_prime == srv.buffers_created, "...and each imports on the render node by PRIME (%d of %d)",
+          srv.buffers_prime, srv.buffers_created);
     CHECK(srv.last_width == 64 && srv.last_height == 32 && srv.last_stride == 256 &&
               srv.last_format == DRM_FORMAT_ABGR8888 && srv.last_modifier == DRM_FORMAT_MOD_INVALID,
           "dmabuf %dx%d stride %d, ABGR8888, implicit modifier", srv.last_width, srv.last_height, srv.last_stride);
@@ -396,6 +692,115 @@ int main(void)
     wl_display_roundtrip(display);
     CHECK(srv.last_width == 80 && srv.last_height == 40 && srv.buffers_unknown == 0,
           "new buffers at %dx%d reach KWin", srv.last_width, srv.last_height);
+    struct { int robust_attrib_seen, client_version; char shader[512]; int tex_uploads, create_image_target,
+             query_counter_calls, swaps, swap_interval_calls, last_swap_interval, readers, geometry_calls;
+             void *current_draw; int native_images, images_destroyed, copies, finishes; unsigned copy_source;
+             unsigned swizzle_a_one; int fence_waits, fence_waits_flushed; unsigned vao_bound;
+             int gpu_ms, fence_files; } *fake =
+        getenv("CHAMELEON_ANDROID_MEDIANDK") /* the fake driver, loaded by the vendor */
+            ? dlsym(dlopen(getenv("CHAMELEON_ANDROID_MEDIANDK"), RTLD_NOW | RTLD_NOLOAD), "fake_state")
+            : NULL;
+    CHECK(fake && fake->readers == 1 && fake->geometry_calls == 1,
+          "the window was resized in place: %d reader, %d resize", fake ? fake->readers : -1,
+          fake ? fake->geometry_calls : -1);
+
+    CHECK(fake && fake->fence_waits == 0, "the EGL window's own buffers wait in the vendor, not at attach (%d waits)",
+          fake ? fake->fence_waits : -1);
+
+    /* The frames' fences (core/dmabuf.c). The compositor here asks, as
+     * KWin does, whether a buffer is finished when it gets it. */
+    printf("frames the GPU is still drawing\n");
+    if (fake) {
+        const char *keep = getenv("FENCE_TEST_FORCE_WAIT"); /* the run with CHAMELEON_SYNC_WAIT=1 */
+        for (int i = 0; i < 6; i++) /* every buffer of this size has been asked about once */
+            eglSwapBuffers(dpy, surf);
+        wl_display_roundtrip(display);
+        fake->gpu_ms = 60;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        ok = eglSwapBuffers(dpy, surf) == EGL_TRUE;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        wl_display_roundtrip(display);
+        struct pollfd later = {.fd = srv.last_fd, .events = POLLIN};
+        if (keep) {
+            CHECK(ok && ms >= 55 && srv.last_ready == 1,
+                  "CHAMELEON_SYNC_WAIT=1: the swap waits for the GPU itself (%ld ms), the buffer arrives finished", ms);
+        } else {
+            CHECK(ok && ms < 40, "the swap returns without waiting for the GPU (%ld ms of 60)", ms);
+            CHECK(srv.last_ready == 0, "the compositor is told the buffer isn't finished yet");
+            CHECK(poll(&later, 1, 500) == 1, "...and when it is");
+        }
+        fake->gpu_ms = 0;
+        usleep(80000);
+    }
+
+    /* A client rendering into gbm buffers and handing them over itself, as
+     * Xwayland's glamor does: attaching such a buffer waits for the GPU work
+     * of the thread's current context (core/wlsync.c). Its requests also
+     * check that arguments of every kind pass through unchanged. */
+    printf("a client handing over its own dmabufs (Xwayland's glamor)\n");
+    struct cham_bo *(*bo_create)(uint32_t, uint32_t, uint32_t, uint32_t);
+    uint32_t (*bo_handle_open)(struct cham_bo *, int);
+    int (*bo_export_fd)(struct cham_bo *);
+    *(void **)&bo_create = dlsym(RTLD_DEFAULT, "cham_bo_create");
+    *(void **)&bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
+    *(void **)&bo_export_fd = dlsym(RTLD_DEFAULT, "cham_bo_export_fd");
+    /* as gbm on the render node makes one */
+    struct cham_bo *bo = bo_create ? bo_create(48, 16, DRM_FORMAT_XRGB8888, 0) : NULL;
+    uint32_t handle = bo ? bo_handle_open(bo, g_render) : 0;
+    int dmabuf = handle ? bo_export_fd(bo) : -1;
+    CHECK(g_dmabuf && dmabuf >= 0, "a session buffer to hand over (%d)", dmabuf);
+    struct wl_proxy *params =
+        wl_proxy_marshal_flags(g_dmabuf, 1 /* create_params */, &k_params_iface, 3, 0, NULL);
+    wl_proxy_marshal_flags(params, 1 /* add */, NULL, 3, 0, dmabuf, 0u, 0u, 192u, 0x00ffffffu, 0xffffffffu);
+    struct wl_proxy *buffer = wl_proxy_marshal_flags(params, 3 /* create_immed */, &wl_buffer_interface, 3, 0, NULL,
+                                                     48, 16, (uint32_t)DRM_FORMAT_XRGB8888, 0u);
+    wl_proxy_marshal_flags(params, 0 /* destroy */, NULL, 3, WL_MARSHAL_FLAG_DESTROY);
+    close(dmabuf);
+    wl_display_roundtrip(display);
+    CHECK(buffer && srv.buffers_unknown == 0 && srv.last_width == 48 && srv.last_height == 16 &&
+              srv.last_stride == 192 && srv.last_format == DRM_FORMAT_XRGB8888 &&
+              srv.last_modifier == DRM_FORMAT_MOD_INVALID,
+          "its wl_buffer reaches KWin as sent: %dx%d stride %d format %08x modifier %016llx", srv.last_width,
+          srv.last_height, srv.last_stride, srv.last_format, (unsigned long long)srv.last_modifier);
+    struct wl_surface *xsurface = wl_compositor_create_surface(g_compositor);
+    int commits = srv.commits, files = fake ? fake->fence_files : 0;
+    struct timespec g0, g1;
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    CHECK(fake && fake->fence_files == files + 1 && fake->fence_waits == 0 && srv.commits == commits + 1 &&
+              srv.last_ready == 1,
+          "attaching it made one fence of the GPU work for it and waited (nobody asked about the buffer yet): %d",
+          fake ? fake->fence_files - files : -1);
+    if (fake)
+        fake->gpu_ms = 60;
+    clock_gettime(CLOCK_MONOTONIC, &g0);
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    clock_gettime(CLOCK_MONOTONIC, &g1);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    long gms = (g1.tv_sec - g0.tv_sec) * 1000 + (g1.tv_nsec - g0.tv_nsec) / 1000000;
+    if (getenv("FENCE_TEST_FORCE_WAIT"))
+        CHECK(gms >= 55 && srv.last_ready == 1, "CHAMELEON_SYNC_WAIT=1: the next attach waits too (%ld ms)", gms);
+    else
+        CHECK(gms < 40 && srv.last_ready == 0, "the compositor asks: the next attach leaves the wait to it (%ld ms)", gms);
+    if (fake)
+        fake->gpu_ms = 0;
+    usleep(80000);
+    files = fake ? fake->fence_files : 0;
+    wl_surface_attach(xsurface, NULL, 0, 0);
+    wl_surface_commit(xsurface);
+    eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT);
+    wl_surface_attach(xsurface, (struct wl_buffer *)buffer, 0, 0);
+    wl_surface_commit(xsurface);
+    wl_display_roundtrip(display);
+    CHECK(fake && fake->fence_files == files, "nothing for a NULL buffer, nor without a current context");
+    eglMakeCurrent(dpy, surf, surf, ctx);
+    wl_buffer_destroy((struct wl_buffer *)buffer);
+    wl_surface_destroy(xsurface);
+    wl_display_roundtrip(display);
 
     CHECK(eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT), "release the surface");
     CHECK(eglDestroySurface(dpy, surf), "eglDestroySurface");

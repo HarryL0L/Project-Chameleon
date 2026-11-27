@@ -1,0 +1,5 @@
+# System-wide KWin default from the chameleon package: the Android keyboard
+# as on-screen keyboard. System Settings > Keyboard > Virtual Keyboard
+# changes it in the user's own ~/.config/kwinrc, which takes precedence.
+[Wayland]
+InputMethod=/data/data/com.termux/files/usr/share/applications/chameleon-ime.desktop

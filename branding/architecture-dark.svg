@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 476" width="960" height="476" role="img">
+<style>text{font-family:-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;fill:#E6EDF3}.label{font-size:14px;font-weight:600;fill:#E6EDF3}.name{font-size:15px;font-weight:600}.sub{font-size:12px;fill:#9198A1}.pill{font-size:12px;fill:#9198A1}.num{font-size:12px;font-weight:700;fill:#151B23}</style>
+<text class="label" x="30" y="78">Linux</text>
+<text class="sub" x="30" y="96">as packaged</text>
+<rect x="180.0" y="40" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="300.3333333333333" y="75.0" text-anchor="middle">Compositor</text>
+<text class="sub" x="300.3333333333333" y="94.0" text-anchor="middle">KWin · wlroots · Weston · Mutter</text>
+<rect x="434.66666666666663" y="40" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="555.0" y="75.0" text-anchor="middle">Wayland apps</text>
+<text class="sub" x="555.0" y="94.0" text-anchor="middle">Qt · GTK · Firefox</text>
+<rect x="689.3333333333333" y="40" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="809.6666666666666" y="75.0" text-anchor="middle">Vulkan apps</text>
+<text class="sub" x="809.6666666666666" y="94.0" text-anchor="middle">native · games</text>
+<text class="label" x="30" y="162">Interfaces</text>
+<line x1="180" y1="158" x2="930" y2="158" stroke="#3D444D"/>
+<rect x="207.4" y="146" width="70.19999999999999" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="242.5" y="162" text-anchor="middle">DRM/KMS</text>
+<rect x="345.6" y="146" width="43.8" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="367.5" y="162" text-anchor="middle">GBM</text>
+<rect x="447.5" y="146" width="90.0" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="492.5" y="162" text-anchor="middle">EGL · GLES</text>
+<rect x="585.7" y="146" width="63.599999999999994" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="617.5" y="162" text-anchor="middle">Vulkan</text>
+<rect x="690.9" y="146" width="103.19999999999999" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="742.5" y="162" text-anchor="middle">udev · evdev</text>
+<rect x="815.9" y="146" width="103.19999999999999" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="867.5" y="162" text-anchor="middle">input method</text>
+<text class="label" x="30" y="238" style="fill:#56D364">Chameleon</text>
+<text class="sub" x="30" y="256">the device layer</text>
+<rect x="180.0" y="200" width="177.0" height="76" rx="8" fill="#12261B" stroke="#2A6B41"/>
+<text class="name" x="268.5" y="235.0" text-anchor="middle">chameleon-kernel</text>
+<text class="sub" x="268.5" y="254.0" text-anchor="middle">display · input devices</text>
+<rect x="371.0" y="200" width="177.0" height="76" rx="8" fill="#12261B" stroke="#2A6B41"/>
+<text class="name" x="459.5" y="235.0" text-anchor="middle">libgbm</text>
+<text class="sub" x="459.5" y="254.0" text-anchor="middle">GPU buffers</text>
+<rect x="562.0" y="200" width="177.0" height="76" rx="8" fill="#12261B" stroke="#2A6B41"/>
+<text class="name" x="650.5" y="235.0" text-anchor="middle">EGL vendor</text>
+<text class="sub" x="650.5" y="254.0" text-anchor="middle">OpenGL ES</text>
+<rect x="753.0" y="200" width="177.0" height="76" rx="8" fill="#12261B" stroke="#2A6B41"/>
+<text class="name" x="841.5" y="235.0" text-anchor="middle">Vulkan driver</text>
+<text class="sub" x="841.5" y="254.0" text-anchor="middle">Vulkan</text>
+<text class="label" x="30" y="322">Android APIs</text>
+<line x1="180" y1="318" x2="930" y2="318" stroke="#3D444D"/>
+<rect x="212.25" y="306" width="123.0" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="273.75" y="322" text-anchor="middle">AHardwareBuffer</text>
+<rect x="412.95" y="306" width="96.6" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="461.25" y="322" text-anchor="middle">sync fences</text>
+<rect x="587.25" y="306" width="123.0" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="648.75" y="322" text-anchor="middle">ASurfaceControl</text>
+<rect x="784.65" y="306" width="103.19999999999999" height="24" rx="12" fill="#212830"/>
+<text class="pill" x="836.25" y="322" text-anchor="middle">AImageReader</text>
+<text class="label" x="30" y="398">Android</text>
+<text class="sub" x="30" y="416">no root</text>
+<rect x="180.0" y="360" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="300.3333333333333" y="395.0" text-anchor="middle">Chameleon app</text>
+<text class="sub" x="300.3333333333333" y="414.0" text-anchor="middle">screen · touch · keyboard</text>
+<rect x="434.66666666666663" y="360" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="555.0" y="395.0" text-anchor="middle">GPU driver</text>
+<text class="sub" x="555.0" y="414.0" text-anchor="middle">Mali · Adreno · …</text>
+<rect x="689.3333333333333" y="360" width="240.66666666666666" height="76" rx="8" fill="#151B23" stroke="#3D444D"/>
+<text class="name" x="809.6666666666666" y="395.0" text-anchor="middle">SurfaceFlinger</text>
+<text class="sub" x="809.6666666666666" y="414.0" text-anchor="middle">the phone's display</text>
+</svg>

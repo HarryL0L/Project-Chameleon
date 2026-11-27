@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * Wire protocol between a Termux-side producer (the KWin shim)
+ * Wire protocol between a Termux-side producer (chameleon-kernel)
  * and the presenter app.
  *
  * Transport: AF_UNIX SOCK_SEQPACKET. Producers connect to CHAM_SOCKET_PATH,
@@ -21,7 +21,9 @@
 
 #include <stdint.h>
 
-#define CHAM_PROTO_VERSION 1
+/* Raised whenever the app and the Termux package built from different
+ * versions of this file can no longer work together. */
+#define CHAM_PROTO_VERSION 2
 
 enum cham_msg_type {
     /* producer -> presenter */
@@ -36,10 +38,26 @@ enum cham_msg_type {
                                    a = 1: a password manager marked it secret */
     CHAM_CLIPBOARD_REQUEST = 7, /* a desktop app pastes the presenter's text: fd = pipe to
                                    write it into (UTF-8), then close */
+    CHAM_CURSOR = 8,        /* the cursor plane (only to a presenter that set CHAM_CONFIG_CURSOR),
+                               shown over the frame from the next PRESENT on:
+                               id = buffer | CHAM_CURSOR_NEW (its image may have changed: copy it
+                               again), or CHAM_CURSOR_HIDE; a = x | y << 32, where its top left goes
+                               in the frame (signed pixels, CHAM_INPUT_DELTA's packing); b = the part
+                               of the buffer shown, CHAM_CURSOR_RECT; fd = acquire fence (optional) */
+    CHAM_PLANE = 9,         /* the next PRESENT's buffer doesn't make the whole frame (only to a
+                               presenter that set CHAM_CONFIG_PLANE): id = the frame's (screen's)
+                               width | height << 16; a = the part of the buffer shown, b = where it
+                               goes in the frame, clipped to it (w or h 0: nothing), both in
+                               CHAM_CURSOR_RECT's packing, scaled from a to b; the rest of the frame
+                               is black. A PRESENT without it shows its whole buffer as the frame. */
+    CHAM_PONG = 10,         /* answers a PING, once the producer has taken the lock its card
+                               requests take (a stuck producer doesn't answer): a = the PING's a,
+                               b = how long the compositor has left the producer's own question
+                               to it unanswered, in ms (0: it answers, or isn't asked) */
 
     /* presenter -> producer */
     CHAM_CONFIG = 100,      /* a = width | height << 32 (0x0 = no surface, stop rendering),
-                               b = refresh rate in mHz */
+                               b = refresh rate in mHz, id = CHAM_CONFIG_* flags */
     CHAM_RELEASE = 101,     /* id; fd = release fence (optional); buffer may be reused
                                once the fence signals */
     CHAM_FRAME_DONE = 102,  /* a = frame number, b = SurfaceFlinger latch time (ns) */
@@ -48,10 +66,26 @@ enum cham_msg_type {
     CHAM_CLIPBOARD_OFFER = 105, /* Android's clipboard has new text: the producer makes it the
                                    desktop's clipboard and asks for it with CLIPBOARD_REQUEST;
                                    a = 1: Android marks it sensitive (a password) */
+    CHAM_FRAME_QUEUED = 106, /* copy mode: frame a is copied and handed to Android (b = when).
+                               The producer's buffer is free (RELEASE carries the copy's
+                               fence); the frame waits in Android until FRAME_DONE. */
+    CHAM_WINDOW = 107,      /* a = width | height << 32: the app's whole window, with the part
+                               the keyboard covers (CONFIG's surface is what it leaves), sent
+                               before each CONFIG. The screen's physical size and the touchpad
+                               follow it; touchpad positions are fractions of it. */
+    CHAM_PRESENTED = 108,   /* a = frame number; fd = Android's present fence of the transaction
+                               that showed it. It signals as the display starts showing the
+                               frame, so its signal time is a vsync; the producer's vblank
+                               ticks follow these (older producers ignore it, closing the fd). */
+    CHAM_PING = 109,        /* is the producer there? Sent every few seconds while the app is in
+                               front; a comes back in PONG. Older producers ignore it, so the
+                               presenter expects answers only once one has come. */
 };
 
-/* Input events, presenter -> producer (the KWin shim feeds them to KWin's
- * org_kde_kwin_fake_input). Positions are fractions of the surface so they
+/* Input events, presenter -> producer (chameleon-kernel serves them as evdev
+ * devices, and the Android keyboard's text through its input method or as
+ * keys). Positions are fractions of the surface (the touchpad's: of the
+ * window, once CHAM_WINDOW said its size) so they
  * map onto the producer's screen whatever its size or scale:
  *   pos   = CHAM_INPUT_POS(x, y), x/y in [0, 1] as 16.16 fixed point
  *   delta = CHAM_INPUT_DELTA(dx, dy), dx/dy as signed multiples of
@@ -62,12 +96,31 @@ enum cham_input_kind {
     CHAM_INPUT_TOUCH_UP = 3,       /* a = touch id */
     CHAM_INPUT_TOUCH_CANCEL = 4,
     CHAM_INPUT_TOUCH_FRAME = 5,    /* ends a group of touch events */
-    CHAM_INPUT_POINTER_MOTION = 6, /* b = delta */
-    CHAM_INPUT_POINTER_ABS = 7,    /* b = pos */
-    CHAM_INPUT_BUTTON = 8,         /* a = evdev button (BTN_LEFT = 0x110), b = 1 pressed / 0 released */
-    CHAM_INPUT_AXIS = 9,           /* a = 0 vertical / 1 horizontal, b = (int64) value * 256 */
-    CHAM_INPUT_KEYSYM = 10,        /* a = X keysym (0x01000000 | code point for Unicode), b = 1 / 0 */
-    CHAM_INPUT_KEY = 11,           /* a = evdev key code, b = 1 / 0 */
+    /* 6, 8, 9: no longer used */
+    CHAM_INPUT_POINTER_ABS = 7,    /* b = pos (a mouse the app hasn't captured) */
+    CHAM_INPUT_KEYSYM = 10,        /* a = X keysym (0x01000000 | code point for Unicode), b = 1 / 0:
+                                      typed with the keys of the desktop's layout */
+    CHAM_INPUT_KEY = 11,           /* a = evdev key code (a hardware keyboard), b = 1 / 0 */
+    CHAM_INPUT_MOUSE_BUTTON = 12,  /* a = evdev button (BTN_LEFT = 0x110), b = 1 pressed / 0 released */
+    CHAM_INPUT_MOUSE_WHEEL = 13,   /* a = 0 vertical / 1 horizontal, b = (int64) 1/120ths of a
+                                      notch, as evdev's REL_*WHEEL_HI_RES: + is up / right */
+    CHAM_INPUT_MOUSE_MOTION = 14,  /* b = CHAM_INPUT_DELTA(dx, dy) in the captured mouse's own
+                                      counts (not fractions of the surface) */
+    CHAM_INPUT_PAD_DOWN = 15,      /* trackpad mode, as TOUCH_DOWN .. TOUCH_FRAME: the surface is */
+    CHAM_INPUT_PAD_MOTION = 16,    /* a touchpad (the shim's evdev touchpad) */
+    CHAM_INPUT_PAD_UP = 17,
+    CHAM_INPUT_PAD_CANCEL = 18,
+    CHAM_INPUT_PAD_FRAME = 19,
+    CHAM_INPUT_TIME = 20,          /* b = when the events that follow happened: Android's event
+                                      time, CLOCK_MONOTONIC ns (the evdev devices' timestamps,
+                                      as the kernel stamps a device's events), 0 = now; holds
+                                      until the next TIME */
+    CHAM_INPUT_TEXT_CHAR = 21,     /* the Android keyboard's text: a = one code point, appended */
+    CHAM_INPUT_TEXT_COMMIT = 22,   /* the code points since the last COMMIT / PREEDIT are typed
+                                      text (replacing the text being composed, if any) */
+    CHAM_INPUT_TEXT_PREEDIT = 23,  /* ...are the text being composed now (none: no longer) */
+    CHAM_INPUT_TEXT_DELETE = 24,   /* a / b = characters to delete before / after the cursor, as the
+                                      user sees them: one Backspace / Delete each */
 };
 
 #define CHAM_INPUT_POS(x, y) ((uint64_t)(uint32_t)(x) | (uint64_t)(uint32_t)(y) << 32)
@@ -78,8 +131,11 @@ enum cham_input_kind {
 #define CHAM_INPUT_DY(v) ((int32_t)(uint32_t)((v) >> 32))
 
 /* BYE reasons. A replaced producer must not reconnect by itself, or two
- * producers would keep taking the screen from each other. */
+ * producers would keep taking the screen from each other. Neither should
+ * one whose CHAM_PROTO_VERSION differs from the presenter's (b = the
+ * presenter's). */
 #define CHAM_BYE_REPLACED 1u
+#define CHAM_BYE_VERSION 2u
 
 /* HELLO flags.
  *
@@ -91,6 +147,35 @@ enum cham_input_kind {
  * via the shim uses this. */
 #define CHAM_HELLO_COPY 1u
 
+/* CONFIG flags.
+ *
+ * CHAM_CONFIG_BACK_PRESSURE: SurfaceFlinger keeps every copied frame the
+ * presenter queues (API 31) instead of dropping one that arrives before the
+ * previous was latched, so the producer may have two frames waiting. */
+#define CHAM_CONFIG_BACK_PRESSURE 1u
+/* CHAM_CONFIG_CURSOR: the presenter shows a cursor plane (CHAM_CURSOR) as a
+ * layer of its own over the frame, so the compositor's pointer moves without
+ * a new frame. */
+#define CHAM_CONFIG_CURSOR 2u
+/* CHAM_CONFIG_PLANE: the presenter shows a frame whose buffer covers only part
+ * of the screen, or more of it (CHAM_PLANE), so the compositor may put it on
+ * the screen as it is (e.g. an app's window) where a display would. */
+#define CHAM_CONFIG_PLANE 4u
+
+/* PRESENT id: the frame on screen stays as it is (only the cursor changed). */
+#define CHAM_PRESENT_UNCHANGED 0xffffffffu
+
+/* CHAM_CURSOR id flags and its buffer rectangle (pixels, 16 bits each). */
+#define CHAM_CURSOR_NEW 0x80000000u
+#define CHAM_CURSOR_HIDE 0xffffffffu
+#define CHAM_CURSOR_RECT(x, y, w, h) \
+    ((uint64_t)((x) & 0xffffu) | (uint64_t)((y) & 0xffffu) << 16 | (uint64_t)((w) & 0xffffu) << 32 | \
+     (uint64_t)((h) & 0xffffu) << 48)
+#define CHAM_CURSOR_RECT_X(v) ((uint32_t)((v) & 0xffffu))
+#define CHAM_CURSOR_RECT_Y(v) ((uint32_t)((v) >> 16 & 0xffffu))
+#define CHAM_CURSOR_RECT_W(v) ((uint32_t)((v) >> 32 & 0xffffu))
+#define CHAM_CURSOR_RECT_H(v) ((uint32_t)((v) >> 48 & 0xffffu))
+
 struct cham_msg {
     uint32_t type;
     uint32_t id;
@@ -100,21 +185,6 @@ struct cham_msg {
 
 #define CHAM_CONFIG_WIDTH(m) ((uint32_t)((m)->a & 0xffffffffu))
 #define CHAM_CONFIG_HEIGHT(m) ((uint32_t)((m)->a >> 32))
-
-/* ---- client buffers: Wayland apps -> KWin's shim ----
- *
- * An app rendering through the Chameleon EGL vendor hands KWin its buffers
- * as zwp_linux_dmabuf_v1 wl_buffers. A dmabuf fd alone can't be turned back
- * into an AHardwareBuffer on Android, so the app first registers each buffer
- * with libchameleon.so inside KWin over a second socket,
- * "<KWin's Wayland socket path>.chameleon" (SOCK_SEQPACKET), and KWin's EGL
- * import then finds the AHardwareBuffer by the dmabuf's inode. */
-enum cham_client_msg_type {
-    CHAM_CLIENT_BUFFER_ADD = 200,    /* id = app's buffer id; next packet is the AHardwareBuffer */
-    CHAM_CLIENT_BUFFER_ACK = 201,    /* id, a = 1 registered / 0 failed */
-    CHAM_CLIENT_BUFFER_REMOVE = 202, /* id */
-};
-#define CHAM_CLIENT_SOCKET_SUFFIX ".chameleon"
 
 /* Filesystem socket the broker listens on for the presenter app; override
  * with $CHAMELEON_SOCKET. */

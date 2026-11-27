@@ -2,14 +2,16 @@
 /*
  * Desktop test for the fake KMS device, using the *real* libdrm the way
  * KWin 6.7's DRM backend does. Run through shim/test/run-host-test.sh, which
- * builds libchameleon.so with CHAM_HOST_TEST (memfd instead of
- * AHardwareBuffer) and LD_PRELOADs it.
+ * builds chameleon-kernel and libchameleon.so with CHAM_HOST_TEST (memfd
+ * instead of AHardwareBuffer), starts the one and LD_PRELOADs the other.
  *
  * A stub presenter thread plays the Chameleon app: it reports a
  * 1080x1800 @ 120 Hz surface and answers each PRESENT with RELEASE and a
  * FRAME_DONE 8.3 ms later.
  */
 #define _GNU_SOURCE
+#include <dirent.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -18,10 +20,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/un.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -33,6 +38,8 @@
 #ifndef DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE
 #define DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE 7
 #endif
+
+#include <linux/dma-buf.h>
 
 #include "../../common/cham_io.h"
 
@@ -61,6 +68,144 @@ static uint64_t now_ns(void)
 static const char *g_sock_path;
 static int g_presents, g_buffers_added, g_copy_mode, g_accepts;
 static volatile int g_stop_presenter;
+/* Set by the test: Android holds the frames it got (no FRAME_DONE until
+ * cleared), the app is frozen (presents get no answer), the app's connection
+ * drops, the app sends a CONFIG with these flags (-1: none). */
+static volatile int g_hold_latch, g_frozen, g_drop, g_send_flags = -1;
+static volatile int g_no_surface; /* ...that CONFIG is 0x0: the app's surface is gone */
+static volatile int g_slow_copy_ms; /* the "blit" fence of a RELEASE signals this late */
+static volatile int g_no_latch; /* FRAME_DONE says -1: Android latched nothing (nothing changed) */
+/* A display with its own vsync (VSYNC_PERIOD from g_vsync0): Android latches
+ * a frame VSYNC_LATCH before a vsync, late by up to 3 ms (its load), shows it
+ * on that vsync and sends its present fence (CHAM_PRESENTED). */
+#define VSYNC_PERIOD 8400000ull /* the display's real rate: nearly 1% off the mode's 120.00 Hz */
+#define VSYNC_LATCH 3000000ull
+static volatile uint64_t g_vsync0;
+/* The cursor plane as the app last heard it (CHAM_CURSOR), and how often. */
+static volatile uint32_t g_cursor_id;
+static volatile uint64_t g_cursor_a, g_cursor_b;
+static volatile int g_cursor_msgs, g_unchanged_presents;
+/* The primary plane's place as the app last heard it (CHAM_PLANE), how
+ * often, and whether the last PRESENT came right after one. */
+static volatile uint32_t g_plane_id;
+static volatile uint64_t g_plane_a, g_plane_b;
+static volatile int g_plane_msgs, g_present_placed;
+
+/* A present fence: {socket, vsync time}; the stand-in reads the time once it
+ * is there (a socket: the reader may have closed it, no SIGPIPE). */
+static void *signal_vsync(void *arg)
+{
+    uint64_t *a = arg, t = a[1];
+    int fd = (int)a[0];
+    free(arg);
+    struct timespec at = {(time_t)(t / 1000000000ull), (long)(t % 1000000000ull)};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL);
+    send(fd, &t, sizeof t, MSG_NOSIGNAL);
+    close(fd);
+    return NULL;
+}
+
+static void sleep_until(uint64_t t)
+{
+    struct timespec at = {(time_t)(t / 1000000000ull), (long)(t % 1000000000ull)};
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &at, NULL);
+}
+
+/* A frame copied now on the display of g_vsync0: latched before the next
+ * vsync it can make, shown on it. */
+static void stub_vsync_frame(int c, uint64_t frame, uint32_t id)
+{
+    static uint32_t rnd = 1;
+    uint64_t v0 = g_vsync0, t = now_ns() + 500000; /* the copy */
+    uint64_t k = (t + VSYNC_LATCH - v0) / VSYNC_PERIOD + 1, vsync = v0 + k * VSYNC_PERIOD;
+    rnd = rnd * 1103515245u + 12345u;
+    uint64_t latch = vsync - VSYNC_LATCH + (rnd >> 8) % 3000000;
+    sleep_until(latch);
+    struct cham_msg rel = {CHAM_RELEASE, id, 0, 0};
+    cham_send(c, &rel, -1);
+    struct cham_msg done = {CHAM_FRAME_DONE, 0, frame, latch};
+    cham_send(c, &done, -1);
+    int fence[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fence) != 0)
+        return;
+    uint64_t *arg = malloc(2 * sizeof *arg);
+    arg[0] = (uint64_t)fence[1];
+    arg[1] = vsync;
+    pthread_t th;
+    pthread_create(&th, NULL, signal_vsync, arg);
+    pthread_detach(th);
+    struct cham_msg presented = {CHAM_PRESENTED, 0, frame, 0};
+    cham_send(c, &presented, fence[0]);
+    close(fence[0]);
+}
+
+static void *signal_later(void *arg) /* a GPU copy finishing: {eventfd, after ms} */
+{
+    int efd = ((int *)arg)[0], ms = ((int *)arg)[1];
+    free(arg);
+    usleep((useconds_t)ms * 1000);
+    uint64_t one = 1;
+    if (write(efd, &one, sizeof one) != sizeof one)
+        perror("eventfd");
+    close(efd);
+    return NULL;
+}
+/* Like the app, the stub holds each buffer it was sent until BUFFER_REMOVE
+ * or the connection ends: g_held of them now. */
+#define STUB_SLOTS 64
+static int g_held_fd[STUB_SLOTS];
+static volatile int g_held;
+
+static volatile uint32_t g_present_slot; /* the buffer of the last frame to show */
+
+/* A pixel of a buffer the app holds (the test build's buffers are files of
+ * `width` pixels a row); 0xdeadbeef if it holds none there. */
+static uint32_t stub_pixel(uint32_t slot, uint32_t width, uint32_t x, uint32_t y)
+{
+    uint32_t v = 0xdeadbeef;
+    if (slot < STUB_SLOTS && g_held_fd[slot] >= 0)
+        pread(g_held_fd[slot], &v, sizeof v, ((off_t)y * width + x) * 4);
+    return v;
+}
+
+static void stub_drop_all(void)
+{
+    for (int i = 0; i < STUB_SLOTS; i++) {
+        if (g_held_fd[i] >= 0) {
+            close(g_held_fd[i]);
+            g_held_fd[i] = -1;
+            g_held--;
+        }
+    }
+}
+
+static void stub_add(int c, uint32_t id)
+{
+    char packet[64];
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    struct iovec iov = {.iov_base = packet, .iov_len = sizeof packet};
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    int fd = -1;
+    if (recvmsg(c, &mh, MSG_CMSG_CLOEXEC) > 0) { /* the (fake) AHardwareBuffer */
+        struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+        if (cm && cm->cmsg_type == SCM_RIGHTS)
+            memcpy(&fd, CMSG_DATA(cm), sizeof fd);
+    }
+    if (id >= STUB_SLOTS || fd < 0) {
+        if (fd >= 0)
+            close(fd);
+        return;
+    }
+    if (g_held_fd[id] >= 0)
+        close(g_held_fd[id]);
+    else
+        g_held++;
+    g_held_fd[id] = fd;
+}
 
 static void *presenter_main(void *arg)
 {
@@ -73,10 +218,37 @@ static void *presenter_main(void *arg)
     listen(l, 1);
     int c = accept(l, NULL, NULL);
     g_accepts++;
-    struct cham_msg cfg = {CHAM_CONFIG, 0, 1080ull | (1800ull << 32), 120000};
+    for (int i = 0; i < STUB_SLOTS; i++)
+        g_held_fd[i] = -1;
+    struct cham_msg cfg = {CHAM_CONFIG, CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE, 1080ull | (1800ull << 32),
+                           120000}; /* as the app */
     cham_send(c, &cfg, -1);
     int64_t displayed = -1;
+    uint64_t held = 0; /* the newest frame Android holds, 0 for none */
+    int placed = 0;    /* a CHAM_PLANE came for the next PRESENT */
     while (!g_stop_presenter) {
+        if (g_send_flags >= 0) {
+            struct cham_msg flags = cfg;
+            flags.id = (uint32_t)g_send_flags;
+            if (g_no_surface)
+                flags.a = 0;
+            cham_send(c, &flags, -1);
+            g_send_flags = -1;
+        }
+        if (held && !g_hold_latch) {
+            struct cham_msg done = {CHAM_FRAME_DONE, 0, held, now_ns()};
+            cham_send(c, &done, -1);
+            held = 0;
+        }
+        if (g_drop) {
+            stub_drop_all();
+            close(c);
+            c = accept(l, NULL, NULL);
+            g_accepts++;
+            cham_send(c, &cfg, -1);
+            g_drop = 0;
+            continue;
+        }
         struct pollfd p[2] = {{c, POLLIN, 0}, {l, POLLIN, 0}};
         if (poll(p, 2, 50) <= 0)
             continue;
@@ -84,6 +256,7 @@ static void *presenter_main(void *arg)
             /* like the app: the newest producer wins, the old one is told */
             struct cham_msg bye = {CHAM_BYE, 0, CHAM_BYE_REPLACED, 0};
             cham_send(c, &bye, -1);
+            stub_drop_all();
             close(c);
             c = accept(l, NULL, NULL);
             g_accepts++;
@@ -100,20 +273,75 @@ static void *presenter_main(void *arg)
         if (m.type == CHAM_HELLO) {
             g_copy_mode = (m.b & CHAM_HELLO_COPY) != 0;
         } else if (m.type == CHAM_BUFFER_ADD) {
-            char packet[64];
-            recv(c, packet, sizeof packet, 0); /* the (fake) AHardwareBuffer */
+            stub_add(c, m.id);
             g_buffers_added++;
-        } else if (m.type == CHAM_PRESENT) {
+        } else if (m.type == CHAM_BUFFER_REMOVE) {
+            if (m.id < STUB_SLOTS && g_held_fd[m.id] >= 0) {
+                close(g_held_fd[m.id]);
+                g_held_fd[m.id] = -1;
+                g_held--;
+            }
+        } else if (m.type == CHAM_CURSOR) {
+            g_cursor_id = m.id;
+            g_cursor_a = m.a;
+            g_cursor_b = m.b;
+            g_cursor_msgs++;
+            if (m.id != CHAM_CURSOR_HIDE && (m.id & CHAM_CURSOR_NEW)) { /* copied: the app is done with it */
+                struct cham_msg rel = {CHAM_RELEASE, m.id & ~CHAM_CURSOR_NEW, 0, 0};
+                cham_send(c, &rel, -1);
+            }
+        } else if (m.type == CHAM_PLANE) {
+            g_plane_id = m.id;
+            g_plane_a = m.a;
+            g_plane_b = m.b;
+            g_plane_msgs++;
+            placed = 1;
+        } else if (m.type == CHAM_PRESENT && !g_frozen) {
+            g_present_placed = placed;
+            placed = 0;
+            if (m.id != CHAM_PRESENT_UNCHANGED)
+                g_present_slot = m.id;
             g_presents++;
+            g_unchanged_presents += m.id == CHAM_PRESENT_UNCHANGED;
+            int slow_copy_ms = g_slow_copy_ms;
+            struct cham_msg queued = {CHAM_FRAME_QUEUED, 0, m.a, now_ns()};
+            cham_send(c, &queued, -1); /* "copied": the flip may complete on the next tick */
+            if (g_vsync0) {
+                stub_vsync_frame(c, m.a, m.id);
+                continue;
+            }
+            if (g_no_latch) { /* answered before that tick */
+                struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, UINT64_MAX};
+                cham_send(c, &done, -1);
+            }
             usleep(8333);
             struct cham_msg rel = {CHAM_RELEASE, (uint32_t)m.id, 0, 0};
-            cham_send(c, &rel, -1); /* copy mode: released right after the "blit" */
+            int fence = -1;
+            if (slow_copy_ms) { /* with the blit's fence, still running */
+                fence = eventfd(0, EFD_CLOEXEC);
+                int *arg = malloc(2 * sizeof *arg);
+                arg[0] = dup(fence);
+                arg[1] = slow_copy_ms;
+                pthread_t t;
+                pthread_create(&t, NULL, signal_later, arg);
+                pthread_detach(t);
+            }
+            cham_send(c, &rel, fence); /* copy mode: released right after the "blit" */
+            if (fence >= 0)
+                close(fence);
             (void)displayed;
             displayed = m.id;
+            if (g_hold_latch) {
+                held = m.a;
+                continue;
+            }
+            if (g_no_latch)
+                continue; /* answered already */
             struct cham_msg done = {CHAM_FRAME_DONE, 0, m.a, now_ns()};
             cham_send(c, &done, -1);
         }
     }
+    stub_drop_all();
     close(c);
     close(l);
     return NULL;
@@ -138,8 +366,40 @@ static uint32_t prop_id(int fd, uint32_t obj, uint32_t type, const char *name, u
     return id;
 }
 
+static volatile int g_stop_calls;
+
+static void *calls_main(void *arg) /* a thread in card calls while another forks */
+{
+    int fd = (int)(intptr_t)arg;
+    while (!g_stop_calls)
+        drmModeFreeResources(drmModeGetResources(fd));
+    return NULL;
+}
+
+static volatile int g_stop_probe;
+static double g_probe_max_ms;
+
+static void *probe_main(void *arg) /* card requests while a flip waits: how long each takes */
+{
+    int fd = (int)(intptr_t)arg;
+    while (!g_stop_probe) {
+        struct timespec a, b;
+        clock_gettime(CLOCK_MONOTONIC, &a);
+        drmModeFreeResources(drmModeGetResources(fd));
+        clock_gettime(CLOCK_MONOTONIC, &b);
+        double ms = (b.tv_sec - a.tv_sec) * 1e3 + (b.tv_nsec - a.tv_nsec) / 1e6;
+        if (ms > g_probe_max_ms)
+            g_probe_max_ms = ms;
+        usleep(2000);
+    }
+    return NULL;
+}
+
 static int g_flips;
 static uint64_t g_last_flip_ns, g_max_gap_ns;
+#define FLIP_TIMES 200
+static uint64_t g_flip_times[FLIP_TIMES]; /* the first page-flip events' times, while g_record */
+static int g_record, g_recorded;
 static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned crtc, void *data)
 {
     (void)fd, (void)seq, (void)crtc, (void)data;
@@ -148,6 +408,62 @@ static void on_flip(int fd, unsigned seq, unsigned sec, unsigned usec, unsigned 
         g_max_gap_ns = t - g_last_flip_ns;
     g_last_flip_ns = t;
     g_flips++;
+    if (g_record && g_recorded < FLIP_TIMES)
+        g_flip_times[g_recorded++] = t;
+}
+
+/* This process's fds of the file with inode `ino`. */
+/* Fds of the file in every process: the test's and chameleon-kernel's,
+ * which keeps a buffer while its dmabuf is held, as the kernel. */
+static int fds_anywhere(dev_t dev, ino_t ino)
+{
+    DIR *procs = opendir("/proc");
+    int n = 0;
+    for (struct dirent *p; procs && (p = readdir(procs));) {
+        char dir[300];
+        if (p->d_name[0] < '1' || p->d_name[0] > '9')
+            continue;
+        snprintf(dir, sizeof dir, "/proc/%s/fd", p->d_name);
+        DIR *fds = opendir(dir);
+        for (struct dirent *e; fds && (e = readdir(fds));) {
+            char path[600];
+            struct stat st;
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            if (e->d_name[0] != '.' && stat(path, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+                n++;
+        }
+        if (fds)
+            closedir(fds);
+    }
+    if (procs)
+        closedir(procs);
+    return n;
+}
+
+/* A commit as the ioctl takes it (libdrm drops an empty one and a property set twice). */
+static int raw_commit(int fd, uint32_t flags, uint32_t obj, uint32_t nprops, const uint32_t *props, const uint64_t *values)
+{
+    struct drm_mode_atomic a = {.flags = flags,
+                                .count_objs = obj ? 1 : 0,
+                                .objs_ptr = (uintptr_t)&obj,
+                                .count_props_ptr = (uintptr_t)&nprops,
+                                .props_ptr = (uintptr_t)props,
+                                .prop_values_ptr = (uintptr_t)values};
+    return drmIoctl(fd, DRM_IOCTL_MODE_ATOMIC, &a);
+}
+
+static void flip_to(int fd, uint32_t plane_id, uint32_t p_fb, uint32_t fb)
+{
+    drmModeAtomicReq *req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fb);
+    if (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0)
+        printf("       (flip commit: %s)\n", strerror(errno));
+    drmModeAtomicFree(req);
+}
+
+static double ms_since(uint64_t t)
+{
+    return (now_ns() - t) / 1e6;
 }
 
 static int wait_flip(int fd, int timeout_ms)
@@ -161,8 +477,77 @@ static int wait_flip(int fd, int timeout_ms)
     return g_flips > before;
 }
 
-int main(void)
+/* Run again by exec, with libchameleon.so preloaded as in every program of
+ * a session: a card fd it inherited is still the card. */
+static int exec_card(int fd)
 {
+    struct stat st;
+    drmModeRes *r = drmModeGetResources(fd);
+    return fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226 && r && r->count_crtcs == 1 ? 0 : 1;
+}
+
+/* ...and an inherited render-node fd is still the render node (the service
+ * tells which node a file is when it meets an unknown copy). */
+static int exec_render(int fd)
+{
+    struct stat st;
+    drmVersionPtr v = drmGetVersion(fd);
+    int ok = fstat(fd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128) && v;
+    drmFreeVersion(v);
+    errno = 0;
+    return ok && drmModeGetResources(fd) == NULL && errno == EACCES ? 0 : 1;
+}
+
+static int count_sockets(void)
+{
+    int sockets = 0;
+    char link[64], path[64];
+    for (int fd = 0; fd < 256; fd++) {
+        snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+        ssize_t n = readlink(path, link, sizeof link - 1);
+        sockets += n > 0 && strncmp(link, "socket:", 7) == 0;
+    }
+    return sockets;
+}
+
+/* ...and a program using only ordinary pipes never talks to chameleon-kernel
+ * (no socket appears). */
+static int pipes_only(void)
+{
+    int before = count_sockets(); /* inherited ones */
+    for (int i = 0; i < 50; i++) {
+        int p[2];
+        struct stat st;
+        if (pipe(p) != 0 || fstat(p[0], &st) != 0 || fstat(p[1], &st) != 0 || !S_ISFIFO(st.st_mode))
+            return 1;
+        drmVersion *v = drmGetVersion(p[0]); /* a DRM ioctl on a pipe: ENOTTY, from the pipe */
+        if (v)
+            return 1;
+    }
+    return count_sockets() == before ? 0 : 1;
+}
+
+/* Runs this program again with `mode` (and `arg`) and returns its exit code. */
+static int run_self(const char *mode, const char *arg)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/proc/self/exe", "kms_test", mode, arg, (char *)NULL);
+        _exit(127);
+    }
+    int status = -1;
+    waitpid(pid, &status, 0);
+    return WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 3 && strcmp(argv[1], "exec-card") == 0)
+        return exec_card(atoi(argv[2]));
+    if (argc == 3 && strcmp(argv[1], "exec-render") == 0)
+        return exec_render(atoi(argv[2]));
+    if (argc >= 2 && strcmp(argv[1], "pipes") == 0)
+        return pipes_only();
     const char *dev_path = getenv("CHAMELEON_DRM_PATH");
     g_sock_path = getenv("CHAMELEON_SOCKET");
     if (!dev_path || !g_sock_path) {
@@ -174,6 +559,7 @@ int main(void)
 
     printf("device\n");
     struct stat st;
+    char num_r[16];
     CHECK(stat(dev_path, &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 226, "stat: DRM char device");
     int fd = open(dev_path, O_RDWR | O_CLOEXEC);
     CHECK(fd >= 0, "open fake path");
@@ -187,22 +573,19 @@ int main(void)
     CHECK(drmGetCap(fd, DRM_CAP_ADDFB2_MODIFIERS, &cap) == 0 && cap == 0, "implicit modifiers only");
     CHECK(drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "atomic client cap");
     CHECK(drmSetClientCap(fd, DRM_CLIENT_CAP_PLANE_COLOR_PIPELINE, 1) != 0, "color pipeline refused");
-    drmDevicePtr dev = NULL;
-    CHECK(drmGetDevice2(fd, 0, &dev) == 0 && dev && dev->bustype == DRM_BUS_PLATFORM &&
-              strcmp(dev->nodes[DRM_NODE_PRIMARY], dev_path) == 0,
-          "drmGetDevice2: platform device at the fake path");
-    drmFreeDevice(&dev);
     drm_magic_t magic;
     CHECK(drmGetMagic(fd, &magic) == 0 && drmAuthMagic(fd, magic) == 0, "magic / auth (RenderDevice::open)");
     CHECK(drmIsMaster(fd), "drmIsMaster");
 
     printf("objects\n");
     drmModePlaneRes *pres = drmModeGetPlaneResources(fd);
-    CHECK(pres && pres->count_planes == 1, "one plane");
-    uint32_t plane_id = pres ? pres->planes[0] : 0;
+    CHECK(pres && pres->count_planes == 2, "two planes (the app shows a cursor plane)");
+    uint32_t plane_id = pres ? pres->planes[0] : 0, cursor_id = pres && pres->count_planes > 1 ? pres->planes[1] : 0;
     drmModeFreePlaneResources(pres);
     drmModePlane *plane = drmModeGetPlane(fd, plane_id);
-    CHECK(plane && plane->count_formats == 2 && plane->possible_crtcs == 1, "plane: 2 formats, crtc mask 1");
+    CHECK(plane && plane->count_formats == 4 && plane->formats[0] == DRM_FORMAT_XRGB8888 &&
+              plane->possible_crtcs == 1,
+          "plane: XRGB8888 first of 4 formats, crtc mask 1");
     drmModeFreePlane(plane);
     uint64_t type = 99;
     uint32_t p_type = prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "type", &type);
@@ -213,9 +596,17 @@ int main(void)
     drmModeRes *res = drmModeGetResources(fd);
     CHECK(res && res->count_crtcs == 1 && res->count_connectors == 1 && res->count_encoders == 1,
           "resources: 1 crtc / connector / encoder");
+    if (!res || !res->count_crtcs || !res->count_connectors) {
+        printf("\nFAILED: no card objects to test\n");
+        return 1;
+    }
     uint32_t crtc_id = res->crtcs[0], conn_id = res->connectors[0];
     drmModeConnector *conn = drmModeGetConnector(fd, conn_id);
     CHECK(conn && conn->connection == DRM_MODE_CONNECTED && conn->count_modes == 1, "connector connected, 1 mode");
+    if (!conn || !conn->count_modes) {
+        printf("\nFAILED: no connector mode to test\n");
+        return 1;
+    }
     drmModeModeInfo mode = conn->modes[0];
     CHECK(mode.hdisplay == 1080 && mode.vdisplay == 1800 && mode.vrefresh == 120, "mode %s @ %u Hz (from the app)",
           mode.name, mode.vrefresh);
@@ -226,6 +617,26 @@ int main(void)
     CHECK(drmModeGetConnectorTypeName(conn->connector_type) &&
               strcmp(drmModeGetConnectorTypeName(conn->connector_type), "DSI") == 0,
           "connector name DSI-%u", conn->connector_type_id);
+    /* An EDID block a compositor can parse: header, checksum, name, timing. */
+    uint32_t p_edid = prop_id(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR, "EDID", NULL);
+    drmModeObjectProperties *cprops = drmModeObjectGetProperties(fd, conn_id, DRM_MODE_OBJECT_CONNECTOR);
+    uint64_t edid_id = 0;
+    for (uint32_t i = 0; cprops && i < cprops->count_props; i++)
+        if (cprops->props[i] == p_edid)
+            edid_id = cprops->prop_values[i];
+    drmModeFreeObjectProperties(cprops);
+    drmModePropertyBlobRes *edid = edid_id ? drmModeGetPropertyBlob(fd, (uint32_t)edid_id) : NULL;
+    const uint8_t *eb = edid ? edid->data : NULL;
+    uint8_t sum = 0;
+    for (int i = 0; eb && i < 128; i++)
+        sum = (uint8_t)(sum + eb[i]);
+    CHECK(edid && edid->length == 128 && eb[0] == 0 && eb[1] == 0xff && eb[7] == 0 && sum == 0,
+          "EDID: a valid 128-byte block");
+    CHECK(eb && eb[75] == 0xfc && memcmp(eb + 77, "Chameleon\n", 10) == 0, "EDID: named Chameleon");
+    CHECK(eb && (eb[56] | (eb[58] >> 4) << 8) == mode.hdisplay && (eb[59] | (eb[61] >> 4) << 8) == mode.vdisplay &&
+              (uint32_t)(eb[54] | eb[55] << 8) == mode.clock / 10,
+          "EDID: the mode is its preferred timing");
+    drmModeFreePropertyBlob(edid);
     drmModeFreeConnector(conn);
     drmModeCrtc *crtc = drmModeGetCrtc(fd, crtc_id);
     CHECK(crtc && !crtc->mode_valid, "crtc initially off");
@@ -262,10 +673,60 @@ int main(void)
         drmCloseBufferHandle(fd, handle);
         CHECK(ok, "bo %d: gbm -> dmabuf -> prime handle -> fb %u", i, fbs[i]);
     }
+    {
+        uint32_t handles[4] = {gbm_bo_get_handle(bos[0]).u32}, pitches[4] = {gbm_bo_get_stride(bos[0])},
+                 offsets[4] = {0}, fb = 0;
+        CHECK(drmModeAddFB2(fd, 1080, 1800, DRM_FORMAT_RGB565, handles, pitches, offsets, &fb, 0) != 0 &&
+                  errno == EINVAL,
+              "a framebuffer in a format no plane shows is refused (EINVAL)");
+        struct gbm_bo *xrgb = gbm_bo_create(gbm, 640, 480, DRM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+        handles[0] = xrgb ? gbm_bo_get_handle(xrgb).u32 : 0;
+        pitches[0] = xrgb ? gbm_bo_get_stride(xrgb) : 0;
+        CHECK(xrgb && drmModeAddFB2(fd, 640, 480, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0) == 0 &&
+                  drmModeRmFB(fd, fb) == 0,
+              "an XRGB8888 framebuffer is accepted");
+        if (xrgb)
+            gbm_bo_destroy(xrgb);
+    }
     int foreign = memfd_create("not-ours", 0);
     uint32_t h;
     CHECK(drmPrimeFDToHandle(fd, foreign, &h) != 0, "foreign dmabuf rejected (no direct scanout)");
     close(foreign);
+    /* As in the kernel, a dmabuf keeps its buffer after gbm_bo_destroy
+     * (KWin 6.8 keeps only the fd), until nothing holds it any more. */
+    {
+        struct gbm_bo *bo = gbm_bo_create(gbm, 256, 256, DRM_FORMAT_XBGR8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+        uint32_t stride = bo ? gbm_bo_get_stride(bo) : 0, kept = 0;
+        int dmabuf = bo ? gbm_bo_get_fd(bo) : -1;
+        struct stat st = {0};
+        fstat(dmabuf, &st);
+        if (bo)
+            gbm_bo_destroy(bo);
+        uint32_t handles[4] = {0}, pitches[4] = {stride}, offsets[4] = {0}, fb = 0;
+        int ok = drmPrimeFDToHandle(fd, dmabuf, &handles[0]) == 0 && handles[0];
+        ok = ok && drmModeAddFB2(fd, 256, 256, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &fb, 0) == 0 &&
+             drmModeRmFB(fd, fb) == 0;
+        CHECK(ok, "after gbm_bo_destroy, its dmabuf still gives a handle and a framebuffer");
+        uint32_t again = 0;
+        CHECK(drmPrimeFDToHandle(fd, dmabuf, &again) == 0 && again == handles[0], "...the same handle again (%u, %u)",
+              handles[0], again);
+        int exported = -1;
+        struct stat est = {0};
+        CHECK(drmPrimeHandleToFD(fd, handles[0], DRM_CLOEXEC, &exported) == 0 && fstat(exported, &est) == 0 &&
+                  est.st_ino == st.st_ino,
+              "...exported again through the card, the same dmabuf");
+        if (exported >= 0)
+            close(exported);
+        drmCloseBufferHandle(fd, handles[0]);
+        kept = (uint32_t)fds_anywhere(st.st_dev, st.st_ino);
+        close(dmabuf);
+        struct gbm_bo *next = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING); /* frees the rest */
+        if (next)
+            gbm_bo_destroy(next);
+        CHECK(kept > 1 && fds_anywhere(st.st_dev, st.st_ino) == 0,
+              "freed everywhere once its last fd is closed (%u fds while held, %d after)", kept,
+              fds_anywhere(st.st_dev, st.st_ino));
+    }
 
     printf("modeset\n");
     uint32_t blob = 0;
@@ -321,6 +782,46 @@ int main(void)
     drmModeAtomicFree(req);
     drmModeDestroyPropertyBlob(fd, rotated_blob);
 
+    /* A mode blob the CRTC uses outlives its destruction, as in the kernel:
+     * after a hotplug KWin destroys the old mode's blob, then still commits
+     * a frame on it before its modeset. */
+    uint32_t used_blob = 0;
+    drmModeCreatePropertyBlob(fd, &mode, sizeof mode, &used_blob);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, crtc_id, p_mode, used_blob);
+    int used = drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0;
+    drmModeAtomicFree(req);
+    used = used && drmModeDestroyPropertyBlob(fd, used_blob) == 0;
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_dst[0], 0);
+    CHECK(used && drmModeAtomicCommit(fd, req, 0, NULL) == 0,
+          "the CRTC's mode blob, destroyed, still holds the mode for the next commit");
+    drmModeAtomicFree(req);
+    crtc = drmModeGetCrtc(fd, crtc_id);
+    CHECK(crtc && crtc->mode_valid && crtc->mode.hdisplay == mode.hdisplay, "...and GETCRTC still shows it");
+    drmModeFreeCrtc(crtc);
+    CHECK(drmModeDestroyPropertyBlob(fd, used_blob) != 0, "destroying it twice fails");
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, crtc_id, p_mode, blob);
+    CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL) == 0, "back to the first mode blob");
+    drmModeAtomicFree(req);
+    int fence_pipe[2];
+    if (pipe(fence_pipe) != 0)
+        return 1;
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)fence_pipe[0]);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) == 0, "a commit with an IN_FENCE_FD (sent along with it)");
+    drmModeAtomicFree(req);
+    CHECK(fcntl(fence_pipe[0], F_GETFD) >= 0, "...which stays the caller's");
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    drmModeAtomicAddProperty(req, plane_id, p_fence, 9999);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) != 0 && errno == EINVAL, "IN_FENCE_FD that isn't an open file: EINVAL");
+    drmModeAtomicFree(req);
+    close(fence_pipe[0]);
+    close(fence_pipe[1]);
+
     printf("page flips (presenter at 120 Hz)\n");
     int ok = 1, busy_checked = 0;
     uint64_t t0 = now_ns();
@@ -330,7 +831,7 @@ int main(void)
         drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)-1);
         if (drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0)
             ok = 0;
-        if (!busy_checked) {
+        if (!busy_checked && i == 3) { /* the first flip after a modeset may complete at once */
             busy_checked = 1;
             CHECK(drmModeAtomicCommit(fd, req, DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0 &&
                       errno == EBUSY,
@@ -346,13 +847,793 @@ int main(void)
           g_buffers_added);
     CHECK(g_copy_mode, "shim asked for copy mode");
 
+    /* A flip completes once Android latched the frames it must have by then:
+     * the one before (one frame may wait in Android), or with back pressure
+     * the one before that (two may), else the watchdog completes it. */
+    printf("frames waiting in Android\n");
+    usleep(50000); /* the last flip completed when its frame was copied; Android shows it now */
+    g_hold_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "a frame copied, not shown yet: its flip completes");
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    uint64_t t = now_ns();
+    int early = wait_flip(fd, 120), late = !early && wait_flip(fd, 500);
+    double ms = ms_since(t);
+    CHECK(!early, "the next one waits for Android to show the first");
+    CHECK(late && ms > 200 && ms < 400, "...until the watchdog completes it (%.0f ms)", ms);
+    g_hold_latch = 0;
+    usleep(150000);
+    g_send_flags = CHAM_CONFIG_BACK_PRESSURE | CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+    usleep(150000);
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    wait_flip(fd, 100);
+    usleep(50000);
+    g_hold_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    int first = wait_flip(fd, 100);
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(first && wait_flip(fd, 60), "with back pressure, a second frame may wait in Android");
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    t = now_ns();
+    early = wait_flip(fd, 120);
+    late = !early && wait_flip(fd, 500);
+    CHECK(!early && late, "...a third waits (%.0f ms)", ms_since(t));
+    g_hold_latch = 0;
+    usleep(150000);
+    g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+    usleep(150000);
+
+    /* A flip needs the frame before it copied, not its own: the first one
+     * after the app froze still completes, the next waits for the watchdog. */
+    printf("app frozen\n");
+    g_frozen = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    first = wait_flip(fd, 100);
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    t = now_ns();
+    ok = wait_flip(fd, 500);
+    ms = ms_since(t);
+    CHECK(first && ok && ms > 200 && ms < 400, "the watchdog completes the next flip (%.0f ms)", ms);
+    g_frozen = 0;
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "the app answers again: flips complete at once");
+
+    /* The flip waits for the copy's fence, as a display engine completes a
+     * flip only when scanout is done with the old buffer; the compositor's
+     * other requests don't wait with it. */
+    printf("a slow copy\n");
+    pthread_t probe;
+    g_probe_max_ms = 0;
+    g_stop_probe = 0;
+    pthread_create(&probe, NULL, probe_main, (void *)(intptr_t)fd);
+    g_slow_copy_ms = 80;
+    t = now_ns();
+    flip_to(fd, plane_id, p_fb, fbs[2]); /* its copy is still running when the app releases it */
+    ok = wait_flip(fd, 300);
+    g_slow_copy_ms = 0;
+    if (ok && ms_since(t) < 70) { /* completed before the release came: the next flip waits */
+        flip_to(fd, plane_id, p_fb, fbs[0]);
+        ok = wait_flip(fd, 300);
+    }
+    ms = ms_since(t);
+    g_stop_probe = 1;
+    pthread_join(probe, NULL);
+    CHECK(ok && ms > 75, "a flip after the release completes once that copy is done (%.0f ms)", ms);
+    CHECK(g_probe_max_ms < 20, "other card requests meanwhile don't wait for it (longest %.1f ms)", g_probe_max_ms);
+    flip_to(fd, plane_id, p_fb, fbs[1]);
+    CHECK(wait_flip(fd, 100), "copies done at once again: flips complete at once");
+
+    /* A commit that changes nothing Android shows (e.g. the cursor plane set
+     * to where it already is) latches nothing; Android's latch time is -1. */
+    printf("nothing latched\n");
+    g_no_latch = 1;
+    flip_to(fd, plane_id, p_fb, fbs[2]);
+    ok = wait_flip(fd, 100);
+    g_no_latch = 0;
+    CHECK(ok, "a flip whose frame latched nothing (latch time -1) completes at once");
+    flip_to(fd, plane_id, p_fb, fbs[0]);
+    CHECK(wait_flip(fd, 100), "...and the next one too");
+
+    /* Page-flip events come on the display's vsync, whole refreshes apart,
+     * though Android's latch times wander. */
+    printf("flips on the display's vsync\n");
+    uint64_t v0 = now_ns();
+    g_vsync0 = v0;
+    ok = 1;
+    for (int i = 0; i < 160 && ok; i++) {
+        g_record = i >= 40; /* the grid is known by then */
+        flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+        ok = wait_flip(fd, 200);
+    }
+    g_record = 0;
+    usleep(30000);
+    g_vsync0 = 0;
+    int whole = 0, phase_ok = 0;
+    double worst = 0, worst_phase = 0;
+    for (int i = 0; i < g_recorded; i++) {
+        if (i) {
+            uint64_t d = g_flip_times[i] - g_flip_times[i - 1];
+            uint64_t n = (d + VSYNC_PERIOD / 2) / VSYNC_PERIOD;
+            double off = ((double)d - (double)(n * VSYNC_PERIOD)) / 1e6;
+            off = off < 0 ? -off : off;
+            whole += n >= 1 && off < 0.25;
+            if (off > worst)
+                worst = off;
+        }
+        /* at the start of the stretch Android latches in */
+        double ph = (double)((g_flip_times[i] + VSYNC_LATCH - v0) % VSYNC_PERIOD) / 1e6;
+        if (ph > VSYNC_PERIOD / 2e6)
+            ph -= VSYNC_PERIOD / 1e6;
+        phase_ok += ph > -0.3 && ph < 0.8;
+        if ((ph < 0 ? -ph : ph) > (worst_phase < 0 ? -worst_phase : worst_phase))
+            worst_phase = ph;
+    }
+    CHECK(ok && g_recorded == 120, "120 flips while Android's latch times wander by 3 ms");
+    CHECK(whole == g_recorded - 1, "...all whole refreshes apart (%d of %d; worst %.2f ms off)", whole,
+          g_recorded - 1, worst);
+    CHECK(phase_ok == g_recorded, "...at the point Android latches in (%d of %d; worst %.2f ms off)", phase_ok,
+          g_recorded, worst_phase);
+
+    printf("app reconnects\n");
+    int added = g_buffers_added, accepts = g_accepts;
+    g_drop = 1;
+    for (int i = 0; i < 30 && g_accepts == accepts; i++)
+        usleep(100000);
+    CHECK(g_accepts == accepts + 1, "the shim reconnects after the app's connection dropped");
+    usleep(100000);
+    ok = 1;
+    t = now_ns();
+    for (int i = 1; i <= 10; i++) {
+        flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+        if (!wait_flip(fd, 100))
+            ok = 0;
+    }
+    CHECK(ok, "10 flips completed by the app again (%.0f ms)", ms_since(t));
+    CHECK(g_buffers_added == added + 3, "its 3 buffers sent again (%d)", g_buffers_added - added);
+
+    /* Each mode change gives KWin a new set of buffers and it drops the old
+     * one. The app must drop them too once nothing shows them any more (no
+     * framebuffer, not on the plane), like a display engine, or its table
+     * fills up and the screen freezes. */
+    printf("buffer sets replaced (mode changes)\n");
+    struct stat last = {0};
+    ok = 1;
+    for (int round = 0; round < 30; round++) {
+        struct gbm_bo *set[3];
+        uint32_t set_fbs[3];
+        for (int i = 0; i < 3; i++) {
+            set[i] = gbm_bo_create(gbm, 1080, 1800, DRM_FORMAT_XBGR8888, GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+            int dmabuf = set[i] ? gbm_bo_get_fd(set[i]) : -1;
+            uint32_t handle = 0;
+            if (dmabuf < 0 || drmPrimeFDToHandle(fd, dmabuf, &handle) != 0)
+                ok = 0;
+            if (round == 29 && i == 2)
+                fstat(dmabuf, &last);
+            close(dmabuf);
+            uint32_t handles[4] = {handle}, pitches[4] = {set[i] ? gbm_bo_get_stride(set[i]) : 0}, offsets[4] = {0};
+            if (drmModeAddFB2(fd, 1080, 1800, DRM_FORMAT_XBGR8888, handles, pitches, offsets, &set_fbs[i], 0) != 0)
+                ok = 0;
+            drmCloseBufferHandle(fd, handle);
+        }
+        for (int i = 0; i < 3; i++) {
+            flip_to(fd, plane_id, p_fb, set_fbs[i]);
+            if (!wait_flip(fd, 100))
+                ok = 0;
+        }
+        flip_to(fd, plane_id, p_fb, fbs[0]);
+        if (!wait_flip(fd, 100))
+            ok = 0;
+        for (int i = 0; i < 3; i++) {
+            drmModeRmFB(fd, set_fbs[i]);
+            gbm_bo_destroy(set[i]);
+        }
+    }
+    usleep(100000);
+    CHECK(ok, "30 sets of 3 buffers shown and dropped");
+    CHECK(g_held <= 4, "the app holds only what can still be shown (%d buffers)", g_held);
+    {
+        struct gbm_bo *next = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING); /* frees the rest */
+        if (next)
+            gbm_bo_destroy(next);
+    }
+    CHECK(last.st_ino && fds_anywhere(last.st_dev, last.st_ino) == 0, "a dropped buffer is freed everywhere (%d fds)",
+          fds_anywhere(last.st_dev, last.st_ino));
+
+    /* A cursor plane as vkms has one (shim/test/refvm.sh): the app shows it
+     * over the frame, and a commit of the cursor alone leaves the frame as
+     * it is. */
+    printf("cursor plane\n");
+    {
+        uint64_t ctype = 0, cap_w = 0, cap_h = 0;
+        prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "type", &ctype);
+        drmModePlane *cpl = drmModeGetPlane(fd, cursor_id);
+        int argb = 0;
+        for (uint32_t i = 0; cpl && i < cpl->count_formats; i++)
+            argb |= cpl->formats[i] == DRM_FORMAT_ARGB8888;
+        CHECK(ctype == 2 && cpl && cpl->possible_crtcs == 1 && argb, "the second is a Cursor plane, ARGB8888, crtc mask 1");
+        drmModeFreePlane(cpl);
+        CHECK(drmGetCap(fd, DRM_CAP_CURSOR_WIDTH, &cap_w) == 0 && drmGetCap(fd, DRM_CAP_CURSOR_HEIGHT, &cap_h) == 0 &&
+                  cap_w == 512 && cap_h == 512,
+              "cursor size 512x512, as vkms");
+        const char *names[] = {"FB_ID", "CRTC_ID", "CRTC_X", "CRTC_Y", "CRTC_W", "CRTC_H", "SRC_X", "SRC_Y", "SRC_W", "SRC_H"};
+        uint32_t cp[10];
+        for (int i = 0; i < 10; i++)
+            cp[i] = prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, names[i], NULL);
+        struct gbm_bo *cbo = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR | GBM_BO_USE_RENDERING);
+        int dmabuf = cbo ? gbm_bo_get_fd(cbo) : -1;
+        uint32_t ch = 0, cfb = 0;
+        drmPrimeFDToHandle(fd, dmabuf, &ch);
+        close(dmabuf);
+        uint32_t handles[4] = {ch}, pitches[4] = {cbo ? gbm_bo_get_stride(cbo) : 0}, offsets[4] = {0};
+        CHECK(drmModeAddFB2(fd, 64, 64, DRM_FORMAT_ARGB8888, handles, pitches, offsets, &cfb, 0) == 0, "a 64x64 ARGB cursor");
+        drmCloseBufferHandle(fd, ch);
+#define CURSOR(req, fb, x, y, w, h, sw, sh)                                                              \
+    do {                                                                                                 \
+        uint64_t v[10] = {(fb), (fb) ? crtc_id : 0, (uint64_t)(int64_t)(x), (uint64_t)(int64_t)(y), (w), (h), \
+                          0, 0, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16};                          \
+        for (int i_ = 0; i_ < 10; i_++)                                                                  \
+            drmModeAtomicAddProperty((req), cursor_id, cp[i_], v[i_]);                                  \
+    } while (0)
+        const uint32_t flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, test = DRM_MODE_ATOMIC_TEST_ONLY;
+        int msgs = g_cursor_msgs, unchanged = g_unchanged_presents;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[1]);
+        CURSOR(req, cfb, 100, 120, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == 100 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 120 && CHAM_CURSOR_RECT_W(g_cursor_b) == 64 &&
+                  CHAM_CURSOR_RECT_H(g_cursor_b) == 64 && g_unchanged_presents == unchanged,
+              "with a frame: the app gets the new cursor image at 100,120, then the frame");
+        msgs = g_cursor_msgs;
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, -20, 300, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && !(g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == -20 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 300 && g_unchanged_presents == unchanged + 1,
+              "the cursor alone moved (partly off the screen): no new image, the frame stays, the flip completes");
+        msgs = g_cursor_msgs;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)-20);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0;
+        errno = 0;
+        int busy = drmModeAtomicCommit(fd, req, flip, NULL) != 0 && errno == EBUSY;
+        ok = ok && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && busy && g_cursor_msgs == msgs && g_unchanged_presents == unchanged + 2,
+              "a commit that changes nothing: no message, flip completes; another while it's pending: EBUSY");
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 1060, 1790, 64, 64, 64, 64);
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) == 0, "past the screen's corner: ok");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 10, 10, 32, 32, 64, 64);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ERANGE, "scaled: ERANGE (no scaling, as vkms)");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 10, 10, 32, 32, 32, 32);
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) == 0, "part of the buffer: ok");
+        drmModeAtomicAddProperty(req, cursor_id, cp[6], 48ull << 16);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ENOSPC, "...past its edge: ENOSPC");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, cursor_id, cp[1], 0);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == EINVAL, "a framebuffer without a CRTC: EINVAL");
+        drmModeAtomicFree(req);
+        /* A fence for each plane, as KWin's commits have while the pointer
+         * is on the cursor plane; one plane takes one. */
+        uint32_t cp_fence = prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "IN_FENCE_FD", NULL);
+        int fa[2], fb2[2];
+        if (pipe(fa) != 0 || pipe(fb2) != 0)
+            return 1;
+        req = drmModeAtomicAlloc();
+        drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[1]);
+        drmModeAtomicAddProperty(req, plane_id, p_fence, (uint64_t)fa[0]);
+        drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)-21);
+        drmModeAtomicAddProperty(req, cursor_id, cp_fence, (uint64_t)fb2[0]);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        CHECK(ok && fcntl(fa[0], F_GETFD) >= 0 && fcntl(fb2[0], F_GETFD) >= 0,
+              "a commit with a fence for each plane; both stay the caller's");
+        uint32_t twice[2] = {p_fence, p_fence};
+        uint64_t two_fences[2] = {(uint64_t)fa[0], (uint64_t)fb2[0]};
+        errno = 0;
+        CHECK(raw_commit(fd, test, plane_id, 2, twice, two_fences) != 0 && errno == EINVAL, "two fences for one plane: EINVAL");
+        close(fa[0]), close(fa[1]), close(fb2[0]), close(fb2[1]);
+        errno = 0;
+        CHECK(raw_commit(fd, flip, 0, 0, NULL, NULL) != 0 && errno == EINVAL,
+              "a page-flip event for a commit of nothing: EINVAL (no CRTC in it)");
+        /* The app without a surface (in the background, maybe frozen) gets
+         * no cursor messages; it gets the cursor when its surface is back. */
+        g_no_surface = 1;
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+        msgs = g_cursor_msgs;
+        ok = 1;
+        for (int i = 0; i < 5 && ok; i++) {
+            req = drmModeAtomicAlloc();
+            drmModeAtomicAddProperty(req, cursor_id, cp[2], (uint64_t)(30 + i));
+            ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 500);
+            drmModeAtomicFree(req);
+        }
+        usleep(20000);
+        CHECK(ok && g_cursor_msgs == msgs, "no surface: the cursor's moves aren't sent (%d messages)", g_cursor_msgs - msgs);
+        g_no_surface = 0;
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+        CHECK(g_cursor_msgs > msgs && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE &&
+                  CHAM_INPUT_DX(g_cursor_a) == 34,
+              "the surface is back: the cursor where it is now, its image again");
+        ok = 1;
+        for (int i = 0; i < 3 && ok; i++) {
+            flip_to(fd, plane_id, p_fb, fbs[i % 3]);
+            ok = wait_flip(fd, 200);
+        }
+        CHECK(ok, "...and flips complete by the app again");
+        unchanged = g_unchanged_presents;
+        req = drmModeAtomicAlloc();
+        CURSOR(req, 0, 0, 0, 0, 0, 0, 0);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "cursor off: the app hides it");
+        /* A framebuffer closed while it is on the plane, its buffer destroyed,
+         * lives until the plane lets go; the app must still hear that the
+         * cursor is off. */
+        {
+            struct gbm_bo *cbo2 = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR | GBM_BO_USE_RENDERING);
+            uint32_t ch2 = 0, cfb2 = 0;
+            int dmabuf2 = cbo2 ? gbm_bo_get_fd(cbo2) : -1;
+            drmPrimeFDToHandle(fd, dmabuf2, &ch2);
+            close(dmabuf2);
+            uint32_t h2[4] = {ch2}, pitches2[4] = {cbo2 ? gbm_bo_get_stride(cbo2) : 0};
+            ok = drmModeAddFB2(fd, 64, 64, DRM_FORMAT_ARGB8888, h2, pitches2, offsets, &cfb2, 0) == 0;
+            drmCloseBufferHandle(fd, ch2);
+            req = drmModeAtomicAlloc();
+            CURSOR(req, cfb2, 7, 7, 64, 64, 64, 64);
+            ok = ok && drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+            drmModeAtomicFree(req);
+            usleep(20000);
+            ok = ok && g_cursor_id != CHAM_CURSOR_HIDE && drmModeCloseFB(fd, cfb2) == 0;
+            if (cbo2)
+                gbm_bo_destroy(cbo2);
+            req = drmModeAtomicAlloc();
+            CURSOR(req, 0, 0, 0, 0, 0, 0, 0);
+            ok = ok && drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+            drmModeAtomicFree(req);
+            usleep(20000);
+            CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "a closed framebuffer's cursor off: the app hides it too");
+        }
+        req = drmModeAtomicAlloc();
+        CURSOR(req, cfb, 5, 5, 64, 64, 64, 64);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        ok = ok && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE;
+        msgs = g_cursor_msgs;
+        unchanged = g_unchanged_presents;
+        drmModeRmFB(fd, cfb);
+        usleep(20000);
+        uint64_t cfb_now = 9;
+        prop_id(fd, cursor_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &cfb_now);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE && g_cursor_msgs == msgs + 1 && g_unchanged_presents == unchanged + 1 &&
+                  cfb_now == 0,
+              "RMFB of the cursor's framebuffer takes it off the plane: the app hides it at once");
+#undef CURSOR
+        gbm_bo_destroy(cbo);
+    }
+
+
+    /* The primary plane anywhere, as vkms's (KWin scans a window out on it,
+     * or puts something alone on an empty screen): the app hears where its
+     * buffer goes, clipped to the screen, and shows the rest black. */
+    printf("a primary plane not covering the screen\n");
+    {
+#define PLANE(req, fb, sx, sy, sw, sh, dx, dy, dw, dh)                                                         \
+    do {                                                                                                     \
+        uint64_t s_[4] = {(uint64_t)(sx) << 16, (uint64_t)(sy) << 16, (uint64_t)(sw) << 16, (uint64_t)(sh) << 16}; \
+        uint64_t d_[4] = {(uint64_t)(int64_t)(dx), (uint64_t)(int64_t)(dy), (dw), (dh)};                    \
+        drmModeAtomicAddProperty((req), plane_id, p_fb, (fb));                                               \
+        for (int i_ = 0; i_ < 4; i_++) {                                                                     \
+            drmModeAtomicAddProperty((req), plane_id, p_src[i_], s_[i_]);                                    \
+            drmModeAtomicAddProperty((req), plane_id, p_dst[i_], d_[i_]);                                    \
+        }                                                                                                    \
+    } while (0)
+#define RECT_IS(v, x, y, w, h) \
+    (CHAM_CURSOR_RECT_X(v) == (x) && CHAM_CURSOR_RECT_Y(v) == (y) && CHAM_CURSOR_RECT_W(v) == (w) && CHAM_CURSOR_RECT_H(v) == (h))
+        const uint32_t flip = DRM_MODE_ATOMIC_NONBLOCK | DRM_MODE_PAGE_FLIP_EVENT, test = DRM_MODE_ATOMIC_TEST_ONLY;
+        int msgs = g_plane_msgs, presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 400, 300, 100, 200, 400, 300);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && g_present_placed && g_presents == presents + 1 &&
+                  g_plane_id == (1080u | 1800u << 16) && RECT_IS(g_plane_a, 0, 0, 400, 300) &&
+                  RECT_IS(g_plane_b, 100, 200, 400, 300),
+              "400x300 of the buffer at 100,200: the app hears where it goes on the 1080x1800 screen, then the frame");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 200, 100, -100, -50, 400, 200);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && g_present_placed && RECT_IS(g_plane_a, 50, 25, 150, 75) &&
+                  RECT_IS(g_plane_b, 0, 0, 300, 150),
+              "scaled 2x, hanging off the top left: clipped, the source with it (50,25 150x75 -> 0,0 300x150)");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[0], 0, 0, 1080, 1800, 0, 0, 1200, 1900);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && RECT_IS(g_plane_a, 0, 0, 972, 1705) && RECT_IS(g_plane_b, 0, 0, 1080, 1800),
+              "bigger than the screen: the part on it (972x1705 of the buffer, scaled)");
+        msgs = g_plane_msgs;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 100, 100, 2000, 10, 100, 100);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs + 1 && CHAM_CURSOR_RECT_W(g_plane_b) == 0,
+              "off the screen: nothing of it on the frame (black)");
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 1000, 0, 200, 100, 0, 0, 200, 100);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ENOSPC, "a source past the framebuffer: ENOSPC");
+        drmModeAtomicFree(req);
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 100, 100, INT32_MAX - 10, 0, 100, 100);
+        errno = 0;
+        CHECK(drmModeAtomicCommit(fd, req, test, NULL) != 0 && errno == ERANGE, "a target that would overflow: ERANGE");
+        drmModeAtomicFree(req);
+        msgs = g_plane_msgs;
+        presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 1080, 1800, 0, 0, 1080, 1800);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs && !g_present_placed && g_presents == presents + 1,
+              "the whole screen again: a plain frame");
+        /* An app that doesn't show such frames keeps what it shows. */
+        g_send_flags = CHAM_CONFIG_CURSOR;
+        usleep(150000);
+        msgs = g_plane_msgs;
+        presents = g_presents;
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[1], 0, 0, 400, 300, 100, 200, 400, 300);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_plane_msgs == msgs && g_presents == presents,
+              "an older app: not shown (its flip still completes), no message it doesn't know");
+        req = drmModeAtomicAlloc();
+        PLANE(req, fbs[2], 0, 0, 1080, 1800, 0, 0, 1080, 1800);
+        ok = drmModeAtomicCommit(fd, req, flip, NULL) == 0 && wait_flip(fd, 200);
+        drmModeAtomicFree(req);
+        usleep(20000);
+        CHECK(ok && g_presents == presents + 1, "...and a whole frame again is");
+        g_send_flags = CHAM_CONFIG_CURSOR | CHAM_CONFIG_PLANE;
+        usleep(150000);
+#undef PLANE
+#undef RECT_IS
+    }
+
+    printf("the legacy calls\n");
+    /* The legacy calls, as a program that sets a mode and flips the old way
+     * (their answers are compared with the kernel's by kms_conformance.c;
+     * here: what the app gets to show). */
+    {
+        drmModeRes *res = drmModeGetResources(fd);
+        drmModeConnector *lc = res ? drmModeGetConnector(fd, res->connectors[0]) : NULL;
+        uint32_t lcrtc = res ? res->crtcs[0] : 0, lconn = res ? res->connectors[0] : 0;
+        drmModeModeInfo lmode = lc ? lc->modes[0] : (drmModeModeInfo){0};
+        struct gbm_bo *lb[2] = {0}, *lcur = gbm_bo_create(gbm, 64, 64, DRM_FORMAT_ARGB8888, GBM_BO_USE_CURSOR);
+        uint32_t lfb[2] = {0};
+        int ok = lc != NULL;
+        for (int i = 0; i < 2; i++) {
+            lb[i] = gbm_bo_create(gbm, lmode.hdisplay, lmode.vdisplay, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT);
+            ok = ok && lb[i] && drmModeAddFB(fd, lmode.hdisplay, lmode.vdisplay, 24, 32, gbm_bo_get_stride(lb[i]),
+                                              gbm_bo_get_handle(lb[i]).u32, &lfb[i]) == 0;
+        }
+        int presents = g_presents;
+        ok = ok && drmModeSetCrtc(fd, lcrtc, lfb[0], 0, 0, &lconn, 1, &lmode) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 1, "legacy: SETCRTC shows its framebuffer (%d presents)",
+              g_presents - presents);
+        /* The first flips after a modeset may complete at once: the busy
+         * check wants the card in step with its vblanks. */
+        for (int i = 0; i < 3; i++)
+            ok = ok && drmModePageFlip(fd, lcrtc, lfb[i & 1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0 && wait_flip(fd, 1000);
+        usleep(50000);
+        presents = g_presents;
+        ok = ok && drmModePageFlip(fd, lcrtc, lfb[1], DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0;
+        int busy = drmModePageFlip(fd, lcrtc, lfb[0], DRM_MODE_PAGE_FLIP_EVENT, NULL) != 0 && errno == EBUSY;
+        ok = ok && wait_flip(fd, 1000);
+        CHECK(ok && busy && g_presents == presents + 1, "...PAGE_FLIP shows the next, one at a time, and its event comes");
+        presents = g_presents;
+        ok = drmModePageFlip(fd, lcrtc, lfb[0], 0, NULL) == 0;
+        busy = drmModePageFlip(fd, lcrtc, lfb[1], 0, NULL) != 0 && errno == EBUSY;
+        usleep(100000);
+        struct pollfd lp = {fd, POLLIN, 0};
+        ok = ok && poll(&lp, 1, 0) == 0 && drmModePageFlip(fd, lcrtc, lfb[1], 0, NULL) == 0;
+        usleep(100000);
+        CHECK(ok && busy && g_presents == presents + 2,
+              "...a flip without an event completes too: busy until then, nothing to read (%d presents)",
+              g_presents - presents);
+
+        /* The vblank counter runs at the mode's rate. */
+        drmVBlank vb = {.request = {.type = DRM_VBLANK_RELATIVE, .sequence = 1}};
+        ok = drmWaitVBlank(fd, &vb) == 0;
+        uint32_t seq1 = vb.reply.sequence;
+        uint64_t t1 = now_ns();
+        vb = (drmVBlank){.request = {.type = DRM_VBLANK_RELATIVE, .sequence = 6}};
+        ok = ok && drmWaitVBlank(fd, &vb) == 0;
+        double took = ms_since(t1), period = 1000.0 / lmode.vrefresh;
+        CHECK(ok && vb.reply.sequence - seq1 >= 6 && vb.reply.sequence - seq1 <= 7 && took > 4.5 * period &&
+                  took < 9 * period,
+              "...WAIT_VBLANK for 6 vblanks takes 6 refresh periods (%.1f ms at %u Hz, sequence +%u)", took,
+              lmode.vrefresh, vb.reply.sequence - seq1);
+
+        /* The cursor, the old way: an image, moves, off. */
+        int msgs = g_cursor_msgs;
+        presents = g_presents;
+        ok = lcur && drmModeSetCursor(fd, lcrtc, gbm_bo_get_handle(lcur).u32, 64, 64) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) && g_cursor_id != CHAM_CURSOR_HIDE &&
+                  g_presents == presents + 1,
+              "...SetCursor: the app gets the image");
+        msgs = g_cursor_msgs;
+        ok = drmModeMoveCursor(fd, lcrtc, 30, 40) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_msgs == msgs + 1 && !(g_cursor_id & CHAM_CURSOR_NEW) && CHAM_INPUT_DX(g_cursor_a) == 30 &&
+                  CHAM_INPUT_DY(g_cursor_a) == 40,
+              "...MoveCursor: the same image at 30,40");
+        ok = drmModeSetCursor(fd, lcrtc, 0, 0, 0) == 0;
+        usleep(50000);
+        CHECK(ok && g_cursor_id == CHAM_CURSOR_HIDE, "...SetCursor without an image: hidden");
+
+        /* DPMS: the screen off and on again with what it showed. */
+        uint32_t p_dpms = prop_id(fd, lconn, DRM_MODE_OBJECT_CONNECTOR, "DPMS", NULL);
+        presents = g_presents;
+        ok = p_dpms && drmModeConnectorSetProperty(fd, lconn, p_dpms, DRM_MODE_DPMS_OFF) == 0;
+        int refused = drmModePageFlip(fd, lcrtc, lfb[0], 0, NULL) != 0 && errno == EINVAL;
+        ok = ok && drmModeConnectorSetProperty(fd, lconn, p_dpms, DRM_MODE_DPMS_ON) == 0;
+        usleep(100000);
+        CHECK(ok && refused && g_presents == presents + 1,
+              "...DPMS off and on: no flips while off, the frame shown again after (%d presents)",
+              g_presents - presents);
+
+        ok = drmModeSetCrtc(fd, lcrtc, 0, 0, 0, NULL, 0, NULL) == 0;
+        drmModeCrtc *off = drmModeGetCrtc(fd, lcrtc);
+        CHECK(ok && off && !off->mode_valid && !off->buffer_id, "...SETCRTC without a mode: the CRTC off");
+        drmModeFreeCrtc(off);
+        /* on again, for what follows */
+        ok = drmModeSetCrtc(fd, lcrtc, fbs[0], 0, 0, &lconn, 1, &lmode) == 0;
+        CHECK(ok, "...and on again");
+        usleep(100000); /* the app reads that frame's message before the next test closes its connection */
+        for (int i = 0; i < 2; i++) {
+            drmModeRmFB(fd, lfb[i]);
+            if (lb[i])
+                gbm_bo_destroy(lb[i]);
+        }
+        if (lcur)
+            gbm_bo_destroy(lcur);
+        drmModeFreeConnector(lc);
+        drmModeFreeResources(res);
+    }
+
+    printf("dumb buffers\n");
+    /* Memory the program draws into itself (the calls' answers are compared
+     * with the kernel's by kms_conformance.c; here: what the app gets). */
+    {
+        drmModeRes *res = drmModeGetResources(fd);
+        drmModeConnector *dc = res ? drmModeGetConnector(fd, res->connectors[0]) : NULL;
+        uint32_t dcrtc = res ? res->crtcs[0] : 0, dconn = res ? res->connectors[0] : 0;
+        drmModeModeInfo dmode = dc ? dc->modes[0] : (drmModeModeInfo){0};
+        uint32_t w = dmode.hdisplay, h = dmode.vdisplay, handle = 0, pitch = 0, dfb = 0;
+        uint64_t size = 0, offset = 0;
+        int ok = dc && drmModeCreateDumbBuffer(fd, w, h, 32, 0, &handle, &pitch, &size) == 0 &&
+                 drmModeMapDumbBuffer(fd, handle, &offset) == 0;
+        uint32_t *px = ok ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)offset) : MAP_FAILED;
+        ok = ok && px != MAP_FAILED;
+        CHECK(ok && pitch == w * 4 && size >= (uint64_t)pitch * h, "a dumb buffer is made and mapped through the card");
+        if (!ok)
+            px = calloc(w * h, 4);
+        for (uint32_t i = 0; i < w * h; i++)
+            px[i] = 0x00112233; /* XRGB with nothing in X */
+        int presents = g_presents;
+        ok = drmModeAddFB(fd, w, h, 24, 32, pitch, handle, &dfb) == 0 &&
+             drmModeSetCrtc(fd, dcrtc, dfb, 0, 0, &dconn, 1, &dmode) == 0;
+        usleep(100000);
+        uint32_t slot = g_present_slot;
+        CHECK(ok && g_presents == presents + 1 && stub_pixel(slot, w, 0, 0) == 0xff112233 &&
+                  stub_pixel(slot, w, w - 1, h - 1) == 0xff112233,
+              "...SETCRTC shows what was drawn, opaque (0x%08x)", stub_pixel(slot, w, 0, 0));
+
+        /* Drawing more shows once the card is told. */
+        for (uint32_t y = 10; y < 20; y++)
+            for (uint32_t x = 0; x < w; x++)
+                px[y * w + x] = 0x00445566;
+        px[30 * w] = 0x00778899;
+        usleep(100000);
+        CHECK(g_presents == presents + 1 && stub_pixel(slot, w, 5, 10) == 0xff112233,
+              "...drawing into it alone changes nothing on screen");
+        drmModeClip clip = {0, 10, (unsigned short)w, 20};
+        ok = drmModeDirtyFB(fd, dfb, &clip, 1) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 2 && g_present_slot == slot && stub_pixel(slot, w, 5, 10) == 0xff445566 &&
+                  stub_pixel(slot, w, w - 1, 19) == 0xff445566 && stub_pixel(slot, w, 0, 30) == 0xff112233 &&
+                  stub_pixel(slot, w, 0, 9) == 0xff112233,
+              "...DIRTYFB shows the rows it names, at once");
+        ok = drmModeDirtyFB(fd, dfb, NULL, 0) == 0;
+        usleep(100000);
+        CHECK(ok && g_presents == presents + 3 && stub_pixel(slot, w, 0, 30) == 0xff778899,
+              "...DIRTYFB without rectangles shows all of it");
+        px[0] = 0x00abcdef;
+        ok = drmModePageFlip(fd, dcrtc, dfb, DRM_MODE_PAGE_FLIP_EVENT, NULL) == 0 && wait_flip(fd, 1000);
+        usleep(50000);
+        CHECK(ok && stub_pixel(slot, w, 0, 0) == 0xffabcdef, "...a page flip shows it as it is then");
+
+        /* A cursor image from a dumb buffer, as programs without GBM make it. */
+        uint32_t chandle = 0, cpitch = 0;
+        uint64_t csize = 0, coffset = 0;
+        ok = drmModeCreateDumbBuffer(fd, 64, 64, 32, 0, &chandle, &cpitch, &csize) == 0 &&
+             drmModeMapDumbBuffer(fd, chandle, &coffset) == 0;
+        uint32_t *cpx = ok ? mmap(NULL, csize, PROT_READ | PROT_WRITE, MAP_SHARED, fd, (off_t)coffset) : MAP_FAILED;
+        ok = ok && cpx != MAP_FAILED;
+        for (uint32_t i = 0; ok && i < 64 * 64; i++)
+            cpx[i] = 0x80ff0000;
+        int msgs = g_cursor_msgs;
+        ok = ok && drmModeSetCursor(fd, dcrtc, chandle, 64, 64) == 0;
+        usleep(50000);
+        uint32_t cslot = g_cursor_id & ~(uint32_t)CHAM_CURSOR_NEW;
+        CHECK(ok && g_cursor_msgs == msgs + 1 && (g_cursor_id & CHAM_CURSOR_NEW) &&
+                  stub_pixel(cslot, 64, 63, 63) == 0x80ff0000,
+              "...a cursor image from one reaches the app with its alpha (0x%08x)", stub_pixel(cslot, 64, 63, 63));
+        drmModeSetCursor(fd, dcrtc, 0, 0, 0);
+
+        /* PRIME hands its memory out, as programs without a GPU share it. */
+        int prime = -1;
+        uint32_t back = 0;
+        uint32_t *pm = drmPrimeHandleToFD(fd, handle, DRM_CLOEXEC, &prime) == 0
+                           ? mmap(NULL, (size_t)size, PROT_READ, MAP_SHARED, prime, 0) : MAP_FAILED;
+        CHECK(pm != MAP_FAILED && pm[0] == px[0] && drmPrimeFDToHandle(fd, prime, &back) == 0 && back == handle,
+              "...PRIME exports its memory, which imports as the same handle");
+        if (pm != MAP_FAILED)
+            munmap(pm, (size_t)size);
+        if (prime >= 0)
+            close(prime);
+        /* The handle goes, the file stays and imports again (Mesa's
+         * software driver); once the file is closed too, the memory goes. */
+        uint32_t kh = 0, kh2 = 0, kpitch = 0;
+        uint64_t ksize = 0;
+        int kfd = -1, kfd2 = -1;
+        struct stat kst = {0}, kst2 = {0};
+        ok = drmModeCreateDumbBuffer(fd, 32, 32, 32, 0, &kh, &kpitch, &ksize) == 0 &&
+             drmPrimeHandleToFD(fd, kh, DRM_CLOEXEC, &kfd) == 0 && fstat(kfd, &kst) == 0 &&
+             drmModeDestroyDumbBuffer(fd, kh) == 0;
+        CHECK(ok && drmPrimeFDToHandle(fd, kfd, &kh2) == 0 && kh2 &&
+                  drmPrimeHandleToFD(fd, kh2, DRM_CLOEXEC, &kfd2) == 0 && fstat(kfd2, &kst2) == 0 &&
+                  kst2.st_ino == kst.st_ino,
+              "...an exported one outlives its handle: its file imports again, as the same memory");
+        drmCloseBufferHandle(fd, kh2);
+        if (kfd >= 0)
+            close(kfd);
+        if (kfd2 >= 0)
+            close(kfd2);
+        int held = fds_anywhere(kst.st_dev, kst.st_ino);
+        if (drmModeCreateDumbBuffer(fd, 8, 8, 32, 0, &kh, &kpitch, &ksize) == 0) /* the card looks again */
+            drmModeDestroyDumbBuffer(fd, kh);
+        CHECK(held == 1 && fds_anywhere(kst.st_dev, kst.st_ino) == 0,
+              "...and is freed once its file is closed everywhere (%d, then %d)", held, fds_anywhere(kst.st_dev, kst.st_ino));
+        /* The handle goes; the framebuffer and the mapping keep the memory. */
+        ok = drmModeDestroyDumbBuffer(fd, handle) == 0;
+        px[1] = 0x00010203;
+        ok = ok && drmModeDirtyFB(fd, dfb, NULL, 0) == 0;
+        usleep(100000);
+        CHECK(ok && stub_pixel(slot, w, 1, 0) == 0xff010203, "...destroyed, its framebuffer still shows the memory");
+        if (cpx != MAP_FAILED)
+            munmap(cpx, csize);
+        drmModeDestroyDumbBuffer(fd, chandle);
+        ok = drmModeSetCrtc(fd, dcrtc, fbs[0], 0, 0, &dconn, 1, &dmode) == 0;
+        drmModeRmFB(fd, dfb);
+        if (px != MAP_FAILED)
+            munmap(px, size);
+        CHECK(ok && mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, (off_t)offset) == MAP_FAILED && errno == EINVAL,
+              "...and once that is gone too, nothing is at its offset");
+        usleep(100000); /* the app reads that frame's message before the next test closes its connection */
+        drmModeFreeConnector(dc);
+        drmModeFreeResources(res);
+    }
+
+    printf("the buffers' fences\n");
+    {
+        /* The host tests' fences are files that become readable: here pipes. */
+        struct gbm_bo *sbo = gbm_bo_create(gbm, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING);
+        int sfd = sbo ? gbm_bo_get_fd(sbo) : -1;
+        struct pollfd sp = {.fd = sfd, .events = POLLIN | POLLOUT};
+        int w[2] = {-1, -1}, r[2] = {-1, -1}, w2[2] = {-1, -1};
+        int (*cham_dmabuf_write_fence)(int, int) = dlsym(RTLD_DEFAULT, "cham_dmabuf_write_fence"); /* libchameleon's */
+        ok = pipe(w) == 0 && pipe(r) == 0 && pipe(w2) == 0;
+        CHECK(ok && sfd >= 0 && cham_dmabuf_write_fence && cham_dmabuf_write_fence(sfd, w[0]) == 0,
+              "a writer's fence for a buffer nobody has asked about: the writer is told to wait itself");
+        CHECK(poll(&sp, 1, 0) == 0, "poll() of the buffer: not ready while that work is pending");
+        struct dma_buf_export_sync_file ex = {.flags = DMA_BUF_SYNC_READ, .fd = -1};
+        struct pollfd fp = {.events = POLLIN};
+        ok = ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0 && ex.fd >= 0;
+        fp.fd = ex.fd;
+        CHECK(ok && fcntl(ex.fd, F_GETFD) == FD_CLOEXEC && poll(&fp, 1, 0) == 0,
+              "EXPORT_SYNC_FILE gives its fence, close-on-exec, not signalled yet");
+        uint64_t t0 = now_ns();
+        CHECK(poll(&sp, 1, 60) == 0 && now_ns() - t0 >= 55000000ull, "poll() with a timeout waits that long");
+        CHECK(cham_dmabuf_write_fence && cham_dmabuf_write_fence(sfd, w2[0]) == 1, "the next writer is told its fence is asked for");
+        ok = write(w[1], "x", 1) == 1;
+        CHECK(ok && poll(&sp, 1, 0) == 0, "the first work done: still not ready, the second is pending");
+        pid_t waiter = fork();
+        if (waiter == 0) { /* another program with the buffer waits for it */
+            struct pollfd cp = {.fd = sfd, .events = POLLIN};
+            _exit(poll(&cp, 1, 2000) == 1 && cp.revents == POLLIN ? 0 : 1);
+        }
+        usleep(50000);
+        ok = write(w2[1], "x", 1) == 1;
+        int wst = -1;
+        waitpid(waiter, &wst, 0);
+        CHECK(ok && WIFEXITED(wst) && WEXITSTATUS(wst) == 0, "another process's poll() returns when the work is done");
+        CHECK(poll(&sp, 1, 0) == 1 && sp.revents == (POLLIN | POLLOUT) && poll(&fp, 1, 0) == 1,
+              "then the buffer is readable and writable, and the exported fence has signalled");
+        close(ex.fd);
+        struct dma_buf_import_sync_file im = {.flags = DMA_BUF_SYNC_READ, .fd = r[0]};
+        CHECK(ioctl(sfd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &im) == 0 && poll(&sp, 1, 0) == 1 && sp.revents == POLLIN,
+              "IMPORT_SYNC_FILE of a reader's fence: readable, not writable");
+        ex.flags = DMA_BUF_SYNC_READ;
+        ex.fd = -1;
+        ok = ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0;
+        fp.fd = ex.fd;
+        ok = ok && poll(&fp, 1, 0) == 1;
+        close(ex.fd);
+        ex.flags = DMA_BUF_SYNC_WRITE;
+        ex.fd = -1;
+        ok = ok && ioctl(sfd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) == 0;
+        fp.fd = ex.fd;
+        CHECK(ok && poll(&fp, 1, 0) == 0, "a reader has nothing to wait for (a signalled fence), a writer has");
+        ok = write(r[1], "x", 1) == 1;
+        CHECK(ok && poll(&fp, 1, 100) == 1 && poll(&sp, 1, 0) == 1 && sp.revents == (POLLIN | POLLOUT),
+              "the reader done: writable again");
+        close(ex.fd);
+        struct pollfd two[2] = {{.fd = sfd, .events = POLLIN}, {.fd = w[0], .events = POLLIN}};
+        int mem = memfd_create("not-a-buffer", MFD_CLOEXEC);
+        ex.flags = DMA_BUF_SYNC_READ;
+        CHECK(poll(two, 2, 0) == 2 && ioctl(mem, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &ex) != 0 && errno == ENOTTY,
+              "polled with other files, and files that are no buffers: the kernel's own answers");
+        close(mem);
+        for (int i = 0; i < 2; i++) {
+            close(w[i]);
+            close(r[i]);
+            close(w2[i]);
+        }
+        close(sfd);
+        if (sbo)
+            gbm_bo_destroy(sbo);
+    }
+
     printf("second producer takes over\n");
+    accepts = g_accepts;
     int intruder = socket(AF_UNIX, SOCK_SEQPACKET, 0);
     struct sockaddr_un addr = {.sun_family = AF_UNIX};
     strncpy(addr.sun_path, g_sock_path, sizeof addr.sun_path - 1);
     connect(intruder, (struct sockaddr *)&addr, sizeof addr);
     usleep(2500000);
-    CHECK(g_accepts == 2, "replaced shim does not reconnect (%d connections, want 2)", g_accepts);
+    CHECK(g_accepts == accepts + 1, "replaced shim does not reconnect (%d connections, want %d)", g_accepts,
+          accepts + 1);
     close(intruder);
 
     printf("presenter gone -> simulated vblank\n");
@@ -374,16 +1655,421 @@ int main(void)
     secs = (now_ns() - t0) / 1e9;
     CHECK(ok && g_flips == 12, "12 flips without an app (%.1f fps, KWin keeps running)", 12 / secs);
 
+    /* As Linux 6.8 with vkms answers for a normal user (shim/test/refvm.sh). */
+    printf("files: master, client caps, handles, ownership\n");
+    int root = geteuid() == 0; /* CAP_SYS_ADMIN may take master */
+    int fd2 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd2 >= 0 && !drmIsMaster(fd2), "a second open is not master");
+    errno = 0;
+    CHECK(drmSetMaster(fd2) != 0 && errno == (root ? EBUSY : EACCES), "...SET_MASTER: %s",
+          root ? "EBUSY while another is master" : "EACCES (never was master)");
+    pres = drmModeGetPlaneResources(fd2);
+    CHECK(pres && pres->count_planes == 0, "no planes listed without the universal-planes cap");
+    drmModeFreePlaneResources(pres);
+    drmModeObjectProperties *op = drmModeObjectGetProperties(fd2, crtc_id, DRM_MODE_OBJECT_CRTC);
+    CHECK(op && op->count_props == 0, "atomic properties hidden without the atomic cap");
+    drmModeFreeObjectProperties(op);
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS, 1) != 0 && errno == EINVAL,
+          "writeback cap needs the atomic cap first");
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 3) != 0 && errno == EINVAL, "atomic cap 3: EINVAL");
+    CHECK(drmSetClientCap(fd2, DRM_CLIENT_CAP_ATOMIC, 1) == 0, "atomic cap on the second file");
+    pres = drmModeGetPlaneResources(fd2);
+    CHECK(pres && pres->count_planes == 2, "...which lists the planes");
+    drmModeFreePlaneResources(pres);
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, fbs[0]);
+    CHECK(drmModeAtomicCommit(fd2, req, DRM_MODE_ATOMIC_TEST_ONLY, NULL) != 0 && errno == EACCES,
+          "a commit from a non-master file: EACCES");
+    drmModeAtomicFree(req);
+    uint32_t h1 = gbm_bo_get_handle(bos[1]).u32, fb2 = 0;
+    uint32_t handles2[4] = {h1}, pitches2[4] = {gbm_bo_get_stride(bos[1])}, offsets2[4] = {0};
+    CHECK(drmModeAddFB2(fd2, 1080, 1800, DRM_FORMAT_XBGR8888, handles2, pitches2, offsets2, &fb2, 0) != 0 &&
+              errno == ENOENT,
+          "another file's handle number means nothing here (ENOENT)");
+    int dmabuf = gbm_bo_get_fd(bos[1]);
+    uint32_t h2 = 0, h2again = 0;
+    CHECK(drmPrimeFDToHandle(fd2, dmabuf, &h2) == 0 && drmPrimeFDToHandle(fd2, dmabuf, &h2again) == 0 &&
+              h2 && h2 == h2again,
+          "importing the same buffer twice gives the same handle");
+    close(dmabuf);
+    handles2[0] = h2;
+    CHECK(drmModeAddFB2(fd2, 1080, 1800, DRM_FORMAT_XBGR8888, handles2, pitches2, offsets2, &fb2, 0) == 0,
+          "a non-master file adds a framebuffer");
+    CHECK(drmCloseBufferHandle(fd2, h2) == 0 && drmCloseBufferHandle(fd2, h2) != 0 && errno == EINVAL,
+          "GEM_CLOSE twice: EINVAL the second time");
+    CHECK(drmModeRmFB(fd, fb2) != 0 && errno == ENOENT, "RMFB of another file's framebuffer: ENOENT");
+    uint32_t blob2 = 0;
+    CHECK(drmModeCreatePropertyBlob(fd2, "abcd", 4, &blob2) == 0 && drmModeDestroyPropertyBlob(fd, blob2) != 0 &&
+              errno == EPERM,
+          "a non-master file creates a blob; another file can't destroy it (EPERM)");
+    drm_magic_t magic2 = 0;
+    CHECK(drmGetMagic(fd2, &magic2) == 0 && drmAuthMagic(fd2, magic2) != 0 && errno == EACCES,
+          "AUTH_MAGIC from a non-master: EACCES");
+    CHECK(drmAuthMagic(fd, magic2) == 0 && drmAuthMagic(fd, magic2) != 0 && errno == EINVAL,
+          "the master authenticates the magic once");
+    int dup2fd = dup(fd2);
+    close(fd2);
+    drmModePropertyBlobRes *pb = drmModeGetPropertyBlob(fd, blob2);
+    CHECK(pb != NULL, "a dup keeps the file open");
+    drmModeFreePropertyBlob(pb);
+    close(dup2fd);
+    pb = drmModeGetPropertyBlob(fd, blob2);
+    CHECK(pb == NULL, "closing the last copy releases the file's blobs");
+    drmModeFreePropertyBlob(pb);
+    CHECK(drmModeRmFB(fd2, fb2) != 0, "...and framebuffers");
+    CHECK(drmDropMaster(fd) == 0 && !drmIsMaster(fd), "the master drops master");
+    int fd3 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd3 >= 0 && drmIsMaster(fd3), "the next open while there is none becomes master");
+    close(fd3);
+    CHECK(drmSetMaster(fd) == 0 && drmIsMaster(fd), "...and once it closed, the old master takes it back");
+
     printf("teardown\n");
-    struct drm_mode_closefb cfb = {.fb_id = fbs[0]};
-    CHECK(drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &cfb) == 0, "CLOSEFB of the fb on screen");
-    for (int i = 1; i < 3; i++)
-        drmModeRmFB(fd, fbs[i]);
+    uint64_t on_plane = 0;
+    prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &on_plane);
+    struct drm_mode_closefb cfb = {.fb_id = (uint32_t)on_plane};
+    CHECK(on_plane && drmIoctl(fd, DRM_IOCTL_MODE_CLOSEFB, &cfb) == 0, "CLOSEFB of the fb on screen");
+    uint64_t still = 0;
+    prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &still);
+    CHECK(still == on_plane, "...leaves it on the plane");
+    uint32_t rm = 0;
+    for (int i = 0; i < 3; i++)
+        if (fbs[i] != on_plane)
+            rm = fbs[i];
+    req = drmModeAtomicAlloc();
+    drmModeAtomicAddProperty(req, plane_id, p_fb, rm);
+    CHECK(drmModeAtomicCommit(fd, req, 0, NULL) == 0, "show another framebuffer");
+    drmModeAtomicFree(req);
+    uint64_t active = 0;
+    CHECK(drmModeRmFB(fd, rm) == 0 && prop_id(fd, plane_id, DRM_MODE_OBJECT_PLANE, "FB_ID", &still) &&
+              prop_id(fd, crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE", &active) && still == 0 && active == 1,
+          "RMFB of the fb on screen takes it off the plane, the CRTC stays on");
+    for (int i = 0; i < 3; i++)
+        if (fbs[i] != on_plane && fbs[i] != rm)
+            drmModeRmFB(fd, fbs[i]);
     for (int i = 0; i < 3; i++)
         gbm_bo_destroy(bos[i]);
     gbm_device_destroy(gbm);
     CHECK(drmModeDestroyPropertyBlob(fd, blob) == 0, "destroy mode blob");
     close(fd);
+    int fd4 = open(dev_path, O_RDWR | O_CLOEXEC);
+    CHECK(fd4 >= 0 && drmIsMaster(fd4), "after the master closed, a new open becomes master");
+    close(fd4);
+
+    /* As Linux 6.8 with virtio-gpu answers on its render node (shim/test/refvm.sh). */
+    printf("render node\n");
+    CHECK(stat("/dev/dri/renderD128", &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128),
+          "stat: /dev/dri/renderD128 is 226:128");
+    int master = open(dev_path, O_RDWR | O_CLOEXEC);
+    int rfd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    drmVersionPtr rv = rfd >= 0 ? drmGetVersion(rfd) : NULL;
+    CHECK(rv && strcmp(rv->name, "chameleon") == 0, "it opens; VERSION names the same driver");
+    drmFreeVersion(rv);
+    cap = 0;
+    CHECK(drmGetCap(rfd, DRM_CAP_PRIME, &cap) == 0 && (cap & DRM_PRIME_CAP_IMPORT) && (cap & DRM_PRIME_CAP_EXPORT),
+          "GET_CAP: PRIME import and export");
+    CHECK(fstat(rfd, &st) == 0 && S_ISCHR(st.st_mode) && st.st_rdev == makedev(226, 128), "fstat: 226:128");
+    CHECK(master >= 0 && drmIsMaster(master) && !drmIsMaster(rfd), "a render file is never master");
+    errno = 0;
+    CHECK(drmSetMaster(rfd) != 0 && errno == EACCES, "SET_MASTER: EACCES");
+    errno = 0;
+    CHECK(drmSetClientCap(rfd, DRM_CLIENT_CAP_ATOMIC, 1) != 0 && errno == EACCES, "SET_CLIENT_CAP: EACCES");
+    drm_magic_t rmagic;
+    errno = 0;
+    CHECK(drmGetMagic(rfd, &rmagic) != 0 && errno == EACCES, "GET_MAGIC: EACCES");
+    errno = 0;
+    CHECK(drmModeGetResources(rfd) == NULL && errno == EACCES, "mode setting ioctls: EACCES");
+    struct drm_mode_create_dumb dumb = {.width = 64, .height = 64, .bpp = 32};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) != 0 && errno == EACCES, "CREATE_DUMB: EACCES");
+    errno = 0;
+    CHECK(drmIoctl(master, DRM_IOCTL_MODE_CREATE_DUMB, &dumb) == 0 &&
+              drmModeDestroyDumbBuffer(master, dumb.handle) == 0,
+          "...and made on the primary node");
+    struct drm_gem_flink flink = {.handle = 1};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == EACCES, "GEM_FLINK: EACCES");
+    struct drm_gem_close gclose = {.handle = 12345};
+    errno = 0;
+    CHECK(drmIoctl(rfd, DRM_IOCTL_GEM_CLOSE, &gclose) != 0 && errno == EINVAL, "GEM_CLOSE of no handle: EINVAL");
+    struct pollfd rp = {rfd, POLLIN, 0};
+    CHECK(poll(&rp, 1, 0) == 0, "no events to read");
+
+    struct gbm_device *rgbm = gbm_create_device(rfd);
+    struct gbm_bo *rbo = rgbm ? gbm_bo_create(rgbm, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_RENDERING) : NULL;
+    uint32_t rh = rbo ? gbm_bo_get_handle(rbo).u32 : 0;
+    CHECK(rh, "gbm on the render node: a buffer with a handle");
+    int rdmabuf = -1;
+    uint32_t rh2 = 0, mh = 0, rfb = 0;
+    CHECK(drmPrimeHandleToFD(rfd, rh, DRM_CLOEXEC, &rdmabuf) == 0 && rdmabuf >= 0 &&
+              drmPrimeFDToHandle(rfd, rdmabuf, &rh2) == 0 && rh2 == rh,
+          "PRIME export, and the export imports as the same handle");
+    uint32_t rhandles[4] = {0}, rpitches[4] = {rbo ? gbm_bo_get_stride(rbo) : 0}, roffsets[4] = {0};
+    CHECK(drmPrimeFDToHandle(master, rdmabuf, &mh) == 0 && mh && (rhandles[0] = mh) &&
+              drmModeAddFB2(master, 64, 64, DRM_FORMAT_XRGB8888, rhandles, rpitches, roffsets, &rfb, 0) == 0,
+          "the primary node imports the render node's buffer and makes a framebuffer of it");
+    drmModeRmFB(master, rfb);
+    if (rdmabuf >= 0)
+        close(rdmabuf);
+    gbm_bo_destroy(rbo);
+    gbm_device_destroy(rgbm);
+
+    /* Firefox's dmabuf device: gbm and libdrm loaded by their standard
+     * names, buffers on the render node, each plane exported by PRIME. */
+    void *gbm_lib = dlopen("libgbm.so.1", RTLD_LAZY | RTLD_LOCAL);
+    void *drm_lib = dlopen("libdrm.so.2", RTLD_LAZY | RTLD_LOCAL);
+    CHECK(gbm_lib && dlsym(gbm_lib, "gbm_create_device") == (void *)gbm_create_device,
+          "libgbm.so.1 is this gbm (%s)", gbm_lib ? "loaded" : dlerror());
+    int (*prime_to_fd)(int, uint32_t, uint32_t, int *) = drm_lib ? dlsym(drm_lib, "drmPrimeHandleToFD") : NULL;
+    CHECK(prime_to_fd, "libdrm.so.2 has drmPrimeHandleToFD");
+    struct gbm_device *(*create_device)(int) = gbm_lib ? dlsym(gbm_lib, "gbm_create_device") : NULL;
+    struct gbm_device *fgbm = create_device ? create_device(rfd) : NULL;
+    struct gbm_bo *fbo = fgbm ? gbm_bo_create(fgbm, 256, 128, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING) : NULL;
+    int fplane = -1, fwhole = fbo ? gbm_bo_get_fd(fbo) : -1;
+    struct stat pst = {0}, wst = {0};
+    CHECK(fbo && gbm_bo_get_plane_count(fbo) == 1 && prime_to_fd &&
+              prime_to_fd(rfd, gbm_bo_get_handle_for_plane(fbo, 0).u32, DRM_CLOEXEC, &fplane) == 0 &&
+              fstat(fplane, &pst) == 0 && fstat(fwhole, &wst) == 0 && pst.st_ino == wst.st_ino,
+          "a buffer on the render node: its plane's handle exports the buffer's dmabuf");
+    if (fplane >= 0)
+        close(fplane);
+    if (fwhole >= 0)
+        close(fwhole);
+    if (fbo)
+        gbm_bo_destroy(fbo);
+    if (fgbm)
+        gbm_device_destroy(fgbm);
+
+    struct drm_client client = {.idx = 0};
+    CHECK(drmIoctl(master, DRM_IOCTL_GET_CLIENT, &client) == 0 && client.pid == (unsigned long)getpid() &&
+              client.auth == 1,
+          "GET_CLIENT 0: this process, authenticated");
+    client.idx = 1;
+    errno = 0;
+    CHECK(drmIoctl(master, DRM_IOCTL_GET_CLIENT, &client) != 0 && errno == EINVAL, "GET_CLIENT 1: EINVAL");
+    int plain = open(dev_path, O_RDWR | O_CLOEXEC);
+    flink.handle = 12345;
+    errno = 0;
+    CHECK(drmIoctl(plain, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == (root ? ENOENT : EACCES),
+          "GEM_FLINK from a file not authenticated: %s", root ? "ENOENT (root is)" : "EACCES");
+    drm_magic_t pmagic = 0;
+    errno = 0;
+    CHECK(drmGetMagic(plain, &pmagic) == 0 && drmAuthMagic(master, pmagic) == 0 &&
+              drmIoctl(plain, DRM_IOCTL_GEM_FLINK, &flink) != 0 && errno == ENOENT,
+          "...once authenticated, ENOENT for no handle");
+    close(plain);
+    char *busid = drmGetBusid(master);
+    CHECK(busid && strcmp(busid, "") == 0, "GET_UNIQUE: empty before SET_VERSION 1.1");
+    drmFreeBusid(busid);
+    drmSetVersion sv = {1, 4, -1, -1};
+    busid = drmSetInterfaceVersion(master, &sv) == 0 ? drmGetBusid(master) : NULL;
+    CHECK(busid && strcmp(busid, "chameleon") == 0 && sv.drm_di_major == 1 && sv.drm_di_minor == 4,
+          "SET_VERSION 1.4 names the master 'chameleon' (%s)", busid ? busid : "none");
+    drmFreeBusid(busid);
+
+    /* Another process's buffer, after that process destroyed it and exited:
+     * its dmabuf keeps it, as a GEM object, for PRIME and for EGL. */
+    int pair[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, pair) != 0)
+        return 1;
+    pid_t creator = fork();
+    if (creator == 0) {
+        int c = open(dev_path, O_RDWR | O_CLOEXEC);
+        struct gbm_device *g = gbm_create_device(c);
+        struct gbm_bo *b = g ? gbm_bo_create(g, 64, 64, GBM_FORMAT_XBGR8888, GBM_BO_USE_RENDERING) : NULL;
+        int d = b ? gbm_bo_get_fd(b) : -1;
+        struct cham_msg m = {0};
+        m.a = b ? gbm_bo_get_stride(b) : 0;
+        int sent = d >= 0 && cham_send(pair[1], &m, d) == 0;
+        gbm_bo_destroy(b);
+        gbm_device_destroy(g);
+        _exit(sent ? 0 : 1);
+    }
+    struct cham_msg cm;
+    int theirs = -1;
+    int got_fd = cham_recv(pair[0], &cm, &theirs) == 1 && theirs >= 0;
+    waitpid(creator, NULL, 0);
+    close(pair[0]);
+    close(pair[1]);
+    uint32_t th = 0;
+    CHECK(got_fd && drmPrimeFDToHandle(rfd, theirs, &th) == 0 && th,
+          "a buffer of a process that destroyed it and exited imports on the render node");
+    void *(*ahb_acquire)(int) = (void *(*)(int))dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    void (*ahb_release)(void *) = (void (*)(void *))dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
+    void *their_ahb = ahb_acquire && got_fd ? ahb_acquire(theirs) : NULL;
+    CHECK(their_ahb != NULL, "...and its AHardwareBuffer comes from chameleon-kernel (EGL import)");
+    if (their_ahb)
+        ahb_release(their_ahb);
+    /* ...and as a gbm buffer (Xwayland's DRI3 pixmaps): the buffer's own
+     * format, whichever 32-bit one the importer names. */
+    {
+        int g_fd = open(dev_path, O_RDWR | O_CLOEXEC);
+        struct gbm_device *g = gbm_create_device(g_fd);
+        uint32_t their_stride = (uint32_t)cm.a;
+        struct gbm_import_fd_data fdd = {theirs, 64, 64, their_stride, GBM_FORMAT_ARGB8888};
+        struct gbm_bo *imp = got_fd ? gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, GBM_BO_USE_RENDERING) : NULL;
+        int pfd = imp ? gbm_bo_get_fd(imp) : -1;
+        struct stat a, b;
+        int same = pfd >= 0 && fstat(pfd, &a) == 0 && fstat(theirs, &b) == 0 && a.st_ino == b.st_ino &&
+                   a.st_dev == b.st_dev;
+        CHECK(imp && gbm_bo_get_format(imp) == GBM_FORMAT_XBGR8888 && gbm_bo_get_width(imp) == 64 &&
+                  gbm_bo_get_stride(imp) == their_stride && gbm_bo_get_modifier(imp) == DRM_FORMAT_MOD_INVALID &&
+                  gbm_bo_get_handle(imp).u32 != 0 && same,
+              "gbm_bo_import of it: its own format and layout, a handle, the same dmabuf");
+        if (pfd >= 0)
+            close(pfd);
+        struct gbm_import_fd_modifier_data md = {64, 64, GBM_FORMAT_XRGB8888, 1, {theirs}, {their_stride}, {0},
+                                                 DRM_FORMAT_MOD_INVALID};
+        struct gbm_bo *imp2 = gbm_bo_import(g, GBM_BO_IMPORT_FD_MODIFIER, &md, GBM_BO_USE_RENDERING);
+        CHECK(imp2 && imp && gbm_bo_get_handle(imp2).u32 == gbm_bo_get_handle(imp).u32,
+              "...with a modifier list naming the implicit layout too (the same handle)");
+        if (imp2)
+            gbm_bo_destroy(imp2);
+        md.modifier = DRM_FORMAT_MOD_LINEAR;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD_MODIFIER, &md, 0) && errno == EINVAL,
+              "...but not as a linear one: EINVAL");
+        fdd.stride = their_stride + 64;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "another stride: EINVAL");
+        fdd.stride = their_stride;
+        fdd.width = 32;
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "another size: EINVAL");
+        fdd.width = 64;
+        fdd.fd = memfd_create("not-a-dmabuf", MFD_CLOEXEC);
+        errno = 0;
+        CHECK(!gbm_bo_import(g, GBM_BO_IMPORT_FD, &fdd, 0) && errno == EINVAL, "an fd that is no dmabuf: EINVAL");
+        close(fdd.fd);
+        if (imp)
+            gbm_bo_destroy(imp);
+        struct gbm_bo *own = gbm_bo_create(g, 32, 32, GBM_FORMAT_ABGR8888, GBM_BO_USE_RENDERING);
+        int ofd = own ? gbm_bo_get_fd(own) : -1;
+        struct gbm_import_fd_data od = {ofd, 32, 32, own ? gbm_bo_get_stride(own) : 0, GBM_FORMAT_ABGR8888};
+        struct gbm_bo *again = ofd >= 0 ? gbm_bo_import(g, GBM_BO_IMPORT_FD, &od, 0) : NULL;
+        CHECK(again && gbm_bo_get_handle(again).u32 == gbm_bo_get_handle(own).u32,
+              "this process's own buffer imports as itself");
+        if (again)
+            gbm_bo_destroy(again);
+        if (ofd >= 0)
+            close(ofd);
+        if (own)
+            gbm_bo_destroy(own);
+        gbm_device_destroy(g);
+        close(g_fd);
+    }
+    if (theirs >= 0)
+        close(theirs);
+    int not_dmabuf = memfd_create("not-a-dmabuf", MFD_CLOEXEC);
+    errno = 0;
+    CHECK(drmPrimeFDToHandle(rfd, not_dmabuf, &th) != 0 && errno == EINVAL, "an fd that is no dmabuf: EINVAL");
+    close(not_dmabuf);
+
+    int rinherited = fcntl(rfd, F_DUPFD, 10); /* not close-on-exec */
+    snprintf(num_r, sizeof num_r, "%d", rinherited);
+    CHECK(rinherited >= 0 && run_self("exec-render", num_r) == 0,
+          "a render fd passed across exec is still the render node, not master");
+    close(rinherited);
+    close(rfd);
+    close(master);
+
+    printf("other processes (chameleon-kernel)\n");
+    int fda = open(dev_path, O_RDWR | O_CLOEXEC);
+    struct gbm_device *gbm2 = gbm_create_device(fda);
+    struct gbm_bo *bo2 = gbm2 ? gbm_bo_create(gbm2, 64, 64, GBM_FORMAT_XRGB8888, GBM_BO_USE_SCANOUT) : NULL;
+    int dmabuf2 = bo2 ? gbm_bo_get_fd(bo2) : -1;
+    uint32_t pitch = bo2 ? gbm_bo_get_stride(bo2) : 0;
+    pid_t pid = fork();
+    if (pid == 0) { /* the file and the dmabuf, inherited */
+        uint32_t h = 0, fb = 0, handles[4] = {0}, pitches[4] = {pitch}, offsets[4] = {0};
+        int ok = drmPrimeFDToHandle(fda, dmabuf2, &h) == 0 && h;
+        handles[0] = h;
+        ok = ok && drmModeAddFB2(fda, 64, 64, DRM_FORMAT_XRGB8888, handles, pitches, offsets, &fb, 0) == 0;
+        _exit(ok ? 0 : 1);
+    }
+    int status = -1;
+    waitpid(pid, &status, 0);
+    CHECK(dmabuf2 >= 0 && WIFEXITED(status) && WEXITSTATUS(status) == 0,
+          "a child imports a dmabuf on the card file it inherited and adds a framebuffer");
+    struct drm_mode_card_res bad = {.count_crtcs = 1, .crtc_id_ptr = 16};
+    CHECK(drmIoctl(fda, DRM_IOCTL_MODE_GETRESOURCES, &bad) != 0 && errno == EFAULT,
+          "a bad pointer gets EFAULT, as from the kernel");
+
+    CHECK(drmDropMaster(fda) == 0, "drop master for a child to take");
+    int ready[2];
+    if (pipe(ready) != 0)
+        return 1;
+    pid = fork();
+    if (pid == 0) {
+        int c = open(dev_path, O_RDWR | O_CLOEXEC);
+        char m = c >= 0 && drmIsMaster(c) ? 'm' : '-';
+        if (write(ready[1], &m, 1) != 1)
+            _exit(1);
+        for (;;)
+            pause();
+    }
+    char m = 0;
+    if (read(ready[0], &m, 1) != 1)
+        m = 0;
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    CHECK(m == 'm' && drmSetMaster(fda) == 0 && drmIsMaster(fda),
+          "a child became master; once it is killed the master is free at once");
+    close(ready[0]);
+    close(ready[1]);
+
+    pthread_t calls;
+    pthread_create(&calls, NULL, calls_main, (void *)(intptr_t)fda);
+    int forks_ok = 0;
+    for (int i = 0; i < 100; i++) {
+        pid = fork();
+        if (pid == 0) {
+            alarm(5); /* a deadlock ends as SIGALRM */
+            drmModeRes *r = drmModeGetResources(fda);
+            _exit(r && r->count_crtcs == 1 ? 0 : 1);
+        }
+        status = -1;
+        waitpid(pid, &status, 0);
+        forks_ok += WIFEXITED(status) && WEXITSTATUS(status) == 0;
+    }
+    g_stop_calls = 1;
+    pthread_join(calls, NULL);
+    CHECK(forks_ok == 100, "fork while another thread is in card calls: the child's calls work (%d of 100)", forks_ok);
+
+    CHECK(fcntl(fda, F_GETPIPE_SZ) == (int)sysconf(_SC_PAGESIZE),
+          "a card file's event pipe holds one page, the kernel's 4 KiB of event space");
+    int inherited = fcntl(fda, F_DUPFD, 10); /* not close-on-exec */
+    char num[16];
+    snprintf(num, sizeof num, "%d", inherited);
+    CHECK(inherited >= 0 && run_self("exec-card", num) == 0, "a card fd passed across exec is still the card");
+    close(inherited);
+    CHECK(run_self("pipes", NULL) == 0, "a program using only ordinary pipes never contacts chameleon-kernel");
+
+    /* What the service counted of all this, for run-host-test.sh to look at
+     * (`chameleon --report`), and one request no card has, for its list. */
+    drmIoctl(fda, DRM_IOWR(0xe0, struct drm_get_cap), &(struct drm_get_cap){0});
+    if (getenv("KMS_TEST_REPORT") && system(getenv("KMS_TEST_REPORT")) != 0)
+        CHECK(0, "the session's report can be asked for");
+
+    /* Last: chameleon-kernel goes away (its pid from the card socket). */
+    struct sockaddr_un kaddr = {.sun_family = AF_UNIX};
+    snprintf(kaddr.sun_path, sizeof kaddr.sun_path, "%s/chameleon-card", getenv("XDG_RUNTIME_DIR"));
+    int ks = socket(AF_UNIX, SOCK_SEQPACKET, 0);
+    struct ucred cred = {0};
+    socklen_t clen = sizeof cred;
+    int got = connect(ks, (struct sockaddr *)&kaddr, sizeof kaddr) == 0 &&
+              getsockopt(ks, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 && cred.pid > 0;
+    close(ks);
+    if (got)
+        kill(cred.pid, SIGKILL);
+    usleep(100000);
+    struct pollfd pfd = {fda, POLLIN, 0};
+    CHECK(got && drmModeGetResources(fda) == NULL && errno == ENODEV,
+          "chameleon-kernel gone: the card answers ENODEV, as an unplugged device");
+    CHECK(poll(&pfd, 1, 0) == 1 && (pfd.revents & POLLHUP), "...and its event pipe hangs up");
+    close(dmabuf2);
+    gbm_bo_destroy(bo2);
+    gbm_device_destroy(gbm2);
+    close(fda);
 
     printf("\n%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

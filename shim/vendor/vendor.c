@@ -12,16 +12,17 @@
  *
  * Which displays it takes (anything else is left to the next vendor, e.g.
  * Mesa):
- *  - EGL_PLATFORM_GBM_KHR, and eglGetDisplay(EGL_DEFAULT_DISPLAY): only in a
- *    process running on Chameleon's fake KMS device (kwin_wayland started
- *    through bin/kwin_wayland, where libchameleon.so provides the gbm
- *    buffers);
- *    CHAMELEON_EGL_DEFAULT=1 also takes the default display elsewhere.
+ *  - EGL_PLATFORM_GBM_KHR: only in a Chameleon session, where
+ *    libchameleon.so provides the gbm buffers (the compositor's display).
+ *  - EGL_PLATFORM_DEVICE_EXT on the card's device (the one it enumerates
+ *    in a Chameleon session): the same display.
+ *  - eglGetDisplay(EGL_DEFAULT_DISPLAY): only with CHAMELEON_EGL_DEFAULT=1
+ *    (no compositor asks for it; X11 apps under Xwayland need Mesa's).
  *  - EGL_PLATFORM_SURFACELESS_MESA and EGL_PLATFORM_ANDROID_KHR: always
  *    (off-screen rendering on the GPU).
- *  - EGL_PLATFORM_WAYLAND_KHR: when the app's compositor is a KWin running
- *    with the Chameleon shim (wayland.c): windows render on the GPU and
- *    reach KWin as AHardwareBuffers, without copies.
+ *  - EGL_PLATFORM_WAYLAND_KHR: when the app's compositor runs on Chameleon
+ *    (wayland.c): windows render on the GPU and reach the compositor as
+ *    AHardwareBuffers, without copies.
  * X11 windows are not handled.
  *
  * Only __egl_Main is exported (see vendor.map).
@@ -83,6 +84,7 @@ STUB(EGLBoolean, eglDestroySyncKHR, (EGLDisplay dpy, EGLSyncKHR sync), (dpy, syn
 STUB(EGLint, eglClientWaitSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint flags, EGLTimeKHR timeout),
      (dpy, sync, flags, timeout), EGL_FALSE)
 STUB(EGLint, eglWaitSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint flags), (dpy, sync, flags), EGL_FALSE)
+STUB(EGLBoolean, eglSignalSyncKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLenum mode), (dpy, sync, mode), EGL_FALSE)
 STUB(EGLBoolean, eglGetSyncAttribKHR, (EGLDisplay dpy, EGLSyncKHR sync, EGLint attribute, EGLint *value),
      (dpy, sync, attribute, value), EGL_FALSE)
 STUB(EGLint, eglDupNativeFenceFDANDROID, (EGLDisplay dpy, EGLSyncKHR sync), (dpy, sync),
@@ -92,12 +94,47 @@ STUB(EGLBoolean, eglQueryDmaBufFormatsEXT, (EGLDisplay dpy, EGLint max, EGLint *
 STUB(EGLBoolean, eglQueryDmaBufModifiersEXT,
      (EGLDisplay dpy, EGLint format, EGLint max, EGLuint64KHR *modifiers, EGLBoolean *external, EGLint *num),
      (dpy, format, max, modifiers, external, num), EGL_FALSE)
+STUB(EGLBoolean, eglExportDMABUFImageQueryMESA,
+     (EGLDisplay dpy, EGLImageKHR image, int *fourcc, int *num_planes, EGLuint64KHR *modifiers),
+     (dpy, image, fourcc, num_planes, modifiers), EGL_FALSE)
+STUB(EGLBoolean, eglExportDMABUFImageMESA, (EGLDisplay dpy, EGLImageKHR image, int *fds, EGLint *strides, EGLint *offsets),
+     (dpy, image, fds, strides, offsets), EGL_FALSE)
 STUB(EGLBoolean, eglSwapBuffersWithDamageKHR, (EGLDisplay dpy, EGLSurface surface, const EGLint *rects, EGLint n),
      (dpy, surface, rects, n), EGL_FALSE)
 STUB(EGLBoolean, eglSwapBuffersWithDamageEXT, (EGLDisplay dpy, EGLSurface surface, const EGLint *rects, EGLint n),
      (dpy, surface, rects, n), EGL_FALSE)
 STUB(EGLBoolean, eglSetDamageRegionKHR, (EGLDisplay dpy, EGLSurface surface, EGLint *rects, EGLint n),
      (dpy, surface, rects, n), EGL_FALSE)
+
+/* The same for extension functions taking an EGLDeviceEXT: the device's
+ * vendor is the one that handed it out (eglQueryDevicesEXT or
+ * eglQueryDisplayAttribEXT). */
+static __eglMustCastToProperFunctionPointerType fetch_device(EGLDeviceEXT device, int index)
+{
+    g_exports->threadInit();
+    __EGLvendorInfo *vendor = g_exports->getVendorFromDevice(device);
+    __eglMustCastToProperFunctionPointerType fn =
+        vendor && index >= 0 ? g_exports->fetchDispatchEntry(vendor, index) : NULL;
+    if (!fn) {
+        g_exports->setEGLError(EGL_BAD_DEVICE_EXT);
+        return NULL;
+    }
+    g_exports->setLastVendor(vendor);
+    return fn;
+}
+
+#define DEVICE_STUB(ret, name, params, args, failure)                 \
+    static int idx_##name = -1;                                      \
+    static ret EGLAPIENTRY stub_##name params                        \
+    {                                                                \
+        ret(EGLAPIENTRY * fn) params;                                \
+        *(void **)&fn = (void *)fetch_device(device, idx_##name);    \
+        return fn ? fn args : (failure);                             \
+    }
+
+DEVICE_STUB(const char *, eglQueryDeviceStringEXT, (EGLDeviceEXT device, EGLint name), (device, name), NULL)
+DEVICE_STUB(EGLBoolean, eglQueryDeviceAttribEXT, (EGLDeviceEXT device, EGLint attribute, EGLAttrib *value),
+            (device, attribute, value), EGL_FALSE)
 STUB(EGLBoolean, eglPresentationTimeANDROID, (EGLDisplay dpy, EGLSurface surface, EGLnsecsANDROID time),
      (dpy, surface, time), EGL_FALSE)
 
@@ -111,7 +148,9 @@ static const struct {
     ENTRY(eglDestroySyncKHR),        ENTRY(eglClientWaitSyncKHR),      ENTRY(eglWaitSyncKHR),
     ENTRY(eglGetSyncAttribKHR),      ENTRY(eglDupNativeFenceFDANDROID), ENTRY(eglQueryDmaBufFormatsEXT),
     ENTRY(eglQueryDmaBufModifiersEXT), ENTRY(eglSwapBuffersWithDamageKHR), ENTRY(eglSwapBuffersWithDamageEXT),
-    ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID),
+    ENTRY(eglSetDamageRegionKHR),    ENTRY(eglPresentationTimeANDROID), ENTRY(eglQueryDeviceStringEXT),
+    ENTRY(eglQueryDeviceAttribEXT),  ENTRY(eglExportDMABUFImageQueryMESA), ENTRY(eglExportDMABUFImageMESA),
+    ENTRY(eglSignalSyncKHR),
 };
 
 static void *get_dispatch_address(const char *name)
@@ -138,7 +177,7 @@ static void set_dispatch_index(const char *name, int index)
 static int claim_default_display(void)
 {
     const char *env = getenv("CHAMELEON_EGL_DEFAULT");
-    return cham_core_present() || (env && strcmp(env, "1") == 0);
+    return env && strcmp(env, "1") == 0;
 }
 
 static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGLAttrib *attribs)
@@ -151,11 +190,13 @@ static EGLDisplay get_platform_display(EGLenum platform, void *native, const EGL
     case EGL_PLATFORM_GBM_KHR:
         /* Only Chameleon's own gbm devices have AHardwareBuffers behind them. */
         return cham_core_present() ? cham_egl_android_display() : EGL_NO_DISPLAY;
+    case EGL_PLATFORM_DEVICE_EXT:
+        return native == cham_egl_device() && cham_core_present() ? cham_egl_android_display() : EGL_NO_DISPLAY;
     case EGL_PLATFORM_SURFACELESS_MESA:
     case EGL_PLATFORM_ANDROID_KHR:
         return cham_egl_android_display();
     case EGL_PLATFORM_WAYLAND_KHR:
-        /* only under a KWin running with the Chameleon shim */
+        /* only under a compositor running on Chameleon */
         return cham_wl_get_display(native);
     }
     return EGL_NO_DISPLAY;
@@ -172,7 +213,7 @@ static const char *get_vendor_string(int name)
         return NULL;
     static char list[256];
     snprintf(list, sizeof list, "%s%sEGL_MESA_platform_surfaceless EGL_KHR_platform_android",
-             cham_core_present() ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm " : "",
+             cham_core_present() ? "EGL_KHR_platform_gbm EGL_MESA_platform_gbm EGL_EXT_platform_device " : "",
              cham_wl_platform_available() ? "EGL_KHR_platform_wayland EGL_EXT_platform_wayland " : "");
     return list;
 }

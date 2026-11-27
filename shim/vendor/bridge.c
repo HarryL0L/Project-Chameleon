@@ -3,22 +3,25 @@
  * The vendor library's link to libchameleon.so, resolved at run time.
  *
  * libEGL_chameleon.so is loaded into every EGL program that glvnd routes to
- * it, while libchameleon.so (fake KMS device, gbm buffers, crash reporter)
- * is only LD_PRELOADed into kwin_wayland (bin/kwin_wayland). So the vendor
+ * it, while libchameleon.so (the card node, gbm buffers, crash reporter) is
+ * LD_PRELOADed only into the programs of a Chameleon session. So the vendor
  * does not link against it: the few core functions the EGL code uses are
  * looked up with dlsym(RTLD_DEFAULT) and simply absent elsewhere (no dmabuf
  * import, which only makes sense for Chameleon's own gbm buffers anyway).
  *
  * The crash breadcrumbs (last GL/EGL calls) live here and are handed to
- * libchameleon's crash reporter when it is there.
+ * libchameleon's crash reporter once the process renders with Android's
+ * driver.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "../../common/chameleon_drm.h"
 #include "../core/cham_shim.h"
 #include "vendor.h"
 
@@ -49,7 +52,19 @@ static struct {
     struct cham_bo *(*bo_from_fd)(int);
     AHardwareBuffer *(*bo_ahb)(struct cham_bo *);
     const uint32_t *(*formats)(int *);
-    AHardwareBuffer *(*client_ahb_from_fd)(int);
+    AHardwareBuffer *(*buffer_ahb_acquire)(int);
+    void (*buffer_ahb_release)(AHardwareBuffer *);
+    void *(*gbm_window_get)(void *, uint32_t *);
+    /* for EGL_MESA_image_dma_buf_export */
+    struct cham_bo *(*bo_create)(uint32_t, uint32_t, uint32_t, uint32_t);
+    void (*bo_unref)(struct cham_bo *);
+    int (*bo_export_fd)(struct cham_bo *);
+    uint32_t (*bo_handle_open)(struct cham_bo *, int);
+    void (*bo_handle_close)(int, uint32_t);
+    /* for Wayland windows' buffers */
+    struct cham_bo *(*bo_wrap)(AHardwareBuffer *, const void *, uint32_t, uint32_t, uint32_t, uint32_t,
+                               void (*)(AHardwareBuffer *));
+    int (*dmabuf_write_fence)(int, int);
 } core;
 
 static void resolve(void)
@@ -57,10 +72,24 @@ static void resolve(void)
     *(void **)&core.bo_from_fd = dlsym(RTLD_DEFAULT, "cham_bo_from_fd");
     *(void **)&core.bo_ahb = dlsym(RTLD_DEFAULT, "cham_bo_ahb");
     *(void **)&core.formats = dlsym(RTLD_DEFAULT, "cham_formats");
-    *(void **)&core.client_ahb_from_fd = dlsym(RTLD_DEFAULT, "cham_client_ahb_from_fd");
-    if (!core.bo_from_fd || !core.bo_ahb || !core.formats)
+    *(void **)&core.buffer_ahb_acquire = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_acquire");
+    *(void **)&core.buffer_ahb_release = dlsym(RTLD_DEFAULT, "cham_buffer_ahb_release");
+    *(void **)&core.gbm_window_get = dlsym(RTLD_DEFAULT, "cham_gbm_window_get");
+    *(void **)&core.bo_create = dlsym(RTLD_DEFAULT, "cham_bo_create");
+    *(void **)&core.bo_unref = dlsym(RTLD_DEFAULT, "cham_bo_unref");
+    *(void **)&core.bo_export_fd = dlsym(RTLD_DEFAULT, "cham_bo_export_fd");
+    *(void **)&core.bo_handle_open = dlsym(RTLD_DEFAULT, "cham_bo_handle_open");
+    *(void **)&core.bo_handle_close = dlsym(RTLD_DEFAULT, "cham_bo_handle_close");
+    *(void **)&core.bo_wrap = dlsym(RTLD_DEFAULT, "cham_bo_wrap");
+    *(void **)&core.dmabuf_write_fence = dlsym(RTLD_DEFAULT, "cham_dmabuf_write_fence");
+    if (!core.bo_create || !core.bo_unref || !core.bo_export_fd || !core.bo_handle_open || !core.bo_handle_close)
+        core.bo_create = NULL; /* no texture export (cham_bo_create() answers NULL) */
+    if (!core.bo_from_fd || !core.bo_ahb || !core.formats || !core.buffer_ahb_acquire || !core.buffer_ahb_release)
         memset(&core, 0, sizeof core);
+}
 
+static void arm(void)
+{
     void (*attach)(const struct cham_crash_breadcrumbs *);
     *(void **)&attach = dlsym(RTLD_DEFAULT, "cham_crash_attach");
     if (attach) {
@@ -72,6 +101,12 @@ static void resolve(void)
         };
         attach(&crumbs);
     }
+}
+
+void cham_crash_arm(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, arm);
 }
 
 static void ensure_resolved(void)
@@ -96,9 +131,20 @@ AHardwareBuffer *cham_bo_ahb(struct cham_bo *bo)
     return cham_core_present() ? core.bo_ahb(bo) : NULL;
 }
 
-AHardwareBuffer *cham_client_ahb_from_fd(int fd)
+AHardwareBuffer *cham_buffer_ahb_acquire(int fd)
 {
-    return cham_core_present() && core.client_ahb_from_fd ? core.client_ahb_from_fd(fd) : NULL;
+    return cham_core_present() ? core.buffer_ahb_acquire(fd) : NULL;
+}
+
+void cham_buffer_ahb_release(AHardwareBuffer *b)
+{
+    if (b && cham_core_present())
+        core.buffer_ahb_release(b);
+}
+
+void *cham_gbm_window(void *native, uint32_t *format)
+{
+    return cham_core_present() && core.gbm_window_get ? core.gbm_window_get(native, format) : NULL;
 }
 
 const uint32_t *cham_formats(int *count)
@@ -107,4 +153,60 @@ const uint32_t *cham_formats(int *count)
         return core.formats(count);
     *count = 0;
     return NULL;
+}
+
+struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)
+{
+    return cham_core_present() && core.bo_create ? core.bo_create(width, height, format, usage) : NULL;
+}
+
+int cham_bo_sharing(void)
+{
+    return cham_core_present() && core.bo_wrap && core.bo_unref && core.bo_handle_open && core.bo_handle_close;
+}
+
+struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width, uint32_t height,
+                             uint32_t stride, uint32_t format, void (*release)(AHardwareBuffer *))
+{
+    return cham_bo_sharing() ? core.bo_wrap(ahb, native_handle, width, height, stride, format, release) : NULL;
+}
+
+/* The rest only for buffers cham_bo_create() or cham_bo_wrap() made. */
+void cham_bo_unref(struct cham_bo *bo)
+{
+    core.bo_unref(bo);
+}
+
+int cham_bo_export_fd(struct cham_bo *bo)
+{
+    return core.bo_export_fd(bo);
+}
+
+uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+{
+    return core.bo_handle_open(bo, fd);
+}
+
+void cham_bo_handle_close(int fd, uint32_t handle)
+{
+    core.bo_handle_close(fd, handle);
+}
+
+int cham_dmabuf_write_fence(int dmabuf, int fence)
+{
+    return cham_core_present() && core.dmabuf_write_fence ? core.dmabuf_write_fence(dmabuf, fence) : 0;
+}
+
+static int g_render_fd = -1;
+
+static void open_render_node(void)
+{
+    g_render_fd = open(CHAM_RENDER_PATH, O_RDWR | O_CLOEXEC);
+}
+
+int cham_render_fd(void)
+{
+    static pthread_once_t once = PTHREAD_ONCE_INIT;
+    pthread_once(&once, open_render_node);
+    return g_render_fd;
 }

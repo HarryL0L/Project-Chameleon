@@ -1,0 +1,13 @@
+/* libvulkan_chameleon.so exports the Vulkan loader's three entry points and
+ * nothing else: bridge.c's cham_* wrappers must not be what
+ * dlsym(RTLD_DEFAULT) finds in place of libchameleon.so's functions, and a
+ * Vulkan function's name here would take the loader's place for other
+ * libraries. */
+{
+    global:
+        vk_icdGetInstanceProcAddr;
+        vk_icdGetPhysicalDeviceProcAddr;
+        vk_icdNegotiateLoaderICDInterfaceVersion;
+    local:
+        *;
+};

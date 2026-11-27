@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * The fake KMS device KWin drives with atomic mode setting.
+ * The fake KMS device the compositor drives with atomic mode setting, in
+ * chameleon-kernel (card.c serves it to every process).
  *
  * One connector (DSI-1, the Chameleon app's surface) -> one encoder -> one
  * CRTC -> one primary plane. Everything is answered at the ioctl level, so
@@ -8,16 +9,33 @@
  * commit that puts a framebuffer on the plane becomes a PRESENT to the app;
  * the app's FRAME_DONE becomes the page-flip event.
  *
- * The connector's one mode is the app's surface size and refresh rate when
- * the device is first opened. KWin may set any other mode (output.c adds
- * custom modes to follow the app's window as it rotates or resizes); the app
- * scales or crops whatever size arrives.
+ * Each open file has the kernel's per-file state (Linux 6.8, checked against
+ * vkms with shim/test/refvm.sh): the first opener while there is no DRM
+ * master becomes master and only it may commit; client caps, GEM handles,
+ * framebuffers and property blobs belong to the file, and go when it closes.
+ * A file of the render node (renderD128) is never master and may use only
+ * the ioctls the kernel allows render nodes (DRM_RENDER_ALLOW: version, caps,
+ * GEM handles and PRIME), as with virtio-gpu.
+ *
+ * The connector's one mode is the app's surface: its size and the display's
+ * refresh rate. When the window changes (the phone rotates, the keyboard
+ * opens, battery saver drops to 60 Hz) the mode changes with it and the
+ * card sends a hotplug uevent (HOTPLUG=1), as a monitor's driver does when
+ * the monitor's modes change; the compositor re-reads the connector and
+ * switches to the new mode. The EDID describes the panel as first seen (a
+ * standard EDID 1.4 block: name, physical size, that mode as its preferred
+ * timing) and stays the same, so the compositor keeps seeing the same
+ * monitor. Any other mode may be set too; the app scales or crops whatever
+ * size arrives.
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <drm.h>
 #include <drm_fourcc.h>
@@ -29,11 +47,14 @@
 #define ID_ENCODER 32
 #define ID_CRTC 33
 #define ID_PLANE 34
+#define ID_EDID_BLOB 35
+#define ID_CURSOR 36 /* the cursor plane, offered with an app that shows it (link_app_cursor) */
 
 enum {
     P_CONN_CRTC_ID = 100,
     P_CONN_DPMS,
     P_CONN_NON_DESKTOP,
+    P_CONN_EDID,
     P_CRTC_ACTIVE,
     P_CRTC_MODE_ID,
     P_PLANE_TYPE,
@@ -71,6 +92,7 @@ static const struct propdef k_props[P_END - 100] = {
     [P_CONN_CRTC_ID - 100] = {"CRTC_ID", DRM_MODE_PROP_OBJECT | ATOMIC, {DRM_MODE_OBJECT_CRTC}, 1},
     [P_CONN_DPMS - 100] = {"DPMS", DRM_MODE_PROP_ENUM, {0}, 0, k_dpms, 4},
     [P_CONN_NON_DESKTOP - 100] = {"non-desktop", DRM_MODE_PROP_IMMUTABLE | RANGE(0, 1)},
+    [P_CONN_EDID - 100] = {"EDID", DRM_MODE_PROP_BLOB | DRM_MODE_PROP_IMMUTABLE, {0}, 0},
     [P_CRTC_ACTIVE - 100] = {"ACTIVE", ATOMIC | RANGE(0, 1)},
     [P_CRTC_MODE_ID - 100] = {"MODE_ID", DRM_MODE_PROP_BLOB | ATOMIC, {0}, 0},
     [P_PLANE_TYPE - 100] = {"type", DRM_MODE_PROP_ENUM | DRM_MODE_PROP_IMMUTABLE, {0}, 0, k_plane_type, 3},
@@ -87,28 +109,37 @@ static const struct propdef k_props[P_END - 100] = {
     [P_IN_FENCE_FD - 100] = {"IN_FENCE_FD", ATOMIC | SRANGE(-1, INT32_MAX)},
 };
 
-static const uint32_t k_conn_props[] = {P_CONN_CRTC_ID, P_CONN_DPMS, P_CONN_NON_DESKTOP};
+static const uint32_t k_conn_props[] = {P_CONN_CRTC_ID, P_CONN_DPMS, P_CONN_NON_DESKTOP, P_CONN_EDID};
 static const uint32_t k_crtc_props[] = {P_CRTC_ACTIVE, P_CRTC_MODE_ID};
 static const uint32_t k_plane_props[] = {P_PLANE_TYPE, P_PLANE_FB_ID, P_PLANE_CRTC_ID, P_SRC_X, P_SRC_Y,
                                          P_SRC_W, P_SRC_H, P_CRTC_X, P_CRTC_Y, P_CRTC_W, P_CRTC_H,
                                          P_IN_FENCE_FD};
+
+struct plane_state {
+    uint32_t fb;
+    uint32_t crtc;
+    uint32_t src_x, src_y, src_w, src_h; /* 16.16 */
+    int32_t crtc_x, crtc_y;
+    uint32_t crtc_w, crtc_h;
+};
 
 struct kms_state {
     uint32_t conn_crtc;
     uint64_t dpms;
     uint64_t active;
     uint32_t mode_blob;
-    uint32_t fb;
-    uint32_t plane_crtc;
-    uint32_t src_x, src_y, src_w, src_h;
-    int32_t crtc_x, crtc_y;
-    uint32_t crtc_w, crtc_h;
+    struct plane_state primary, cursor;
     int64_t in_fence;
 };
 
 struct fb {
     uint32_t id;
+    uint32_t width, height;
+    uint32_t format, pitch; /* as ADDFB2 gave them */
     struct cham_bo *bo; /* holds a ref */
+    struct cham_bo *mem; /* of a dumb buffer (holds a ref): bo is the card's copy of it, */
+    uint32_t offset;     /* from here in its memory, made when it is shown */
+    struct fake_fd *owner; /* the file that created it; NULL once it let go (CLOSEFB) */
     struct fb *next;
 };
 
@@ -116,22 +147,34 @@ struct blob {
     uint32_t id;
     uint32_t length;
     void *data;
+    struct fake_fd *owner; /* NULL: the card's own (EDID) */
+    int destroyed; /* the client let go of it; kept while the CRTC uses it, as the kernel does */
     struct blob *next;
 };
 
 static struct kms_state g_state = {.in_fence = -1};
 static struct cham_bo *g_plane_bo; /* what's on screen; holds a ref */
-static int g_plane_shown;           /* ...and it fills the active CRTC */
-static int g_screen_off;            /* KWin turned its screen off (idle, DPMS) */
+static int g_plane_shown;           /* ...and it is on the screen (the active CRTC, an app that can show it) */
+static int g_plane_on, g_plane_partial; /* ...on the active CRTC; covering part of it */
+static struct cham_bo *g_cursor_bo; /* the cursor plane's buffer; holds a ref */
+static int32_t g_cursor_x, g_cursor_y; /* where the legacy cursor call last put it (crtc->cursor_x/y) */
+static int g_has_cursor;            /* the card has a cursor plane */
+static int g_screen_off;            /* The compositor turned its screen off (idle, DPMS) */
 static int g_screen_was_on;         /* ...after it had been on */
 static struct fb *g_fbs;
 static struct blob *g_blobs;
 static uint32_t g_next_object_id = 1000;
 static uint64_t g_frame;
+static struct fake_fd *g_files;     /* every open file (kms_next) */
+static struct fake_fd *g_master;    /* the file that is DRM master, if any */
+static uint32_t g_next_magic = 1;
+static int g_unique_set;            /* SET_VERSION 1.1 named the master (GET_UNIQUE) */
 
 static struct drm_mode_modeinfo g_mode;
 static uint32_t g_mode_mhz;
-static uint32_t g_mm_width, g_mm_height;
+static uint8_t g_edid[128];
+static struct blob g_edid_blob = {.id = ID_EDID_BLOB, .length = sizeof g_edid, .data = g_edid};
+static uint32_t g_screen_width, g_screen_height, g_mm_width, g_mm_height;
 
 /* ---- setup ---- */
 
@@ -155,17 +198,71 @@ static void make_mode(uint32_t w, uint32_t h, uint32_t mhz)
     g_mode_mhz = mhz;
 }
 
+/* An EDID 1.4 base block for the panel: vendor "CML" (not a registered PNP
+ * ID), name "Chameleon", physical size, sRGB, and g_mode as the preferred
+ * detailed timing. */
+static void make_edid(uint32_t mm_w, uint32_t mm_h)
+{
+    static const uint8_t header[] = {0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00};
+    static const uint8_t srgb[] = {0xee, 0x91, 0xa3, 0x54, 0x4c, 0x99, 0x26, 0x0f, 0x50, 0x54};
+    const struct drm_mode_modeinfo *m = &g_mode;
+    uint8_t *e = g_edid;
+    memset(e, 0, sizeof g_edid);
+    memcpy(e, header, sizeof header);
+    uint16_t vendor = (uint16_t)(('C' - '@') << 10 | ('M' - '@') << 5 | ('L' - '@'));
+    e[8] = (uint8_t)(vendor >> 8);
+    e[9] = (uint8_t)vendor;
+    e[10] = 1;                /* product code */
+    e[17] = 2026 - 1990;      /* model year */
+    e[18] = 1, e[19] = 4;     /* EDID 1.4 */
+    e[20] = 0x80;             /* digital input */
+    e[21] = (uint8_t)(mm_w + 5 < 2550 ? (mm_w + 5) / 10 : 255); /* cm */
+    e[22] = (uint8_t)(mm_h + 5 < 2550 ? (mm_h + 5) / 10 : 255);
+    e[23] = 120;              /* gamma 2.2 */
+    e[24] = 0x06;             /* sRGB, RGB 4:4:4, preferred timing is native */
+    memcpy(e + 25, srgb, sizeof srgb);
+    memset(e + 38, 0x01, 16); /* no standard timings */
+
+    uint8_t *t = e + 54;      /* detailed timing: the mode */
+    uint32_t clock = m->clock / 10 < 0xffff ? m->clock / 10 : 0xffff; /* 10 kHz */
+    uint32_t hblank = m->htotal - m->hdisplay, vblank = m->vtotal - m->vdisplay;
+    uint32_t hso = m->hsync_start - m->hdisplay, hsw = m->hsync_end - m->hsync_start;
+    uint32_t vso = m->vsync_start - m->vdisplay, vsw = m->vsync_end - m->vsync_start;
+    t[0] = (uint8_t)clock, t[1] = (uint8_t)(clock >> 8);
+    t[2] = (uint8_t)m->hdisplay, t[3] = (uint8_t)hblank;
+    t[4] = (uint8_t)((m->hdisplay >> 8) << 4 | (hblank >> 8));
+    t[5] = (uint8_t)m->vdisplay, t[6] = (uint8_t)vblank;
+    t[7] = (uint8_t)((m->vdisplay >> 8) << 4 | (vblank >> 8));
+    t[8] = (uint8_t)hso, t[9] = (uint8_t)hsw;
+    t[10] = (uint8_t)((vso & 15) << 4 | (vsw & 15));
+    t[11] = (uint8_t)((hso >> 8) << 6 | (hsw >> 8) << 4 | (vso >> 4) << 2 | (vsw >> 4));
+    t[12] = (uint8_t)mm_w, t[13] = (uint8_t)mm_h;
+    t[14] = (uint8_t)((mm_w >> 8) << 4 | (mm_h >> 8));
+    t[17] = 0x1e;             /* digital separate sync, +hsync +vsync */
+
+    static const char name[13] = "Chameleon\n   ";
+    uint8_t *d = e + 72;      /* display name */
+    d[3] = 0xfc;
+    memcpy(d + 5, name, sizeof name);
+    e[90 + 3] = e[108 + 3] = 0x10; /* unused descriptors */
+
+    uint8_t sum = 0;
+    for (int i = 0; i < 127; i++)
+        sum = (uint8_t)(sum + e[i]);
+    e[127] = (uint8_t)-sum;
+}
+
 static pthread_once_t g_init_once = PTHREAD_ONCE_INIT;
 
 static void kms_init(void)
 {
-    uint32_t w = 0, h = 0, mhz = 0;
+    uint32_t w = 0, h = 0, mhz = 0, win_w = 0, win_h = 0;
     link_start();
     const char *wait = getenv("CHAMELEON_WAIT");
     int timeout_ms = (wait ? atoi(wait) : 30) * 1000;
     cham_log("waiting up to %d s for the Chameleon app to report its screen", timeout_ms / 1000);
-    if (link_wait_config(&w, &h, &mhz, timeout_ms)) {
-        cham_log("screen %ux%u @ %.2f Hz", w, h, mhz / 1000.0);
+    if (link_wait_config(&w, &h, &mhz, &win_w, &win_h, timeout_ms)) {
+        cham_log("screen %ux%u @ %.2f Hz (window %ux%u)", w, h, mhz / 1000.0, win_w, win_h);
     } else {
         const char *mode = getenv("CHAMELEON_MODE");
         double hz = 60;
@@ -175,14 +272,24 @@ static void kms_init(void)
         cham_log("no app yet; using %ux%u @ %.2f Hz (set CHAMELEON_MODE=WxH@Hz to change)", w, h, hz);
     }
     make_mode(w, h, mhz);
+    /* A cursor plane, as GPUs have, if the app can show one (an older app
+     * leaves the compositor drawing its pointer into its frames). */
+    g_has_cursor = link_app_cursor();
+    /* The screen is the app's whole window: the surface may start smaller,
+     * above the keyboard. */
+    if (win_w && win_h)
+        w = win_w, h = win_h;
 
     /* Physical size decides KWin's default scale; phones are ~400 dpi. */
     const char *dpi_env = getenv("CHAMELEON_DPI");
     double dpi = dpi_env ? atof(dpi_env) : 400.0;
     if (dpi < 50)
         dpi = 400.0;
+    g_screen_width = w;
+    g_screen_height = h;
     g_mm_width = (uint32_t)(w * 25.4 / dpi + 0.5);
     g_mm_height = (uint32_t)(h * 25.4 / dpi + 0.5);
+    make_edid(g_mm_width, g_mm_height);
 }
 
 void kms_init_once(void)
@@ -190,9 +297,44 @@ void kms_init_once(void)
     pthread_once(&g_init_once, kms_init);
 }
 
+#define REFRESH_SLACK_MHZ 1000 /* the display's rate wobbles a little */
+
+int kms_panel(uint32_t width, uint32_t height, uint32_t refresh_mhz)
+{
+    kms_init_once();
+    pthread_mutex_lock(&g_lock);
+    int changed = width != g_mode.hdisplay || height != g_mode.vdisplay ||
+                  abs((int32_t)refresh_mhz - (int32_t)g_mode_mhz) > REFRESH_SLACK_MHZ;
+    if (changed) {
+        make_mode(width, height, refresh_mhz);
+        cham_log("connector mode now %ux%u @ %.2f Hz", width, height, refresh_mhz / 1000.0);
+    }
+    pthread_mutex_unlock(&g_lock);
+    return changed;
+}
+
 /* ---- helpers ---- */
 
-#define U2P(u) ((void *)(uintptr_t)(u))
+/* The kernel's copies to and from the caller's memory (card.c). */
+static int copy_to_user(uint64_t to, const void *from, size_t n)
+{
+    return n ? card_copy_to(to, from, n) : 0;
+}
+
+static int copy_from_user(void *to, uint64_t from, size_t n)
+{
+    return n ? card_copy_from(to, from, n) : 0;
+}
+
+/* An id list as most getters return it: as many as fit, then the count. */
+static int put_ids(uint64_t ptr, uint32_t *count, const uint32_t *ids, uint32_t n)
+{
+    for (uint32_t i = 0; i < n; i++)
+        if (i < *count && copy_to_user(ptr + i * sizeof ids[0], &ids[i], sizeof ids[0]))
+            return -EFAULT;
+    *count = n;
+    return 0;
+}
 
 static struct fb *fb_find(uint32_t id)
 {
@@ -210,26 +352,28 @@ static struct blob *blob_find(uint32_t id)
     return NULL;
 }
 
-static uint64_t prop_value(uint32_t prop)
+static uint64_t prop_value(uint32_t obj, uint32_t prop)
 {
     const struct kms_state *s = &g_state;
+    const struct plane_state *p = obj == ID_CURSOR ? &s->cursor : &s->primary;
     switch (prop) {
     case P_CONN_CRTC_ID: return s->conn_crtc;
     case P_CONN_DPMS: return s->dpms;
     case P_CONN_NON_DESKTOP: return 0;
+    case P_CONN_EDID: return ID_EDID_BLOB;
     case P_CRTC_ACTIVE: return s->active;
     case P_CRTC_MODE_ID: return s->mode_blob;
-    case P_PLANE_TYPE: return 1; /* Primary */
-    case P_PLANE_FB_ID: return s->fb;
-    case P_PLANE_CRTC_ID: return s->plane_crtc;
-    case P_SRC_X: return s->src_x;
-    case P_SRC_Y: return s->src_y;
-    case P_SRC_W: return s->src_w;
-    case P_SRC_H: return s->src_h;
-    case P_CRTC_X: return (uint64_t)(int64_t)s->crtc_x;
-    case P_CRTC_Y: return (uint64_t)(int64_t)s->crtc_y;
-    case P_CRTC_W: return s->crtc_w;
-    case P_CRTC_H: return s->crtc_h;
+    case P_PLANE_TYPE: return obj == ID_CURSOR ? 2 : 1; /* Cursor, Primary */
+    case P_PLANE_FB_ID: return p->fb;
+    case P_PLANE_CRTC_ID: return p->crtc;
+    case P_SRC_X: return p->src_x;
+    case P_SRC_Y: return p->src_y;
+    case P_SRC_W: return p->src_w;
+    case P_SRC_H: return p->src_h;
+    case P_CRTC_X: return (uint64_t)(int64_t)p->crtc_x;
+    case P_CRTC_Y: return (uint64_t)(int64_t)p->crtc_y;
+    case P_CRTC_W: return p->crtc_w;
+    case P_CRTC_H: return p->crtc_h;
     case P_IN_FENCE_FD: return (uint64_t)(int64_t)-1;
     }
     return 0;
@@ -246,7 +390,10 @@ static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *coun
         *type = DRM_MODE_OBJECT_CRTC;
         *count = sizeof k_crtc_props / sizeof k_crtc_props[0];
         return k_crtc_props;
-    case ID_PLANE:
+    case ID_CURSOR:
+    case ID_PLANE: /* the same properties */
+        if (obj == ID_CURSOR && !g_has_cursor)
+            return NULL;
         *type = DRM_MODE_OBJECT_PLANE;
         *count = sizeof k_plane_props / sizeof k_plane_props[0];
         return k_plane_props;
@@ -254,53 +401,71 @@ static const uint32_t *object_props(uint32_t obj, uint32_t *type, uint32_t *coun
     return NULL;
 }
 
-/* Copies an array out if the caller's buffer is big enough (kernel rules),
- * and always reports the real count. */
-#define COPY_OUT(ptr, user_count, src, n)                                  \
-    do {                                                                   \
-        if ((ptr) && (user_count) >= (n) && (n))                           \
-            memcpy(U2P(ptr), (src), sizeof((src)[0]) * (n));               \
-        (user_count) = (n);                                                \
-    } while (0)
-
 /* ---- mode objects ---- */
 
-static int get_resources(struct drm_mode_card_res *r)
+static int get_resources(const struct fake_fd *f, struct drm_mode_card_res *r)
 {
     static const uint32_t crtcs[] = {ID_CRTC}, conns[] = {ID_CONNECTOR}, encs[] = {ID_ENCODER};
-    r->count_fbs = 0;
-    COPY_OUT(r->crtc_id_ptr, r->count_crtcs, crtcs, 1u);
-    COPY_OUT(r->connector_id_ptr, r->count_connectors, conns, 1u);
-    COPY_OUT(r->encoder_id_ptr, r->count_encoders, encs, 1u);
+    uint32_t n = 0;
+    for (const struct fb *fb = g_fbs; fb; fb = fb->next) { /* the file's own */
+        if (fb->owner != f)
+            continue;
+        if (n < r->count_fbs && copy_to_user(r->fb_id_ptr + n * sizeof fb->id, &fb->id, sizeof fb->id))
+            return -EFAULT;
+        n++;
+    }
+    r->count_fbs = n;
     r->min_width = r->min_height = 1;
     r->max_width = r->max_height = 16384;
+    if (put_ids(r->crtc_id_ptr, &r->count_crtcs, crtcs, 1) ||
+        put_ids(r->encoder_id_ptr, &r->count_encoders, encs, 1) ||
+        put_ids(r->connector_id_ptr, &r->count_connectors, conns, 1))
+        return -EFAULT;
     return 0;
 }
 
-static int get_connector(struct drm_mode_get_connector *c)
+/* An object's properties as `f` sees them (atomic ones only with the
+ * atomic client cap): as many as fit, then the count. */
+static int put_props(const struct fake_fd *f, uint32_t obj, const uint32_t *props, uint32_t n, uint64_t ids_ptr,
+                     uint64_t values_ptr, uint32_t *count)
+{
+    uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if ((k_props[props[i] - 100].flags & DRM_MODE_PROP_ATOMIC) && !f->atomic)
+            continue;
+        if (*count > k) {
+            uint64_t v = prop_value(obj, props[i]);
+            if (copy_to_user(ids_ptr + k * sizeof props[i], &props[i], sizeof props[i]) ||
+                copy_to_user(values_ptr + k * sizeof v, &v, sizeof v))
+                return -EFAULT;
+        }
+        k++;
+    }
+    *count = k;
+    return 0;
+}
+
+static int get_connector(struct fake_fd *f, struct drm_mode_get_connector *c)
 {
     if (c->connector_id != ID_CONNECTOR)
         return -ENOENT;
-    static const uint32_t encs[] = {ID_ENCODER};
-    uint64_t values[3];
-    for (int i = 0; i < 3; i++)
-        values[i] = prop_value(k_conn_props[i]);
-    COPY_OUT(c->modes_ptr, c->count_modes, &g_mode, 1u);
-    COPY_OUT(c->encoders_ptr, c->count_encoders, encs, 1u);
-    uint32_t n = 3;
-    if (c->props_ptr && c->prop_values_ptr && c->count_props >= n) {
-        memcpy(U2P(c->props_ptr), k_conn_props, sizeof k_conn_props);
-        memcpy(U2P(c->prop_values_ptr), values, sizeof values);
-    }
-    c->count_props = n;
-    c->encoder_id = ID_ENCODER;
+    static const uint32_t enc = ID_ENCODER;
+    /* Encoders and modes: all of them if they fit, else none. */
+    if (c->count_encoders >= 1 && copy_to_user(c->encoders_ptr, &enc, sizeof enc))
+        return -EFAULT;
+    c->count_encoders = 1;
     c->connector_type = DRM_MODE_CONNECTOR_DSI;
     c->connector_type_id = 1;
     c->connection = 1; /* DRM_MODE_CONNECTED */
     c->mm_width = g_mm_width;
     c->mm_height = g_mm_height;
     c->subpixel = 1; /* DRM_MODE_SUBPIXEL_UNKNOWN */
-    return 0;
+    if (c->count_modes >= 1 && copy_to_user(c->modes_ptr, &g_mode, sizeof g_mode))
+        return -EFAULT;
+    c->count_modes = 1;
+    c->encoder_id = g_state.conn_crtc ? ID_ENCODER : 0; /* the one it drives now */
+    return put_props(f, ID_CONNECTOR, k_conn_props, sizeof k_conn_props / sizeof k_conn_props[0], c->props_ptr,
+                     c->prop_values_ptr, &c->count_props);
 }
 
 static int get_encoder(struct drm_mode_get_encoder *e)
@@ -318,11 +483,13 @@ static int get_crtc(struct drm_mode_crtc *c)
 {
     if (c->crtc_id != ID_CRTC)
         return -ENOENT;
-    c->fb_id = g_state.fb;
-    c->x = c->y = 0;
+    c->fb_id = g_state.primary.fb;
+    c->x = g_state.primary.src_x >> 16;
+    c->y = g_state.primary.src_y >> 16;
     c->gamma_size = 0;
+    /* A CRTC with a mode is enabled, active or not (DPMS off keeps it). */
     struct blob *b = blob_find(g_state.mode_blob);
-    c->mode_valid = g_state.active && b && b->length == sizeof(struct drm_mode_modeinfo);
+    c->mode_valid = b && b->length == sizeof(struct drm_mode_modeinfo);
     if (c->mode_valid)
         memcpy(&c->mode, b->data, sizeof c->mode);
     else
@@ -330,45 +497,54 @@ static int get_crtc(struct drm_mode_crtc *c)
     return 0;
 }
 
-static int get_plane_resources(struct drm_mode_get_plane_res *r)
+static int get_plane_resources(const struct fake_fd *f, struct drm_mode_get_plane_res *r)
 {
-    static const uint32_t planes[] = {ID_PLANE};
-    COPY_OUT(r->plane_id_ptr, r->count_planes, planes, 1u);
+    static const uint32_t planes[] = {ID_PLANE, ID_CURSOR};
+    /* The primary and cursor planes: listed only for universal-planes clients. */
+    return put_ids(r->plane_id_ptr, &r->count_planes, planes, f->universal_planes ? 1u + (g_has_cursor != 0) : 0u);
+}
+
+/* The plane's formats: what gbm allocates (RGBA and BGRA Android buffers),
+ * which the app copies by their own layout. XRGB8888 first, the format every
+ * driver offers by convention. */
+static const uint32_t k_plane_formats[] = {DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888, DRM_FORMAT_XBGR8888,
+                                           DRM_FORMAT_ABGR8888};
+
+static int plane_has_format(uint32_t format)
+{
+    for (size_t i = 0; i < sizeof k_plane_formats / sizeof k_plane_formats[0]; i++)
+        if (k_plane_formats[i] == format)
+            return 1;
     return 0;
 }
 
 static int get_plane(struct drm_mode_get_plane *p)
 {
-    if (p->plane_id != ID_PLANE)
+    if (p->plane_id != ID_PLANE && (p->plane_id != ID_CURSOR || !g_has_cursor))
         return -ENOENT;
-    int n;
-    const uint32_t *formats = cham_formats(&n);
-    p->crtc_id = g_state.plane_crtc;
-    p->fb_id = g_state.fb;
+    const struct plane_state *ps = p->plane_id == ID_CURSOR ? &g_state.cursor : &g_state.primary;
+    const uint32_t n = sizeof k_plane_formats / sizeof k_plane_formats[0];
+    p->crtc_id = ps->crtc;
+    p->fb_id = ps->fb;
     p->possible_crtcs = 1;
     p->gamma_size = 0;
-    COPY_OUT(p->format_type_ptr, p->count_format_types, formats, (uint32_t)n);
+    if (p->count_format_types >= n && copy_to_user(p->format_type_ptr, k_plane_formats, sizeof k_plane_formats))
+        return -EFAULT;
+    p->count_format_types = n;
     return 0;
 }
 
 /* ---- properties ---- */
 
-static int obj_get_properties(struct drm_mode_obj_get_properties *o)
+static int obj_get_properties(const struct fake_fd *f, struct drm_mode_obj_get_properties *o)
 {
     uint32_t type, n;
     const uint32_t *props = object_props(o->obj_id, &type, &n);
+    if (o->obj_id == ID_ENCODER && (!o->obj_type || o->obj_type == DRM_MODE_OBJECT_ENCODER))
+        return -EINVAL; /* an object without properties */
     if (!props || (o->obj_type && o->obj_type != type))
         return -ENOENT;
-    if (o->props_ptr && o->prop_values_ptr && o->count_props >= n) {
-        uint32_t *ids = U2P(o->props_ptr);
-        uint64_t *values = U2P(o->prop_values_ptr);
-        for (uint32_t i = 0; i < n; i++) {
-            ids[i] = props[i];
-            values[i] = prop_value(props[i]);
-        }
-    }
-    o->count_props = n;
-    return 0;
+    return put_props(f, o->obj_id, props, n, o->props_ptr, o->prop_values_ptr, &o->count_props);
 }
 
 static int get_property(struct drm_mode_get_property *p)
@@ -377,48 +553,61 @@ static int get_property(struct drm_mode_get_property *p)
         return -ENOENT;
     const struct propdef *d = &k_props[p->prop_id - 100];
     p->flags = d->flags;
+    memset(p->name, 0, sizeof p->name);
     snprintf(p->name, sizeof p->name, "%s", d->name);
-    if (d->flags & DRM_MODE_PROP_ENUM) {
-        uint32_t n = (uint32_t)d->nenums;
-        if (p->values_ptr && p->count_values >= n)
-            for (uint32_t i = 0; i < n; i++)
-                ((uint64_t *)U2P(p->values_ptr))[i] = i;
-        if (p->enum_blob_ptr && p->count_enum_blobs >= n) {
-            struct drm_mode_property_enum *e = U2P(p->enum_blob_ptr);
-            for (uint32_t i = 0; i < n; i++) {
-                e[i].value = i;
-                snprintf(e[i].name, sizeof e[i].name, "%s", d->enums[i]);
-            }
-        }
-        p->count_values = n;
-        p->count_enum_blobs = n;
-    } else {
-        uint32_t n = (uint32_t)d->nvalues;
-        COPY_OUT(p->values_ptr, p->count_values, d->values, n);
-        p->count_enum_blobs = 0;
+    int is_enum = (d->flags & DRM_MODE_PROP_ENUM) != 0;
+    uint32_t n = is_enum ? (uint32_t)d->nenums : (uint32_t)d->nvalues; /* an enum's values are 0..n-1 */
+    for (uint32_t i = 0; i < n; i++) {
+        uint64_t v = is_enum ? i : d->values[i];
+        if (i < p->count_values && copy_to_user(p->values_ptr + i * sizeof v, &v, sizeof v))
+            return -EFAULT;
     }
+    p->count_values = n;
+    if (is_enum) {
+        for (uint32_t i = 0; i < n; i++) {
+            if (p->count_enum_blobs < i + 1)
+                continue;
+            struct drm_mode_property_enum e = {.value = i};
+            snprintf(e.name, sizeof e.name, "%s", d->enums[i]);
+            if (copy_to_user(p->enum_blob_ptr + i * sizeof e, &e, sizeof e))
+                return -EFAULT;
+        }
+        p->count_enum_blobs = n;
+    }
+    if (d->flags & DRM_MODE_PROP_BLOB)
+        p->count_enum_blobs = 0;
     return 0;
 }
 
 static int get_blob(struct drm_mode_get_blob *g)
 {
-    struct blob *b = blob_find(g->blob_id);
+    struct blob *b = g->blob_id == ID_EDID_BLOB ? &g_edid_blob : blob_find(g->blob_id);
     if (!b)
         return -ENOENT;
-    if (g->data && g->length >= b->length)
-        memcpy(U2P(g->data), b->data, b->length);
+    if (g->length == b->length && copy_to_user(g->data, b->data, b->length)) /* only an exact fit */
+        return -EFAULT;
     g->length = b->length;
     return 0;
 }
 
-static int create_blob(struct drm_mode_create_blob *c)
+static int create_blob(struct fake_fd *f, struct drm_mode_create_blob *c)
 {
-    if (!c->length || c->length > (1u << 20))
+    if (!c->length || c->length > INT32_MAX - 64)
         return -EINVAL;
     struct blob *b = calloc(1, sizeof *b);
-    b->data = malloc(c->length);
-    memcpy(b->data, U2P(c->data), c->length);
+    if (b)
+        b->data = malloc(c->length);
+    if (!b || !b->data) {
+        free(b);
+        return -ENOMEM;
+    }
+    if (copy_from_user(b->data, c->data, c->length)) {
+        free(b->data);
+        free(b);
+        return -EFAULT;
+    }
     b->length = c->length;
+    b->owner = f;
     b->id = g_next_object_id++;
     b->next = g_blobs;
     g_blobs = b;
@@ -426,90 +615,375 @@ static int create_blob(struct drm_mode_create_blob *c)
     return 0;
 }
 
-static int destroy_blob(struct drm_mode_destroy_blob *d)
+/* Frees the blobs the client destroyed that the CRTC no longer uses. */
+static void free_destroyed_blobs(void)
 {
-    for (struct blob **p = &g_blobs; *p; p = &(*p)->next) {
-        if ((*p)->id == d->blob_id) {
-            struct blob *b = *p;
+    for (struct blob **p = &g_blobs; *p;) {
+        struct blob *b = *p;
+        if (b->destroyed && b->id != g_state.mode_blob) {
             *p = b->next;
             free(b->data);
             free(b);
-            return 0;
+        } else {
+            p = &b->next;
         }
     }
-    return -ENOENT;
 }
 
-/* ---- framebuffers & buffers ---- */
-
-static int add_fb2(struct drm_mode_fb_cmd2 *c)
+static int destroy_blob(struct fake_fd *f, struct drm_mode_destroy_blob *d)
 {
-    struct cham_bo *bo = bo_by_handle_locked(c->handles[0]);
-    if (!bo)
+    struct blob *b = blob_find(d->blob_id);
+    if (!b || b->destroyed)
         return -ENOENT;
-    if (c->width > bo->width || c->height > bo->height)
-        return -EINVAL;
-    struct fb *f = calloc(1, sizeof *f);
-    f->id = g_next_object_id++;
-    f->bo = bo;
+    if (b->owner != f)
+        return -EPERM;
+    b->destroyed = 1;
+    free_destroyed_blobs();
+    return 0;
+}
+
+/* ---- buffers: GEM handles, per file ---- */
+
+static struct cham_bo *handle_bo(const struct fake_fd *f, uint32_t handle)
+{
+    for (int i = 0; handle && i < f->nhandles; i++)
+        if (f->handles[i].handle == handle)
+            return f->handles[i].bo;
+    return NULL;
+}
+
+/* The file's handle for `bo`, made if it has none (the lowest free number,
+ * as the kernel's idr). The handle holds a reference. */
+static uint32_t handle_for(struct fake_fd *f, struct cham_bo *bo)
+{
+    uint32_t h = 1;
+    for (int i = 0; i < f->nhandles; i++)
+        if (f->handles[i].bo == bo)
+            return f->handles[i].handle;
+    for (int i = 0; i < f->nhandles; i++)
+        if (f->handles[i].handle == h)
+            h++, i = -1; /* taken: look again from the start */
+    struct gem_handle *t = realloc(f->handles, sizeof *t * (size_t)(f->nhandles + 1));
+    if (!t)
+        return 0;
+    f->handles = t;
+    f->handles[f->nhandles++] = (struct gem_handle){h, bo};
     bo_ref_locked(bo);
-    f->next = g_fbs;
-    g_fbs = f;
-    c->fb_id = f->id;
-    return 0;
+    return h;
 }
 
-static int remove_fb(uint32_t id)
+static int gem_close(struct fake_fd *f, uint32_t handle)
 {
-    for (struct fb **p = &g_fbs; *p; p = &(*p)->next) {
-        if ((*p)->id == id) {
-            struct fb *f = *p;
-            *p = f->next;
-            bo_unref_locked(f->bo); /* the plane keeps its own ref */
-            free(f);
+    for (int i = 0; handle && i < f->nhandles; i++) {
+        if (f->handles[i].handle == handle) {
+            struct cham_bo *bo = f->handles[i].bo;
+            f->handles[i] = f->handles[--f->nhandles];
+            bo_unref_locked(bo); /* framebuffers keep their own references */
             return 0;
         }
     }
-    return -ENOENT;
+    return -EINVAL;
 }
 
-static int prime_fd_to_handle(struct drm_prime_handle *p)
+/* Our gbm's buffers: a gbm device on the card makes a handle for each
+ * buffer it creates (GEM_CLOSE closes it), as Mesa's asks its driver. */
+uint32_t kms_gem_import(struct fake_fd *f, struct cham_bo *bo)
 {
-    /* cham_bo_from_fd takes the lock itself. */
-    pthread_mutex_unlock(&g_lock);
-    struct cham_bo *bo = cham_bo_from_fd(p->fd);
     pthread_mutex_lock(&g_lock);
+    uint32_t h = handle_for(f, bo);
+    pthread_mutex_unlock(&g_lock);
+    return h;
+}
+
+/* ---- dumb buffers (drm_dumb_buffers.c, a shmem driver's) ----
+ * Memory the program maps and draws into. The card can't show memory, so a
+ * framebuffer of it has a buffer of its own that the memory is copied into
+ * whenever the framebuffer is put on a plane, and when DIRTYFB says it
+ * changed, as on cards that must be told (virtio-gpu, USB displays). */
+
+static uint64_t page_align(uint64_t n)
+{
+    uint64_t page = (uint64_t)sysconf(_SC_PAGESIZE);
+    return (n + page - 1) / page * page;
+}
+
+static int create_dumb(struct fake_fd *f, struct drm_mode_create_dumb *d)
+{
+    if (!d->width || !d->height || !d->bpp)
+        return -EINVAL;
+    uint32_t cpp = (d->bpp + 7) / 8;
+    if (cpp > UINT32_MAX / d->width || d->height > UINT32_MAX / (cpp * d->width))
+        return -EINVAL;
+    d->handle = 0;
+    d->pitch = (uint32_t)(((uint64_t)d->width * d->bpp + 7) / 8);
+    d->size = page_align((uint64_t)d->pitch * d->height);
+    struct cham_bo *bo = bo_new_dumb(d->size);
     if (!bo)
-        return -EINVAL; /* not one of ours, e.g. a client buffer: no direct scanout */
-    p->handle = bo->handle;
+        return -ENOMEM;
+    d->handle = handle_for(f, bo);
+    bo_unref_locked(bo); /* the handle holds it */
+    return d->handle ? 0 : -ENOMEM;
+}
+
+static int map_dumb(const struct fake_fd *f, struct drm_mode_map_dumb *m)
+{
+    const struct cham_bo *bo = handle_bo(f, m->handle);
+    if (!bo)
+        return -ENOENT;
+    if (!bo->dumb)
+        return -EINVAL; /* a GPU buffer has no memory to map */
+    m->offset = bo->dumb->offset;
     return 0;
 }
 
-static int prime_handle_to_fd(struct drm_prime_handle *p)
+int kms_mmap(struct fake_fd *f, uint64_t offset, uint64_t length, int *fd)
 {
-    struct cham_bo *bo = bo_by_handle_locked(p->handle);
+    int ret = -EINVAL;
+    *fd = -1;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; i < f->nhandles; i++) {
+        const struct cham_dumb *d = f->handles[i].bo->dumb;
+        if (!d || d->offset != offset)
+            continue;
+        *fd = length <= d->size ? fcntl(d->fd, F_DUPFD_CLOEXEC, 0) : -1;
+        ret = length > d->size ? -EINVAL : *fd < 0 ? -ENOMEM : 0;
+        goto out;
+    }
+    /* Someone else's, as drm_vma_node_is_allowed says: this file has no handle to it. */
+    for (const struct fake_fd *o = g_files; o; o = o->kms_next)
+        for (int i = 0; i < o->nhandles; i++)
+            if (o->handles[i].bo->dumb && o->handles[i].bo->dumb->offset == offset)
+                ret = -EACCES;
+    for (const struct fb *fb = g_fbs; fb; fb = fb->next)
+        if (fb->mem && fb->mem->dumb->offset == offset)
+            ret = -EACCES;
+out:
+    pthread_mutex_unlock(&g_lock);
+    return ret;
+}
+
+/* Copies a dumb buffer's framebuffer (rows y1..y2, all of them wide: a row
+ * costs little) into the buffer that is shown. XRGB's unused byte becomes
+ * opaque alpha, which Android's buffer of that layout has. */
+static void dumb_show(const struct fb *fb, uint32_t y1, uint32_t y2)
+{
+    if (!fb->mem)
+        return;
+    uint8_t *to = cham_bo_lock(fb->bo);
+    if (!to)
+        return;
+    const uint8_t *from = fb->mem->dumb->mem + fb->offset;
+    if (y2 > fb->height)
+        y2 = fb->height;
+    for (uint32_t y = y1; y < y2; y++) {
+        const uint32_t *s = (const uint32_t *)(const void *)(from + (uint64_t)y * fb->pitch);
+        uint32_t *t = (uint32_t *)(void *)(to + (uint64_t)y * fb->bo->stride);
+        if (fb->format == DRM_FORMAT_XRGB8888)
+            for (uint32_t x = 0; x < fb->width; x++)
+                t[x] = s[x] | 0xff000000u;
+        else
+            memcpy(t, s, (size_t)fb->width * 4);
+    }
+    cham_bo_unlock(fb->bo);
+}
+
+/* ---- framebuffers ---- */
+
+static int add_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
+{
+    if (!plane_has_format(c->pixel_format))
+        return -EINVAL; /* as the kernel: a format no plane can show */
+    if (!c->width || !c->height || (uint64_t)c->pitches[0] < (uint64_t)c->width * 4)
+        return -EINVAL; /* framebuffer_check: a row holds the width */
+    struct cham_bo *bo = handle_bo(f, c->handles[0]), *mem = NULL;
     if (!bo)
         return -ENOENT;
-    p->fd = cham_bo_export_fd(bo);
-    return p->fd < 0 ? -errno : 0;
+    if (bo->dumb) {
+        /* What the memory holds may be a framebuffer (drm_gem_fb_init_with_funcs);
+         * the card's copy of it is the buffer that goes on screen. */
+        if ((uint64_t)(c->height - 1) * c->pitches[0] + (uint64_t)c->width * 4 + c->offsets[0] > bo->dumb->size)
+            return -EINVAL;
+        mem = bo;
+        bo_ref_locked(mem);
+        pthread_mutex_unlock(&g_lock); /* allocating takes it */
+        bo = cham_bo_create(c->width, c->height, c->pixel_format, CHAM_USE_WRITE);
+        pthread_mutex_lock(&g_lock);
+        if (!bo) {
+            bo_unref_locked(mem);
+            return -ENOMEM;
+        }
+    } else if (c->width > bo->width || c->height > bo->height) {
+        return -EINVAL;
+    }
+    struct fb *fb = calloc(1, sizeof *fb);
+    if (!fb) {
+        if (mem) {
+            bo_unref_locked(bo);
+            bo_unref_locked(mem);
+        }
+        return -ENOMEM;
+    }
+    fb->id = g_next_object_id++;
+    fb->width = c->width;
+    fb->height = c->height;
+    fb->format = c->pixel_format;
+    fb->pitch = c->pitches[0];
+    fb->bo = bo;
+    fb->mem = mem;
+    fb->offset = c->offsets[0];
+    fb->owner = f;
+    if (!mem) /* the copy's first reference is the framebuffer's */
+        bo_ref_locked(bo);
+    fb->next = g_fbs;
+    g_fbs = fb;
+    c->fb_id = fb->id;
+    return 0;
 }
+
+/* Frees the framebuffers no file holds that the plane doesn't show either
+ * (the kernel's last reference going). */
+static void free_unused_fbs(void)
+{
+    for (struct fb **p = &g_fbs; *p;) {
+        struct fb *fb = *p;
+        if (!fb->owner && fb->id != g_state.primary.fb && fb->id != g_state.cursor.fb) {
+            *p = fb->next;
+            bo_unref_locked(fb->bo);
+            if (fb->mem)
+                bo_unref_locked(fb->mem);
+            free(fb);
+        } else {
+            p = &fb->next;
+        }
+    }
+}
+
+/* The plane lets go of a framebuffer that is being removed (RMFB, or its
+ * file closing): the kernel takes it off the plane; the CRTC stays on. */
+static void plane_drop_fb(uint32_t id)
+{
+    if (id && g_state.cursor.fb == id) {
+        g_state.cursor.fb = 0;
+        g_state.cursor.crtc = 0;
+        if (g_cursor_bo)
+            bo_unref_locked(g_cursor_bo);
+        g_cursor_bo = NULL;
+        link_cursor_locked(&(struct link_cursor){.fence = -1}); /* hidden, */
+        if (g_plane_shown)
+            link_present_locked(NULL, -1, 0); /* now, without a page flip */
+    }
+    if (!id || g_state.primary.fb != id)
+        return;
+    g_state.primary.fb = 0;
+    g_state.primary.crtc = 0;
+    if (g_plane_bo)
+        bo_unref_locked(g_plane_bo);
+    g_plane_bo = NULL;
+    g_plane_shown = g_plane_on = 0;
+}
+
+/* The file lets go of its framebuffer. RMFB also takes it off the plane;
+ * CLOSEFB leaves it showing (and usable by id) until something replaces it. */
+static int remove_fb(struct fake_fd *f, uint32_t id, int off_plane)
+{
+    struct fb *fb = fb_find(id);
+    if (!fb || fb->owner != f)
+        return -ENOENT;
+    fb->owner = NULL;
+    if (off_plane)
+        plane_drop_fb(id);
+    free_unused_fbs();
+    return 0;
+}
+
+/* Any buffer of the session's, whichever process made it; a dmabuf of
+ * another device can't be imported (ENODEV, as virtio-gpu says), and an fd
+ * that is no dmabuf is invalid (EINVAL). */
+static int prime_fd_to_handle(struct fake_fd *f, struct drm_prime_handle *p)
+{
+    /* Asking the caller and the lookup go without the lock. */
+    pthread_mutex_unlock(&g_lock);
+    int fd = card_fd_get(p->fd);
+    struct cham_bo *bo = fd >= 0 ? card_session_buffer(fd) : NULL;
+    if (fd >= 0 && !bo)
+        bo = bo_dumb_for_fd(fd);
+    int dmabuf = fd >= 0 && !bo && ahb_is_dmabuf(fd);
+    if (fd >= 0)
+        close(fd);
+    pthread_mutex_lock(&g_lock);
+    if (fd < 0)
+        return -EBADF;
+    if (!bo)
+        return dmabuf ? -ENODEV : -EINVAL;
+    p->handle = handle_for(f, bo);
+    bo_unref_locked(bo); /* the handle holds its own */
+    return p->handle ? 0 : -ENOMEM;
+}
+
+static int prime_handle_to_fd(struct fake_fd *f, struct drm_prime_handle *p)
+{
+    if (p->flags & ~(uint32_t)(DRM_CLOEXEC | DRM_RDWR))
+        return -EINVAL;
+    struct cham_bo *bo = handle_bo(f, p->handle);
+    if (!bo)
+        return -ENOENT;
+    /* A dumb buffer's memory is handed out as the file it is: it maps and
+     * imports again like a dmabuf, though it is none to the real kernel. */
+    int fd = bo->dumb ? fcntl(bo->dumb->fd, F_DUPFD_CLOEXEC, 0) : cham_bo_export_fd(bo);
+    if (bo->dumb)
+        bo->exported = 1; /* now its file keeps it (ahb.c) */
+    if (fd < 0)
+        return -errno;
+    pthread_mutex_unlock(&g_lock); /* the caller takes it */
+    int ret = card_fd_install(fd, (p->flags & DRM_CLOEXEC) != 0); /* close-on-exec only when asked */
+    pthread_mutex_lock(&g_lock);
+    close(fd);
+    if (ret < 0)
+        return ret;
+    p->fd = ret;
+    return 0;
+}
+
+static int g_in_fence = -1; /* our copy of the commit's IN_FENCE_FD, under g_lock */
+static int g_cursor_fence = -1; /* ...the cursor plane's */
 
 /* ---- atomic ---- */
 
-static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v)
+/* sync_file_get_fence() takes sync files only. The host tests' fences are
+ * pipes, sockets and eventfds, which become readable. */
+int is_sync_file(int fd)
+{
+#ifdef CHAM_HOST_TEST
+    struct stat st;
+    return fstat(fd, &st) == 0 && !S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode) && !S_ISCHR(st.st_mode) &&
+           !S_ISBLK(st.st_mode);
+#else
+    /* by its name, which every kernel has (4.4's are "sync_fence" and lack
+     * today's ioctls); a file whose name can't be read is let through */
+    char path[32], name[32];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(path, name, sizeof name - 1);
+    if (n <= 0)
+        return 1;
+    name[n] = 0;
+    return strncmp(name, "anon_inode:sync_", 16) == 0;
+#endif
+}
+
+/* Sets a property in `s`; *touched gets the objects it changes (1 primary
+ * plane, 2 cursor plane, 4 CRTC, 8 connector). */
+static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v, int *touched)
 {
     switch (obj) {
     case ID_CONNECTOR:
+        *touched |= 8;
         if (prop == P_CONN_CRTC_ID && (v == 0 || v == ID_CRTC)) {
             s->conn_crtc = (uint32_t)v;
             return 0;
         }
-        if (prop == P_CONN_DPMS && v <= 3) {
-            s->dpms = v;
-            return 0;
-        }
-        return -EINVAL;
+        return -EINVAL; /* DPMS too: the kernel takes it only through the legacy SETPROPERTY */
     case ID_CRTC:
+        *touched |= 4;
         if (prop == P_CRTC_ACTIVE && v <= 1) {
             s->active = v;
             return 0;
@@ -523,30 +997,75 @@ static int set_prop(struct kms_state *s, uint32_t obj, uint32_t prop, uint64_t v
         }
         return -EINVAL;
     case ID_PLANE:
+    case ID_CURSOR: {
+        int cursor = obj == ID_CURSOR;
+        struct plane_state *p = cursor ? &s->cursor : &s->primary;
+        *touched |= cursor ? 2 : 1;
         switch (prop) {
         case P_PLANE_FB_ID:
-            if (v && !fb_find((uint32_t)v))
-                return -ENOENT;
-            s->fb = (uint32_t)v;
+            p->fb = (uint32_t)v; /* checked to exist by prop_value_ok */
             return 0;
         case P_PLANE_CRTC_ID:
             if (v != 0 && v != ID_CRTC)
                 return -EINVAL;
-            s->plane_crtc = (uint32_t)v;
+            p->crtc = (uint32_t)v;
             return 0;
-        case P_SRC_X: s->src_x = (uint32_t)v; return 0;
-        case P_SRC_Y: s->src_y = (uint32_t)v; return 0;
-        case P_SRC_W: s->src_w = (uint32_t)v; return 0;
-        case P_SRC_H: s->src_h = (uint32_t)v; return 0;
-        case P_CRTC_X: s->crtc_x = (int32_t)v; return 0;
-        case P_CRTC_Y: s->crtc_y = (int32_t)v; return 0;
-        case P_CRTC_W: s->crtc_w = (uint32_t)v; return 0;
-        case P_CRTC_H: s->crtc_h = (uint32_t)v; return 0;
-        case P_IN_FENCE_FD: s->in_fence = (int64_t)(int32_t)v; return 0;
+        case P_SRC_X: p->src_x = (uint32_t)v; return 0;
+        case P_SRC_Y: p->src_y = (uint32_t)v; return 0;
+        case P_SRC_W: p->src_w = (uint32_t)v; return 0;
+        case P_SRC_H: p->src_h = (uint32_t)v; return 0;
+        case P_CRTC_X: p->crtc_x = (int32_t)v; return 0;
+        case P_CRTC_Y: p->crtc_y = (int32_t)v; return 0;
+        case P_CRTC_W: p->crtc_w = (uint32_t)v; return 0;
+        case P_CRTC_H: p->crtc_h = (uint32_t)v; return 0;
+        case P_IN_FENCE_FD: {
+            /* As drm_atomic_plane_set_property: one fence per plane and
+             * commit, -1 for none, else a sync file. */
+            int *fence = cursor ? &g_cursor_fence : &g_in_fence;
+            if (*fence >= 0)
+                return -EINVAL;
+            if (v == (uint64_t)-1)
+                return 0;
+            if (v > INT32_MAX)
+                return -EINVAL;
+            *fence = card_fd_get((int)v);
+            if (*fence >= 0 && !is_sync_file(*fence)) {
+                close(*fence);
+                *fence = -1;
+            }
+            if (*fence < 0)
+                return -EINVAL; /* not an open file, or not a fence */
+            if (!cursor)
+                s->in_fence = *fence;
+            return 0;
+        }
         }
         return -EINVAL;
     }
+    }
     return -ENOENT;
+}
+
+/* drm_property_change_valid_get: the value fits the property's type. */
+static int prop_value_ok(uint32_t prop, uint64_t v)
+{
+    const struct propdef *d = &k_props[prop - 100];
+    if (d->flags & DRM_MODE_PROP_IMMUTABLE)
+        return 0;
+    if (d->flags & DRM_MODE_PROP_RANGE)
+        return v >= d->values[0] && v <= d->values[1];
+    if (d->flags & DRM_MODE_PROP_SIGNED_RANGE)
+        return (int64_t)v >= (int64_t)d->values[0] && (int64_t)v <= (int64_t)d->values[1];
+    if (d->flags & DRM_MODE_PROP_BLOB)
+        return v == 0 || blob_find((uint32_t)v) != NULL;
+    if (d->flags & DRM_MODE_PROP_OBJECT) { /* 0, or an object of the property's type */
+        if (v == 0)
+            return 1;
+        if (d->values[0] == DRM_MODE_OBJECT_FB)
+            return fb_find((uint32_t)v) != NULL;
+        return d->values[0] == DRM_MODE_OBJECT_CRTC && v == ID_CRTC;
+    }
+    return v < (uint64_t)d->nenums; /* enum values are 0..n-1 */
 }
 
 static const struct drm_mode_modeinfo *state_mode(const struct kms_state *s)
@@ -562,6 +1081,15 @@ static uint32_t mode_mhz(const struct drm_mode_modeinfo *m)
     return pixels ? (uint32_t)((uint64_t)m->clock * 1000000ull / pixels) : g_mode_mhz;
 }
 
+void kms_screen_size(uint32_t *width, uint32_t *height, uint32_t *mm_width, uint32_t *mm_height)
+{
+    kms_init_once();
+    *width = g_screen_width;
+    *height = g_screen_height;
+    *mm_width = g_mm_width;
+    *mm_height = g_mm_height;
+}
+
 void kms_mode_size(uint32_t *width, uint32_t *height)
 {
     pthread_mutex_lock(&g_lock);
@@ -573,6 +1101,8 @@ void kms_mode_size(uint32_t *width, uint32_t *height)
 
 struct cham_bo *kms_screen_bo_locked(void)
 {
+    /* for the app connected now: it may show a partial plane the last one couldn't */
+    g_plane_shown = g_plane_on && (!g_plane_partial || link_shows_planes_locked());
     return g_plane_shown ? g_plane_bo : NULL;
 }
 
@@ -581,36 +1111,182 @@ int kms_screen_off_locked(void)
     return g_screen_off;
 }
 
-static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
+/* A commit's four lists. The kernel reads them entry by entry with
+ * get_user(); for us each read crosses into the caller (process_vm_readv),
+ * so they are read whole first when they are of a sane size. If that fails
+ * (a bad pointer somewhere), the entries are read one by one as before, so
+ * errors come in the kernel's order (an unknown object before a bad address
+ * further on). */
+#define LIST_OBJS 64
+#define LIST_PROPS 512
+struct commit_lists {
+    int whole; /* read at once: the arrays below hold them */
+    uint32_t objs[LIST_OBJS], counts[LIST_OBJS], props[LIST_PROPS];
+    uint64_t values[LIST_PROPS];
+};
+
+static void read_lists(const struct drm_mode_atomic *a, struct commit_lists *l)
 {
+    l->whole = 0;
+    uint32_t n = a->count_objs;
+    if (n > LIST_OBJS || copy_from_user(l->objs, a->objs_ptr, n * sizeof l->objs[0]) ||
+        copy_from_user(l->counts, a->count_props_ptr, n * sizeof l->counts[0]))
+        return;
+    uint64_t total = 0;
+    for (uint32_t i = 0; i < n; i++)
+        total += l->counts[i];
+    if (total > LIST_PROPS || copy_from_user(l->props, a->props_ptr, total * sizeof l->props[0]) ||
+        copy_from_user(l->values, a->prop_values_ptr, total * sizeof l->values[0]))
+        return;
+    l->whole = 1;
+}
+
+/* List entry i: from the lists read whole, else from the caller. */
+static int list_u32(const struct commit_lists *l, const uint32_t *whole, uint64_t ptr, uint64_t i, uint32_t *v)
+{
+    if (l->whole) {
+        *v = whole[i];
+        return 0;
+    }
+    return copy_from_user(v, ptr + i * sizeof *v, sizeof *v);
+}
+
+/* drm_atomic_plane_check's limits for a plane with a framebuffer: 0,
+ * -ERANGE (it would overflow) or -ENOSPC (the source isn't all in the
+ * framebuffer). */
+static int plane_bounds(const struct plane_state *p)
+{
+    if (!p->fb)
+        return 0;
+    const struct fb *fb = fb_find(p->fb);
+    uint64_t fw = (uint64_t)fb->width << 16, fh = (uint64_t)fb->height << 16;
+    if ((int64_t)p->crtc_x + p->crtc_w > INT32_MAX || (int64_t)p->crtc_y + p->crtc_h > INT32_MAX)
+        return -ERANGE;
+    if (p->src_w > fw || p->src_x > fw - p->src_w || p->src_h > fh || p->src_y > fh - p->src_h)
+        return -ENOSPC;
+    return 0;
+}
+
+/* Where the primary plane's framebuffer goes on the mode's screen (lp):
+ * plain if the whole buffer is the whole screen, else the part shown and
+ * where, clipped to the screen. Returns 1 if part of the screen is left
+ * uncovered. */
+static int plane_geometry(const struct plane_state *p, const struct fb *fb, const struct drm_mode_modeinfo *m,
+                          struct link_plane *lp)
+{
+    int64_t w = m->hdisplay, h = m->vdisplay;
+    int64_t x0 = p->crtc_x, y0 = p->crtc_y, x1 = x0 + p->crtc_w, y1 = y0 + p->crtc_h;
+    int partial = x0 > 0 || y0 > 0 || x1 < w || y1 < h;
+    *lp = (struct link_plane){.plain = 1, .crtc_w = (uint32_t)w, .crtc_h = (uint32_t)h};
+    if (!partial && x0 == 0 && y0 == 0 && x1 == w && y1 == h && fb->width == w && fb->height == h && !p->src_x &&
+        !p->src_y && p->src_w == (uint64_t)fb->width << 16 && p->src_h == (uint64_t)fb->height << 16)
+        return 0;
+    lp->plain = 0;
+    int64_t cx0 = x0 > 0 ? x0 : 0, cy0 = y0 > 0 ? y0 : 0, cx1 = x1 < w ? x1 : w, cy1 = y1 < h ? y1 : h;
+    if (cx0 >= cx1 || cy0 >= cy1)
+        return partial; /* all off the screen: nothing */
+    /* The source (16.16) clipped along with the target, at the plane's scale. */
+#define CLIP(src, srcw, d, crtcw) ((src) + (uint64_t)((unsigned __int128)(uint64_t)(d) * (srcw) / (crtcw)))
+    uint64_t sx0 = CLIP(p->src_x, p->src_w, cx0 - x0, p->crtc_w), sx1 = CLIP(p->src_x, p->src_w, cx1 - x0, p->crtc_w);
+    uint64_t sy0 = CLIP(p->src_y, p->src_h, cy0 - y0, p->crtc_h), sy1 = CLIP(p->src_y, p->src_h, cy1 - y0, p->crtc_h);
+#undef CLIP
+    lp->src_x = (uint32_t)(sx0 >> 16);
+    lp->src_y = (uint32_t)(sy0 >> 16);
+    lp->src_w = (uint32_t)((sx1 + 0x8000) >> 16) - lp->src_x;
+    lp->src_h = (uint32_t)((sy1 + 0x8000) >> 16) - lp->src_y;
+    lp->dst_x = (uint32_t)cx0;
+    lp->dst_y = (uint32_t)cy0;
+    lp->dst_w = (uint32_t)(cx1 - cx0);
+    lp->dst_h = (uint32_t)(cy1 - cy0);
+    return partial;
+}
+
+/* Flags of our own next to the atomic ioctl's, for the legacy calls. */
+#define COMMIT_PEND 0x40000000u   /* a page flip without an event: the CRTC is busy until it completes */
+#define COMMIT_LEGACY 0x20000000u /* a legacy call: its refusals are the caller's business, not logged */
+
+/* A refused real commit is a bug somewhere; say why (tests fail often). */
+static int g_refusals;
+#define REFUSE(err, ...)                                                                           \
+    do {                                                                                           \
+        report_refusal(flags & COMMIT_LEGACY ? REPORT_LEGACY                                       \
+                       : flags & DRM_MODE_ATOMIC_TEST_ONLY ? REPORT_TEST : REPORT_COMMIT,          \
+                       (err), __VA_ARGS__);                                                        \
+        if (!(flags & (DRM_MODE_ATOMIC_TEST_ONLY | COMMIT_LEGACY)) && g_refusals < 20) {           \
+            g_refusals++;                                                                          \
+            cham_log("refusing the compositor's commit: " __VA_ARGS__);                            \
+        }                                                                                          \
+        return (err);                                                                              \
+    } while (0)
+
+static int apply(struct fake_fd *f, struct kms_state s, int touched, uint32_t flags, uint64_t user_data);
+
+static int commit(struct fake_fd *f, struct drm_mode_atomic *a)
+{
+    if (!f->atomic)
+        return -EINVAL;
     if (a->flags & ~(uint32_t)DRM_MODE_ATOMIC_FLAGS)
+        return -EINVAL;
+    if (a->reserved)
         return -EINVAL;
     if (a->flags & DRM_MODE_PAGE_FLIP_ASYNC)
         return -EINVAL; /* no tearing updates */
+    if ((a->flags & DRM_MODE_ATOMIC_TEST_ONLY) && (a->flags & DRM_MODE_PAGE_FLIP_EVENT))
+        return -EINVAL;
 
     struct kms_state s = g_state;
     s.in_fence = -1;
-    /* A refused real commit is a bug somewhere; say why (tests fail often). */
-    static int refusals;
-#define REFUSE(err, ...)                                                                 \
-    do {                                                                                 \
-        if (!(a->flags & DRM_MODE_ATOMIC_TEST_ONLY) && refusals < 20) {                 \
-            refusals++;                                                                  \
-            cham_log("refusing KWin's commit: " __VA_ARGS__);                            \
-        }                                                                                \
-        return (err);                                                                    \
-    } while (0)
+    const uint32_t flags = a->flags;
 
-    const uint32_t *objs = U2P(a->objs_ptr), *counts = U2P(a->count_props_ptr), *props = U2P(a->props_ptr);
-    const uint64_t *values = U2P(a->prop_values_ptr);
+    struct commit_lists lists, *l = &lists; /* ~7 KB on the caller's thread */
+    read_lists(a, l);
     uint64_t k = 0;
+    int touched = 0;
     for (uint32_t i = 0; i < a->count_objs; i++) {
-        for (uint32_t j = 0; j < counts[i]; j++, k++) {
-            int ret = set_prop(&s, objs[i], props[k], values[k]);
+        uint32_t obj, count, type, nprops;
+        if (list_u32(l, l->objs, a->objs_ptr, i, &obj))
+            return -EFAULT;
+        const uint32_t *obj_props = object_props(obj, &type, &nprops);
+        if (!obj_props)
+            REFUSE(-ENOENT, "object %u has no properties", obj);
+        if (list_u32(l, l->counts, a->count_props_ptr, i, &count))
+            return -EFAULT;
+        for (uint32_t j = 0; j < count; j++, k++) {
+            uint32_t prop;
+            uint64_t v;
+            if (list_u32(l, l->props, a->props_ptr, k, &prop))
+                return -EFAULT;
+            uint32_t m = 0;
+            while (m < nprops && obj_props[m] != prop)
+                m++;
+            if (m == nprops)
+                REFUSE(-ENOENT, "object %u has no property %u", obj, prop);
+            if (l->whole)
+                v = l->values[k];
+            else if (copy_from_user(&v, a->prop_values_ptr + k * sizeof v, sizeof v))
+                return -EFAULT;
+            int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, &touched) : -EINVAL;
             if (ret)
-                REFUSE(ret, "object %u property %u = %llu", objs[i], props[k], (unsigned long long)values[k]);
+                REFUSE(ret, "object %u property %u = %llu", obj, prop, (unsigned long long)v);
         }
     }
+    return apply(f, s, touched, flags, a->user_data);
+}
+
+/* Checks the state `s` (g_state with a commit's changes; `touched` as
+ * set_prop gives it) and, unless only testing, makes it the card's: what
+ * the atomic ioctl does after reading its lists, and what the legacy calls
+ * come down to (the kernel serves those through the same path). */
+static int apply(struct fake_fd *f, struct kms_state s, int touched, uint32_t flags, uint64_t user_data)
+{
+    /* As prepare_signaling: an event is some CRTC's, and a commit has the
+     * CRTC when it sets a property of it or of a plane or connector that is
+     * or was on it. */
+    int has_crtc = (touched & 4) || ((touched & 8) && (s.conn_crtc || g_state.conn_crtc)) ||
+                   ((touched & 1) && (s.primary.crtc || g_state.primary.crtc)) ||
+                   ((touched & 2) && (s.cursor.crtc || g_state.cursor.crtc));
+    if ((flags & DRM_MODE_PAGE_FLIP_EVENT) && !has_crtc)
+        REFUSE(-EINVAL, "page-flip event without a CRTC in the commit");
 
     const struct drm_mode_modeinfo *mode = state_mode(&s);
     const struct drm_mode_modeinfo *old_mode = state_mode(&g_state);
@@ -621,85 +1297,626 @@ static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
         REFUSE(-EINVAL, "active CRTC without a mode");
     int modeset = s.active != g_state.active || (!mode != !old_mode) ||
                   (mode && old_mode && memcmp(mode, old_mode, sizeof *mode));
-    if (modeset && !(a->flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
+    if (modeset && !(flags & DRM_MODE_ATOMIC_ALLOW_MODESET))
         REFUSE(-EINVAL, "modeset without ALLOW_MODESET");
-    /* A plane bigger than the CRTC is clipped, as with real drivers: KWin's
-     * first commit after a mode change can still carry the previous frame's
-     * size. A smaller one is only KWin putting its cursor alone on an empty
-     * screen (nothing else ever reaches this plane: client buffers can't be
-     * scanned out); it is accepted but not shown, since the app shows whole
-     * buffers - the previous frame stays until a full one comes. */
-    int partial = 0;
-    if (s.fb) {
-        if (!on || s.plane_crtc != ID_CRTC)
-            REFUSE(-EINVAL, "framebuffer on a CRTC that is off");
-        partial = s.crtc_x > 0 || s.crtc_y > 0 || (int64_t)s.crtc_x + s.crtc_w < mode->hdisplay ||
-                  (int64_t)s.crtc_y + s.crtc_h < mode->vdisplay;
-    } else if (s.plane_crtc) {
+    /* The connector's DPMS follows (drm_atomic_helper_update_legacy_modeset_state):
+     * off when it leaves its CRTC; with a CRTC whose mode, activity or
+     * connector changed, on while that is active. */
+    if (!s.conn_crtc && g_state.conn_crtc)
+        s.dpms = DRM_MODE_DPMS_OFF;
+    else if (s.conn_crtc && (modeset || s.conn_crtc != g_state.conn_crtc))
+        s.dpms = s.active ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF;
+    /* The primary plane may go anywhere, as vkms's (can_position): bigger
+     * than the CRTC (KWin's first commit after a mode change can still carry
+     * the previous frame's size) it is clipped; smaller (KWin scanning out
+     * a window, or something alone on an empty screen) the rest is black.
+     * It may be scaled, as on displays that scale. */
+    const struct plane_state *pp = &s.primary, *cp = &s.cursor;
+    if ((pp->fb && !pp->crtc) || (cp->fb && !cp->crtc))
+        REFUSE(-EINVAL, "framebuffer on a plane without a CRTC");
+    if ((pp->crtc && !pp->fb) || (cp->crtc && !cp->fb))
         REFUSE(-EINVAL, "plane on a CRTC without a framebuffer");
-    }
-    if (a->flags & DRM_MODE_PAGE_FLIP_EVENT) {
-        if (!on)
+    /* Both planes, as drm_atomic_plane_check: no overflow, the source inside
+     * the framebuffer. The cursor plane, as vkms's: any size and position
+     * (off the screen too), part of its framebuffer, no scaling (the helper's
+     * check with DRM_PLANE_NO_SCALING). */
+    int bad = plane_bounds(pp);
+    if (bad)
+        REFUSE(bad, "primary plane at %d,%d size %ux%u: %s", pp->crtc_x, pp->crtc_y, pp->crtc_w, pp->crtc_h,
+               bad == -ERANGE ? "too big" : "source outside its framebuffer");
+    bad = plane_bounds(cp);
+    if (bad)
+        REFUSE(bad, "cursor at %d,%d size %ux%u: %s", cp->crtc_x, cp->crtc_y, cp->crtc_w, cp->crtc_h,
+               bad == -ERANGE ? "too big" : "source outside its framebuffer");
+    if (cp->fb && (cp->src_w != (uint64_t)cp->crtc_w << 16 || cp->src_h != (uint64_t)cp->crtc_h << 16))
+        REFUSE(-ERANGE, "cursor scaled");
+    if (flags & (DRM_MODE_PAGE_FLIP_EVENT | COMMIT_PEND)) {
+        if (!s.active && !g_state.active) /* an event for turning it off is fine */
             REFUSE(-EINVAL, "page-flip event with the CRTC off");
         if (link_flip_pending_locked())
             return -EBUSY;
     }
-#undef REFUSE
-    if (a->flags & DRM_MODE_ATOMIC_TEST_ONLY)
+    if (flags & DRM_MODE_ATOMIC_TEST_ONLY)
         return 0;
 
     /* Commit. The kernel doesn't take ownership of IN_FENCE_FD either. */
     int in_fence = (int)s.in_fence;
     s.in_fence = -1;
-    /* CLOSEFB may have dropped the id of the fb that's still on the plane. */
-    struct fb *fb = s.fb ? fb_find(s.fb) : NULL;
-    struct cham_bo *bo = fb ? fb->bo : (s.fb && s.fb == g_state.fb ? g_plane_bo : NULL);
+    struct fb *fb = pp->fb ? fb_find(pp->fb) : NULL;
+    struct cham_bo *bo = fb ? fb->bo : NULL;
     if (bo)
         bo_ref_locked(bo);
     if (g_plane_bo)
         bo_unref_locked(g_plane_bo);
     g_plane_bo = bo;
+    /* A compositor draws a new cursor image into another buffer (the shown
+     * one is being scanned out), so a new framebuffer is a new image. */
+    int cursor_new = cp->fb != g_state.cursor.fb;
+    struct fb *cfb = cp->fb ? fb_find(cp->fb) : NULL;
+    /* A dumb buffer's framebuffer is shown as its memory is now. */
+    int modeset_or = modeset || s.dpms != g_state.dpms;
+    if (fb && fb->mem && ((touched & 1) || modeset_or))
+        dumb_show(fb, 0, fb->height);
+    if (cfb && cfb->mem && (touched & 2)) {
+        dumb_show(cfb, 0, cfb->height);
+        cursor_new = 1;
+    }
+    struct cham_bo *cbo = cfb ? cfb->bo : NULL;
+    if (cbo)
+        bo_ref_locked(cbo);
+    if (g_cursor_bo)
+        bo_unref_locked(g_cursor_bo);
+    g_cursor_bo = cbo;
+    int new_size = modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
+                                       mode->vdisplay != old_mode->vdisplay);
     g_state = s;
+    free_destroyed_blobs(); /* the old mode's too, if the compositor destroyed it */
+    free_unused_fbs(); /* a closed framebuffer the plane just let go of */
 
-    if (modeset && mode && (!old_mode || mode->hdisplay != old_mode->hdisplay ||
-                            mode->vdisplay != old_mode->vdisplay))
-        cham_log("KWin set mode %ux%u", mode->hdisplay, mode->vdisplay);
-    /* Off after having been on: KWin's DPMS off (CRTC inactive, mode
+    if (new_size)
+        cham_log("the compositor set mode %ux%u", mode->hdisplay, mode->vdisplay);
+    /* Off after having been on: the compositor's DPMS off (CRTC inactive, mode
      * cleared) or the DPMS property; e.g. Plasma's power management after a
      * while without input. */
     if (on && s.dpms == 0)
         g_screen_was_on = 1;
     int screen_off = g_screen_was_on && !(on && s.dpms == 0);
     if (screen_off != g_screen_off) {
-        cham_log("KWin turned its screen %s", screen_off ? "off" : "on");
+        cham_log("the compositor turned its screen %s", screen_off ? "off" : "on");
         link_screen_off_locked(screen_off);
     }
     g_screen_off = screen_off;
 
     uint64_t frame = ++g_frame;
     int presented = 0;
-    g_plane_shown = bo && on && s.dpms == 0 && !partial;
+    /* An app that can't show a plane covering part of the screen keeps the
+     * frame it shows until a whole one comes. */
+    struct link_plane lp = {.plain = 1};
+    int partial = bo && on && plane_geometry(pp, fb, mode, &lp);
+    link_plane_locked(&lp);
+    g_plane_on = bo && on && s.dpms == 0;
+    g_plane_partial = partial;
+    g_plane_shown = g_plane_on && (!partial || link_shows_planes_locked());
+    if (g_has_cursor) {
+        /* The app shows it over the frame, from the next present on. */
+        struct link_cursor c = {.fence = -1};
+        if (cbo && on && s.dpms == 0)
+            c = (struct link_cursor){cbo, cursor_new, g_state.cursor.crtc_x, g_state.cursor.crtc_y,
+                                     g_state.cursor.src_x >> 16, g_state.cursor.src_y >> 16, g_state.cursor.crtc_w,
+                                     g_state.cursor.crtc_h, g_cursor_fence};
+        else if (g_cursor_fence >= 0)
+            close(g_cursor_fence);
+        g_cursor_fence = -1; /* the link's now */
+        link_cursor_locked(&c);
+    }
+    /* A commit of the cursor alone leaves the frame on screen as it is (the
+     * app needn't copy it again). */
+    int cursor_only = (touched & 3) == 2 && !modeset;
     if (g_plane_shown)
-        presented = link_present_locked(bo, in_fence, frame);
-    if (a->flags & DRM_MODE_PAGE_FLIP_EVENT)
-        link_queue_flip_locked(a->user_data, ID_CRTC, f->event_wfd, frame, presented, mode_mhz(mode));
+        presented = link_present_locked(cursor_only ? NULL : bo, in_fence, frame);
+    if (flags & (DRM_MODE_PAGE_FLIP_EVENT | COMMIT_PEND))
+        link_queue_flip_locked(user_data, ID_CRTC, (flags & DRM_MODE_PAGE_FLIP_EVENT) ? f->event_wfd : -1, frame,
+                               presented, mode_mhz(mode));
     return 0;
+}
+#undef REFUSE
+
+static int atomic_commit(struct fake_fd *f, struct drm_mode_atomic *a)
+{
+    int ret = commit(f, a);
+    if (g_in_fence >= 0)
+        close(g_in_fence); /* the caller's fence stays the caller's */
+    if (g_cursor_fence >= 0)
+        close(g_cursor_fence);
+    g_in_fence = g_cursor_fence = -1;
+    return ret;
+}
+
+/* ---- the legacy calls ----
+ * As the kernel serves them on an atomic driver (drm_crtc.c, drm_plane.c,
+ * drm_framebuffer.c, drm_mode_object.c over the atomic helpers): each makes
+ * a state and commits it. Their checks and errors are in the kernel's order
+ * (compared with vkms by kms_conformance.c). */
+
+/* The caller's fences stay the caller's: our copies go after a commit. */
+static void drop_fences(void)
+{
+    if (g_in_fence >= 0)
+        close(g_in_fence);
+    if (g_cursor_fence >= 0)
+        close(g_cursor_fence);
+    g_in_fence = g_cursor_fence = -1;
+}
+
+static int legacy_apply(struct fake_fd *f, struct kms_state s, int touched, uint32_t flags, uint64_t user_data)
+{
+    int ret = apply(f, s, touched, flags | COMMIT_LEGACY, user_data);
+    drop_fences();
+    free_destroyed_blobs(); /* a mode or framebuffer made for a call that failed */
+    free_unused_fbs();
+    return ret;
+}
+
+/* drm_crtc_check_viewport: the mode's rectangle at x,y lies in the framebuffer. */
+static int viewport_ok(const struct drm_mode_modeinfo *m, const struct fb *fb, uint32_t x, uint32_t y)
+{
+    return m->hdisplay <= fb->width && m->vdisplay <= fb->height && x <= fb->width - m->hdisplay &&
+           y <= fb->height - m->vdisplay;
+}
+
+/* A mode of the card's own for SETCRTC, kept like a blob the client already
+ * destroyed: while the CRTC uses it. The current one if it is the same. */
+static uint32_t legacy_mode_blob(const struct drm_mode_modeinfo *m)
+{
+    const struct drm_mode_modeinfo *cur = state_mode(&g_state);
+    if (cur && !memcmp(cur, m, sizeof *m))
+        return g_state.mode_blob;
+    struct blob *b = calloc(1, sizeof *b);
+    if (b)
+        b->data = malloc(sizeof *m);
+    if (!b || !b->data) {
+        free(b);
+        return 0;
+    }
+    memcpy(b->data, m, sizeof *m);
+    b->length = sizeof *m;
+    b->destroyed = 1;
+    b->id = g_next_object_id++;
+    b->next = g_blobs;
+    g_blobs = b;
+    return b->id;
+}
+
+static int set_crtc(struct fake_fd *f, struct drm_mode_crtc *c)
+{
+    if (c->crtc_id != ID_CRTC)
+        return -ENOENT;
+    if ((c->x & 0xffff0000) || (c->y & 0xffff0000))
+        return -ERANGE;
+    struct kms_state s = g_state;
+    s.in_fence = -1;
+    const struct fb *fb = NULL;
+    if (c->mode_valid) {
+        if (c->fb_id == (uint32_t)-1) { /* the one it shows */
+            fb = s.primary.fb ? fb_find(s.primary.fb) : NULL;
+            if (!fb)
+                return -EINVAL;
+        } else if (!(fb = fb_find(c->fb_id))) {
+            return -ENOENT;
+        }
+        const struct drm_mode_modeinfo *m = &c->mode;
+        if (!m->hdisplay || !m->vdisplay || m->hdisplay > 16384 || m->vdisplay > 16384 || !m->htotal || !m->vtotal ||
+            !m->clock)
+            return -EINVAL;
+        if (!viewport_ok(m, fb, c->x, c->y))
+            return -ENOSPC;
+    }
+    if (!c->count_connectors != !c->mode_valid)
+        return -EINVAL;
+    if (c->count_connectors > 1)
+        return -EINVAL; /* more than the card has */
+    for (uint32_t i = 0; i < c->count_connectors; i++) {
+        uint32_t id;
+        if (copy_from_user(&id, c->set_connectors_ptr + i * sizeof id, sizeof id))
+            return -EFAULT;
+        if (id != ID_CONNECTOR)
+            return -ENOENT;
+    }
+    struct plane_state *p = &s.primary;
+    if (c->mode_valid) {
+        s.mode_blob = legacy_mode_blob(&c->mode);
+        if (!s.mode_blob)
+            return -ENOMEM;
+        s.active = 1;
+        s.conn_crtc = ID_CRTC;
+        *p = (struct plane_state){fb->id, ID_CRTC, c->x << 16, c->y << 16, (uint32_t)c->mode.hdisplay << 16,
+                                  (uint32_t)c->mode.vdisplay << 16, 0, 0, c->mode.hdisplay, c->mode.vdisplay};
+    } else { /* off: no mode, nothing on it */
+        s.mode_blob = 0;
+        s.active = 0;
+        s.conn_crtc = 0;
+        *p = (struct plane_state){0};
+    }
+    return legacy_apply(f, s, 1 | 4 | 8, DRM_MODE_ATOMIC_ALLOW_MODESET, 0);
+}
+
+static int page_flip(struct fake_fd *f, struct drm_mode_crtc_page_flip_target *p)
+{
+    if (p->flags & ~(uint32_t)DRM_MODE_PAGE_FLIP_FLAGS)
+        return -EINVAL;
+    if (p->sequence && !(p->flags & DRM_MODE_PAGE_FLIP_TARGET))
+        return -EINVAL;
+    if ((p->flags & DRM_MODE_PAGE_FLIP_TARGET) == DRM_MODE_PAGE_FLIP_TARGET)
+        return -EINVAL; /* one kind of target only */
+    if (p->flags & DRM_MODE_PAGE_FLIP_ASYNC)
+        return -EINVAL; /* DRM_CAP_ASYNC_PAGE_FLIP is 0 */
+    if (p->crtc_id != ID_CRTC)
+        return -ENOENT;
+    if (p->flags & DRM_MODE_PAGE_FLIP_TARGET)
+        return -EINVAL; /* DRM_CAP_PAGE_FLIP_TARGET is 0 */
+    struct kms_state s = g_state;
+    s.in_fence = -1;
+    const struct fb *old = s.primary.fb ? fb_find(s.primary.fb) : NULL, *fb;
+    const struct drm_mode_modeinfo *m = state_mode(&s);
+    if (!old || !m)
+        return -EBUSY; /* nothing is shown: there is nothing to flip from */
+    if (!(fb = fb_find(p->fb_id)))
+        return -ENOENT;
+    if (!viewport_ok(m, fb, s.primary.src_x >> 16, s.primary.src_y >> 16))
+        return -ENOSPC;
+    if (fb->format != old->format)
+        return -EINVAL; /* a flip can't change the format */
+    if (!s.active)
+        return -EINVAL;
+    s.primary.fb = fb->id;
+    return legacy_apply(f, s, 1,
+                        DRM_MODE_ATOMIC_NONBLOCK | ((p->flags & DRM_MODE_PAGE_FLIP_EVENT) ? DRM_MODE_PAGE_FLIP_EVENT
+                                                                                          : COMMIT_PEND),
+                        p->user_data);
+}
+
+static int set_plane(struct fake_fd *f, struct drm_mode_set_plane *c)
+{
+    if (c->plane_id != ID_PLANE && (c->plane_id != ID_CURSOR || !g_has_cursor))
+        return -ENOENT;
+    int cursor = c->plane_id == ID_CURSOR;
+    struct kms_state s = g_state;
+    s.in_fence = -1;
+    struct plane_state *p = cursor ? &s.cursor : &s.primary;
+    const struct fb *fb = NULL;
+    if (c->fb_id) {
+        if (!(fb = fb_find(c->fb_id)) || c->crtc_id != ID_CRTC)
+            return -ENOENT;
+    }
+    if (!fb) { /* the plane off */
+        *p = (struct plane_state){0};
+        return legacy_apply(f, s, cursor ? 2 : 1, 0, 0);
+    }
+    if (c->crtc_w > INT32_MAX || c->crtc_x > INT32_MAX - (int32_t)c->crtc_w || c->crtc_h > INT32_MAX ||
+        c->crtc_y > INT32_MAX - (int32_t)c->crtc_h)
+        return -ERANGE;
+    uint64_t fw = (uint64_t)fb->width << 16, fh = (uint64_t)fb->height << 16;
+    if (c->src_w > fw || c->src_x > fw - c->src_w || c->src_h > fh || c->src_y > fh - c->src_h)
+        return -ENOSPC;
+    *p = (struct plane_state){fb->id, ID_CRTC, c->src_x, c->src_y, c->src_w, c->src_h,
+                              c->crtc_x, c->crtc_y, c->crtc_w, c->crtc_h};
+    return legacy_apply(f, s, cursor ? 2 : 1, 0, 0);
+}
+
+/* DRM_IOCTL_MODE_CURSOR(2) on a CRTC with a cursor plane
+ * (drm_mode_cursor_universal): an image makes a framebuffer of the card's
+ * own for the plane, which shows it whole at the place last given. */
+static int legacy_cursor(struct fake_fd *f, const struct drm_mode_cursor2 *c)
+{
+    if (!c->flags || (c->flags & ~(uint32_t)DRM_MODE_CURSOR_FLAGS))
+        return -EINVAL;
+    if (c->crtc_id != ID_CRTC)
+        return -ENOENT;
+    if (!g_has_cursor)
+        return -ENXIO; /* a CRTC without a cursor plane or cursor functions */
+    struct kms_state s = g_state;
+    s.in_fence = -1;
+    struct plane_state *p = &s.cursor;
+    uint32_t fb_id = p->fb;
+    if (c->flags & DRM_MODE_CURSOR_BO) {
+        fb_id = 0;
+        if (c->handle) {
+            struct drm_mode_fb_cmd2 a = {.width = c->width, .height = c->height, .pixel_format = DRM_FORMAT_ARGB8888,
+                                         .handles = {c->handle}, .pitches = {c->width * 4}};
+            if (!c->width || !c->height || c->width > 16384 || c->height > 16384)
+                return -EINVAL;
+            int ret = add_fb2(f, &a);
+            if (ret)
+                return ret;
+            fb_find(a.fb_id)->owner = NULL; /* the plane's alone */
+            fb_id = a.fb_id;
+        }
+    }
+    int32_t x = (c->flags & DRM_MODE_CURSOR_MOVE) ? c->x : g_cursor_x;
+    int32_t y = (c->flags & DRM_MODE_CURSOR_MOVE) ? c->y : g_cursor_y;
+    const struct fb *fb = fb_id ? fb_find(fb_id) : NULL;
+    *p = fb ? (struct plane_state){fb->id, ID_CRTC, 0, 0, fb->width << 16, fb->height << 16, x, y, fb->width,
+                                   fb->height}
+            : (struct plane_state){0};
+    int ret = legacy_apply(f, s, 2, 0, 0);
+    if (!ret && (c->flags & DRM_MODE_CURSOR_MOVE)) {
+        g_cursor_x = c->x;
+        g_cursor_y = c->y;
+    }
+    return ret;
+}
+
+/* drm_mode_obj_set_property_ioctl on an atomic driver: any property of the
+ * object, atomic ones too; DPMS is the connector's CRTC going active or not. */
+static int set_property(struct fake_fd *f, uint32_t obj, uint32_t obj_type, uint32_t prop, uint64_t v)
+{
+    uint32_t type, n, m = 0;
+    const uint32_t *props = object_props(obj, &type, &n);
+    if (obj == ID_ENCODER && (!obj_type || obj_type == DRM_MODE_OBJECT_ENCODER))
+        return -EINVAL; /* an object without properties */
+    if (!props || (obj_type && obj_type != type))
+        return -ENOENT;
+    while (m < n && props[m] != prop)
+        m++;
+    if (m == n)
+        return -EINVAL;
+    struct kms_state s = g_state;
+    s.in_fence = -1;
+    if (prop == P_CONN_DPMS) { /* any value: on, or else off */
+        uint64_t mode = v == DRM_MODE_DPMS_ON ? DRM_MODE_DPMS_ON : DRM_MODE_DPMS_OFF;
+        if (!s.conn_crtc) {
+            g_state.dpms = mode; /* on no CRTC: only remembered */
+            return 0;
+        }
+        s.active = mode == DRM_MODE_DPMS_ON;
+        return legacy_apply(f, s, 4 | 8, DRM_MODE_ATOMIC_ALLOW_MODESET, 0);
+    }
+    int touched = 0;
+    int ret = prop_value_ok(prop, v) ? set_prop(&s, obj, prop, v, &touched) : -EINVAL;
+    if (ret) {
+        drop_fences();
+        return ret;
+    }
+    return legacy_apply(f, s, touched, DRM_MODE_ATOMIC_ALLOW_MODESET, 0);
+}
+
+/* drm_mode_legacy_fb_format: the format the old bits-a-pixel and depth mean. */
+static int add_fb(struct fake_fd *f, struct drm_mode_fb_cmd *c)
+{
+    uint32_t format = 0;
+    switch (c->bpp) {
+    case 8: format = c->depth == 8 ? DRM_FORMAT_C8 : 0; break;
+    case 16: format = c->depth == 15 ? DRM_FORMAT_XRGB1555 : c->depth == 16 ? DRM_FORMAT_RGB565 : 0; break;
+    case 24: format = c->depth == 24 ? DRM_FORMAT_RGB888 : 0; break;
+    case 32:
+        format = c->depth == 24 ? DRM_FORMAT_XRGB8888
+               : c->depth == 30 ? DRM_FORMAT_XRGB2101010
+               : c->depth == 32 ? DRM_FORMAT_ARGB8888 : 0;
+        break;
+    }
+    if (!format)
+        return -EINVAL;
+    struct drm_mode_fb_cmd2 a = {.width = c->width, .height = c->height, .pixel_format = format,
+                                 .handles = {c->handle}, .pitches = {c->pitch}};
+    int ret = add_fb2(f, &a);
+    c->fb_id = a.fb_id;
+    return ret;
+}
+
+/* A handle of its own for the framebuffer's buffer, as GETFB makes one each
+ * time (the caller closes it); only for the master and root, else 0. */
+static int fb_handle(struct fake_fd *f, const struct fb *fb, uint32_t *handle)
+{
+    *handle = 0;
+    if (g_master != f && card_caller_uid() != 0)
+        return 0;
+    uint32_t h = 1;
+    for (int i = 0; i < f->nhandles; i++)
+        if (f->handles[i].handle == h)
+            h++, i = -1;
+    struct gem_handle *t = realloc(f->handles, sizeof *t * (size_t)(f->nhandles + 1));
+    if (!t)
+        return -ENOMEM;
+    f->handles = t;
+    struct cham_bo *bo = fb->mem ? fb->mem : fb->bo;
+    f->handles[f->nhandles++] = (struct gem_handle){h, bo};
+    bo_ref_locked(bo);
+    *handle = h;
+    return 0;
+}
+
+static int get_fb(struct fake_fd *f, struct drm_mode_fb_cmd *c)
+{
+    const struct fb *fb = fb_find(c->fb_id);
+    if (!fb)
+        return -ENOENT;
+    c->width = fb->width;
+    c->height = fb->height;
+    c->pitch = fb->pitch;
+    c->bpp = 32;
+    c->depth = fb->format == DRM_FORMAT_ARGB8888 || fb->format == DRM_FORMAT_ABGR8888 ? 32 : 24;
+    return fb_handle(f, fb, &c->handle);
+}
+
+static int get_fb2(struct fake_fd *f, struct drm_mode_fb_cmd2 *c)
+{
+    const struct fb *fb = fb_find(c->fb_id);
+    if (!fb)
+        return -ENOENT;
+    uint32_t id = c->fb_id;
+    memset(c, 0, sizeof *c);
+    c->fb_id = id;
+    c->width = fb->width;
+    c->height = fb->height;
+    c->pixel_format = fb->format;
+    c->pitches[0] = fb->pitch; /* no modifier: the card has implicit ones only */
+    return fb_handle(f, fb, &c->handles[0]);
+}
+
+/* drm_mode_dirtyfb_ioctl. A GPU buffer's framebuffer has no way to be told
+ * of changes (no .dirty): the card shows it when it is flipped to. A dumb
+ * buffer's is copied again, the rows the rectangles name or all of it, and
+ * shown if it is on a plane. */
+static int dirty_fb(const struct drm_mode_fb_dirty_cmd *c)
+{
+    const struct fb *fb = fb_find(c->fb_id);
+    if (!fb)
+        return -ENOENT;
+    if (!c->num_clips != !c->clips_ptr)
+        return -EINVAL;
+    if ((c->flags & DRM_MODE_FB_DIRTY_ANNOTATE_COPY) && (c->num_clips % 2))
+        return -EINVAL;
+    if (c->num_clips > DRM_MODE_FB_DIRTY_MAX_CLIPS)
+        return -EINVAL;
+    uint32_t y1 = c->num_clips ? UINT32_MAX : 0, y2 = c->num_clips ? 0 : UINT32_MAX;
+    for (uint32_t i = 0; i < c->num_clips; i++) {
+        struct drm_clip_rect r;
+        if (copy_from_user(&r, c->clips_ptr + i * sizeof r, sizeof r))
+            return -EFAULT;
+        if (r.y1 < y1)
+            y1 = r.y1;
+        if (r.y2 > y2)
+            y2 = r.y2;
+    }
+    if (!fb->mem)
+        return -ENOSYS;
+    if (c->flags & DRM_MODE_FB_DIRTY_ANNOTATE_COPY) /* pairs of source and destination: all of it */
+        y1 = 0, y2 = UINT32_MAX;
+    if (y1 < y2)
+        dumb_show(fb, y1, y2);
+    int on = g_state.active && state_mode(&g_state) && g_state.dpms == 0;
+    if (fb->id == g_state.cursor.fb && g_has_cursor && g_cursor_bo && on)
+        link_cursor_locked(&(struct link_cursor){g_cursor_bo, 1, g_state.cursor.crtc_x, g_state.cursor.crtc_y,
+                                                 g_state.cursor.src_x >> 16, g_state.cursor.src_y >> 16,
+                                                 g_state.cursor.crtc_w, g_state.cursor.crtc_h, -1});
+    /* Now, without a page flip. */
+    if (g_plane_shown && fb->id == g_state.primary.fb)
+        link_present_locked(fb->bo, -1, 0);
+    else if (g_plane_shown && fb->id == g_state.cursor.fb)
+        link_present_locked(NULL, -1, 0);
+    return 0;
+}
+
+/* ---- vblanks (drm_vblank.c) ---- */
+
+static uint32_t crtc_mhz(void)
+{
+    return mode_mhz(state_mode(&g_state));
+}
+
+/* The CRTC counts vblanks while it is active. */
+static int vblank_on(void)
+{
+    return g_state.active && state_mode(&g_state);
+}
+
+static int wait_vblank(struct fake_fd *f, union drm_wait_vblank *v)
+{
+    uint32_t type = v->request.type;
+    if (type & ~(uint32_t)(_DRM_VBLANK_TYPES_MASK | _DRM_VBLANK_FLAGS_MASK | _DRM_VBLANK_HIGH_CRTC_MASK))
+        return -EINVAL;
+    if (type & _DRM_VBLANK_SIGNAL)
+        return -EINVAL;
+    uint32_t pipe = (type & _DRM_VBLANK_HIGH_CRTC_MASK) >> _DRM_VBLANK_HIGH_CRTC_SHIFT;
+    if (!pipe && (type & _DRM_VBLANK_SECONDARY))
+        pipe = 1;
+    if (pipe >= 1 || !vblank_on())
+        return -EINVAL;
+    uint32_t seq, req;
+    uint64_t ns;
+    link_vblank_locked(crtc_mhz(), &seq, &ns);
+    switch (type & _DRM_VBLANK_TYPES_MASK) {
+    case _DRM_VBLANK_RELATIVE: req = seq + v->request.sequence; break;
+    case _DRM_VBLANK_ABSOLUTE: req = v->request.sequence; break;
+    default: return -EINVAL;
+    }
+    if ((type & _DRM_VBLANK_NEXTONMISS) && (int32_t)(seq - req) >= 0)
+        req = seq + 1;
+    if (type & _DRM_VBLANK_EVENT) {
+        int ret = link_vblank_event_locked(req, DRM_EVENT_VBLANK, v->request.signal, ID_CRTC, f->event_wfd);
+        v->reply.sequence = req;
+        return ret;
+    }
+    /* Up to 3 s, as the kernel; over when the CRTC goes off meanwhile. */
+    uint64_t give_up = now_ns() + 3000000000ull;
+    int ret = 0;
+    while (!ret && (int32_t)(seq - req) < 0 && vblank_on()) {
+        ret = link_vblank_sleep_locked(req, give_up);
+        link_vblank_locked(crtc_mhz(), &seq, &ns);
+    }
+    v->reply.sequence = seq;
+    v->reply.tval_sec = (long)(ns / 1000000000ull);
+    v->reply.tval_usec = (long)(ns % 1000000000ull / 1000);
+    return (int32_t)(seq - req) >= 0 ? 0 : ret;
+}
+
+static int get_sequence(struct drm_crtc_get_sequence *g)
+{
+    if (g->crtc_id != ID_CRTC)
+        return -ENOENT;
+    if (!vblank_on())
+        return -EINVAL;
+    uint32_t seq;
+    uint64_t ns;
+    link_vblank_locked(crtc_mhz(), &seq, &ns);
+    g->active = 1;
+    g->sequence = seq;
+    g->sequence_ns = (int64_t)ns;
+    return 0;
+}
+
+static int queue_sequence(struct fake_fd *f, struct drm_crtc_queue_sequence *q)
+{
+    if (q->crtc_id != ID_CRTC)
+        return -ENOENT;
+    if (q->flags & ~(uint32_t)(DRM_CRTC_SEQUENCE_RELATIVE | DRM_CRTC_SEQUENCE_NEXT_ON_MISS))
+        return -EINVAL;
+    if (!vblank_on())
+        return -EINVAL;
+    uint32_t seq, req = (uint32_t)q->sequence;
+    uint64_t ns;
+    link_vblank_locked(crtc_mhz(), &seq, &ns);
+    if (q->flags & DRM_CRTC_SEQUENCE_RELATIVE)
+        req += seq;
+    int passed = (int32_t)(seq - req) >= 0;
+    if ((q->flags & DRM_CRTC_SEQUENCE_NEXT_ON_MISS) && passed)
+        req = seq + 1, passed = 0;
+    if (passed)
+        req = seq; /* now, with the current vblank's number */
+    int ret = link_vblank_event_locked(req, DRM_EVENT_CRTC_SEQUENCE, q->user_data, ID_CRTC, f->event_wfd);
+    if (!ret)
+        q->sequence = req;
+    return ret;
+}
+
+/* A CRTC without a gamma table: its size is 0, and there is nothing to set. */
+static int get_gamma(const struct drm_mode_crtc_lut *l)
+{
+    if (l->crtc_id != ID_CRTC)
+        return -ENOENT;
+    return l->gamma_size ? -EINVAL : 0;
+}
+
+static int set_gamma(const struct drm_mode_crtc_lut *l)
+{
+    return l->crtc_id != ID_CRTC ? -ENOENT : -ENOSYS;
 }
 
 /* ---- misc ---- */
 
 static int get_cap(struct drm_get_cap *c)
 {
+    c->value = 0;
     switch (c->capability) {
-    case DRM_CAP_DUMB_BUFFER: c->value = 0; return 0;
+    case DRM_CAP_DUMB_BUFFER: c->value = 1; return 0;
     case DRM_CAP_VBLANK_HIGH_CRTC: c->value = 1; return 0;
     case DRM_CAP_DUMB_PREFERRED_DEPTH: c->value = 24; return 0;
     case DRM_CAP_DUMB_PREFER_SHADOW: c->value = 0; return 0;
     case DRM_CAP_PRIME: c->value = DRM_PRIME_CAP_IMPORT | DRM_PRIME_CAP_EXPORT; return 0;
     case DRM_CAP_TIMESTAMP_MONOTONIC: c->value = 1; return 0;
     case DRM_CAP_ASYNC_PAGE_FLIP: c->value = 0; return 0;
-    case DRM_CAP_CURSOR_WIDTH: c->value = 64; return 0;
-    case DRM_CAP_CURSOR_HEIGHT: c->value = 64; return 0;
+    case DRM_CAP_CURSOR_WIDTH: c->value = 512; return 0; /* as vkms: the app shows any size */
+    case DRM_CAP_CURSOR_HEIGHT: c->value = 512; return 0;
     /* Gralloc picks the layout (maybe AFBC); expose implicit modifiers only. */
     case DRM_CAP_ADDFB2_MODIFIERS: c->value = 0; return 0;
     case DRM_CAP_PAGE_FLIP_TARGET: c->value = 0; return 0;
@@ -711,24 +1928,150 @@ static int get_cap(struct drm_get_cap *c)
     return -EINVAL;
 }
 
-static int set_client_cap(struct drm_set_client_cap *c)
+/* The kernel refuses atomic to Xorg's modesetting driver by process name
+ * ("broken atomic modeset userspace"). */
+static int comm_starts_with_x(void)
+{
+    char comm[32] = "", path[64];
+    snprintf(path, sizeof path, "/proc/%d/comm", (int)card_caller_pid());
+    FILE *fp = fopen(path, "re");
+    if (fp) {
+        if (!fgets(comm, sizeof comm, fp))
+            comm[0] = 0;
+        fclose(fp);
+    }
+    return comm[0] == 'X';
+}
+
+static int set_client_cap(struct fake_fd *f, struct drm_set_client_cap *c)
 {
     switch (c->capability) {
     case DRM_CLIENT_CAP_STEREO_3D:
-    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
-    case DRM_CLIENT_CAP_ATOMIC:
     case DRM_CLIENT_CAP_ASPECT_RATIO:
         return c->value <= 1 ? 0 : -EINVAL;
+    case DRM_CLIENT_CAP_UNIVERSAL_PLANES:
+        if (c->value > 1)
+            return -EINVAL;
+        f->universal_planes = (int)c->value;
+        return 0;
+    case DRM_CLIENT_CAP_ATOMIC:
+        if (c->value == 1 && comm_starts_with_x())
+            return -EOPNOTSUPP;
+        if (c->value > 2)
+            return -EINVAL;
+        f->atomic = f->universal_planes = (int)c->value; /* and aspect ratios */
+        return 0;
+    case DRM_CLIENT_CAP_WRITEBACK_CONNECTORS:
+        if (!f->atomic || c->value > 1)
+            return -EINVAL;
+        f->writeback = (int)c->value; /* there are none to show */
+        return 0;
+    case 6: /* DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT: a feature of virtual GPUs' drivers */
+        return -EOPNOTSUPP;
     }
-    return -EINVAL; /* writeback, cursor hotspot, color pipeline */
+    return -EINVAL;
 }
 
-static void copy_string(char *dst, __kernel_size_t *len, const char *src)
+/* ---- DRM master and authentication (6.8's drm_auth.c) ---- */
+
+void kms_file_open(struct fake_fd *f)
 {
-    size_t n = strlen(src);
-    if (dst && *len)
-        memcpy(dst, src, n < *len ? n : *len);
+    pthread_mutex_lock(&g_lock);
+    f->kms_next = g_files;
+    g_files = f;
+    f->authenticated = card_caller_uid() == 0; /* drm_file_alloc: capable(CAP_SYS_ADMIN) */
+    if (!g_master && !f->render) /* the first opener of the primary node while there is none */
+        g_master = f, f->master = f->was_master = f->authenticated = 1;
+    pthread_mutex_unlock(&g_lock);
+}
+
+pid_t kms_master_pid(void)
+{
+    pthread_mutex_lock(&g_lock);
+    pid_t pid = g_master ? g_master->pid : 0;
+    pthread_mutex_unlock(&g_lock);
+    return pid;
+}
+
+void kms_file_close(struct fake_fd *f)
+{
+    pthread_mutex_lock(&g_lock);
+    for (struct fake_fd **p = &g_files; *p; p = &(*p)->kms_next) {
+        if (*p == f) {
+            *p = f->kms_next;
+            break;
+        }
+    }
+    if (g_master == f)
+        g_master = NULL; /* nobody inherits it; the next opener takes it */
+    link_cancel_flip_locked(f->event_wfd);
+    for (struct fb *fb = g_fbs; fb; fb = fb->next) { /* drm_fb_release */
+        if (fb->owner == f) {
+            fb->owner = NULL;
+            plane_drop_fb(fb->id);
+        }
+    }
+    free_unused_fbs();
+    for (struct blob *b = g_blobs; b; b = b->next)
+        if (b->owner == f)
+            b->destroyed = 1, b->owner = NULL;
+    free_destroyed_blobs();
+    while (f->nhandles)
+        gem_close(f, f->handles[0].handle);
+    free(f->handles);
+    f->handles = NULL;
+    pthread_mutex_unlock(&g_lock);
+}
+
+/* Who may SET_MASTER/DROP_MASTER: a file that was master, from the process
+ * that opened it, or anyone with CAP_SYS_ADMIN (root here). */
+static int master_perm(const struct fake_fd *f)
+{
+    return (f->was_master && f->pid == card_caller_pid()) || card_caller_uid() == 0 ? 0 : -EACCES;
+}
+
+static int set_master(struct fake_fd *f)
+{
+    int ret = master_perm(f);
+    if (ret || g_master == f)
+        return ret;
+    if (g_master)
+        return -EBUSY;
+    g_master = f;
+    f->master = f->was_master = f->authenticated = 1; /* drm_new_set_master */
+    return 0;
+}
+
+static int drop_master(struct fake_fd *f)
+{
+    int ret = master_perm(f);
+    if (ret)
+        return ret;
+    if (g_master != f)
+        return -EINVAL;
+    g_master = NULL;
+    f->master = 0;
+    return 0;
+}
+
+static int get_magic(struct fake_fd *f, struct drm_auth *a)
+{
+    if (!f->magic)
+        f->magic = g_next_magic++;
+    a->magic = f->magic;
+    return 0;
+}
+
+/* Called by the master (checked by the caller): marks the file holding the
+ * magic authenticated; a magic works once. */
+static int auth_magic(const struct drm_auth *a);
+
+/* drm_copy_field: as much as fits, the full length reported. */
+static int copy_string(char *dst, __kernel_size_t *len, const char *src)
+{
+    size_t n = strlen(src), fit = n < *len ? n : *len;
     *len = n;
+    return dst && fit ? copy_to_user((uint64_t)(uintptr_t)dst, src, fit) : 0;
 }
 
 static int get_version(struct drm_version *v)
@@ -736,51 +2079,325 @@ static int get_version(struct drm_version *v)
     v->version_major = 1;
     v->version_minor = 0;
     v->version_patchlevel = 0;
-    copy_string(v->name, &v->name_len, "chameleon");
-    copy_string(v->date, &v->date_len, "20260929");
-    copy_string(v->desc, &v->desc_len, "Chameleon: KMS on an Android surface");
+    if (copy_string(v->name, &v->name_len, "chameleon") || copy_string(v->date, &v->date_len, "20260929") ||
+        copy_string(v->desc, &v->desc_len, "Chameleon: KMS on an Android surface"))
+        return -EFAULT;
     return 0;
 }
 
-int kms_ioctl(struct fake_fd *f, unsigned int request, void *arg)
+static int auth_magic(const struct drm_auth *a)
 {
-    static int unknown_warnings;
-    int ret;
-    pthread_mutex_lock(&g_lock);
-    switch (request) {
-    case (unsigned int)DRM_IOCTL_VERSION: ret = get_version(arg); break;
-    case (unsigned int)DRM_IOCTL_GET_CAP: ret = get_cap(arg); break;
-    case (unsigned int)DRM_IOCTL_SET_CLIENT_CAP: ret = set_client_cap(arg); break;
-    case (unsigned int)DRM_IOCTL_GET_MAGIC: ((struct drm_auth *)arg)->magic = 0x4348; ret = 0; break;
-    case (unsigned int)DRM_IOCTL_AUTH_MAGIC: ret = 0; break;
-    case (unsigned int)DRM_IOCTL_SET_MASTER:
-    case (unsigned int)DRM_IOCTL_DROP_MASTER: ret = 0; break;
-    case (unsigned int)DRM_IOCTL_GET_UNIQUE: ((struct drm_unique *)arg)->unique_len = 0; ret = 0; break;
-    case (unsigned int)DRM_IOCTL_MODE_GETRESOURCES: ret = get_resources(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETCONNECTOR: ret = get_connector(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETENCODER: ret = get_encoder(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETCRTC: ret = get_crtc(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPLANERESOURCES: ret = get_plane_resources(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPLANE: ret = get_plane(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_OBJ_GETPROPERTIES: ret = obj_get_properties(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPROPERTY: ret = get_property(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_GETPROPBLOB: ret = get_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_CREATEPROPBLOB: ret = create_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_DESTROYPROPBLOB: ret = destroy_blob(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_ADDFB2: ret = add_fb2(arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_RMFB: ret = remove_fb(*(uint32_t *)arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_CLOSEFB: ret = remove_fb(((struct drm_mode_closefb *)arg)->fb_id); break;
-    case (unsigned int)DRM_IOCTL_PRIME_FD_TO_HANDLE: ret = prime_fd_to_handle(arg); break;
-    case (unsigned int)DRM_IOCTL_PRIME_HANDLE_TO_FD: ret = prime_handle_to_fd(arg); break;
-    case (unsigned int)DRM_IOCTL_GEM_CLOSE: ret = 0; break; /* handles are the bo's own ids */
-    case (unsigned int)DRM_IOCTL_MODE_ATOMIC: ret = atomic_commit(f, arg); break;
-    case (unsigned int)DRM_IOCTL_MODE_LIST_LESSEES: ((struct drm_mode_list_lessees *)arg)->count_lessees = 0; ret = 0; break;
-    default:
-        if (unknown_warnings++ < 20)
-            cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", request, _IOC_NR(request));
-        ret = -EINVAL;
-        break;
+    struct fake_fd *holder = g_files;
+    while (holder && (!a->magic || holder->magic != a->magic))
+        holder = holder->kms_next;
+    if (!holder || holder->magic_used)
+        return -EINVAL;
+    holder->magic_used = holder->authenticated = 1;
+    return 0;
+}
+
+/* ---- the ioctl entry (6.8's drm_ioctl) ---- */
+
+static int op_version(struct fake_fd *f, void *d) { (void)f; return get_version(d); }
+static int op_get_cap(struct fake_fd *f, void *d) { (void)f; return get_cap(d); }
+static int op_set_client_cap(struct fake_fd *f, void *d) { return set_client_cap(f, d); }
+static int op_get_magic(struct fake_fd *f, void *d) { return get_magic(f, d); }
+static int op_auth_magic(struct fake_fd *f, void *d) { (void)f; return auth_magic(d); }
+static int op_set_master(struct fake_fd *f, void *d) { (void)d; return set_master(f); }
+static int op_drop_master(struct fake_fd *f, void *d) { (void)d; return drop_master(f); }
+static int op_get_unique(struct fake_fd *f, void *d)
+{
+    (void)f;
+    struct drm_unique *u = d;
+    /* Empty until SET_VERSION 1.1 gives the master the platform device's name,
+     * as vkms'; copied only when it fits whole (drm_getunique). */
+    const char *unique = g_unique_set ? "chameleon" : "";
+    size_t n = strlen(unique);
+    if (u->unique_len >= n && n && copy_to_user((uint64_t)(uintptr_t)u->unique, unique, n))
+        return -EFAULT;
+    u->unique_len = n;
+    return 0;
+}
+static int op_get_resources(struct fake_fd *f, void *d) { return get_resources(f, d); }
+static int op_get_connector(struct fake_fd *f, void *d) { return get_connector(f, d); }
+static int op_get_encoder(struct fake_fd *f, void *d) { (void)f; return get_encoder(d); }
+static int op_get_crtc(struct fake_fd *f, void *d) { (void)f; return get_crtc(d); }
+static int op_get_plane_resources(struct fake_fd *f, void *d) { return get_plane_resources(f, d); }
+static int op_get_plane(struct fake_fd *f, void *d) { (void)f; return get_plane(d); }
+static int op_obj_get_properties(struct fake_fd *f, void *d) { return obj_get_properties(f, d); }
+static int op_get_property(struct fake_fd *f, void *d) { (void)f; return get_property(d); }
+static int op_get_blob(struct fake_fd *f, void *d) { (void)f; return get_blob(d); }
+static int op_create_blob(struct fake_fd *f, void *d) { return create_blob(f, d); }
+static int op_destroy_blob(struct fake_fd *f, void *d) { return destroy_blob(f, d); }
+static int op_add_fb2(struct fake_fd *f, void *d) { return add_fb2(f, d); }
+static int op_rmfb(struct fake_fd *f, void *d) { return remove_fb(f, *(uint32_t *)d, 1); }
+static int op_closefb(struct fake_fd *f, void *d) { return remove_fb(f, ((struct drm_mode_closefb *)d)->fb_id, 0); }
+static int op_prime_fd_to_handle(struct fake_fd *f, void *d) { return prime_fd_to_handle(f, d); }
+static int op_prime_handle_to_fd(struct fake_fd *f, void *d) { return prime_handle_to_fd(f, d); }
+static int op_gem_close(struct fake_fd *f, void *d) { return gem_close(f, ((struct drm_gem_close *)d)->handle); }
+static int op_atomic(struct fake_fd *f, void *d) { return atomic_commit(f, d); }
+static int op_set_crtc(struct fake_fd *f, void *d) { return set_crtc(f, d); }
+static int op_page_flip(struct fake_fd *f, void *d) { return page_flip(f, d); }
+static int op_set_plane(struct fake_fd *f, void *d) { return set_plane(f, d); }
+static int op_cursor(struct fake_fd *f, void *d)
+{
+    struct drm_mode_cursor2 c = {0};
+    memcpy(&c, d, sizeof(struct drm_mode_cursor)); /* the same, without a hot spot */
+    return legacy_cursor(f, &c);
+}
+static int op_cursor2(struct fake_fd *f, void *d) { return legacy_cursor(f, d); }
+static int op_set_property(struct fake_fd *f, void *d)
+{
+    const struct drm_mode_connector_set_property *p = d;
+    return set_property(f, p->connector_id, DRM_MODE_OBJECT_CONNECTOR, p->prop_id, p->value);
+}
+static int op_obj_set_property(struct fake_fd *f, void *d)
+{
+    const struct drm_mode_obj_set_property *p = d;
+    return set_property(f, p->obj_id, p->obj_type, p->prop_id, p->value);
+}
+static int op_add_fb(struct fake_fd *f, void *d) { return add_fb(f, d); }
+static int op_get_fb(struct fake_fd *f, void *d) { return get_fb(f, d); }
+static int op_get_fb2(struct fake_fd *f, void *d) { return get_fb2(f, d); }
+static int op_dirty_fb(struct fake_fd *f, void *d) { (void)f; return dirty_fb(d); }
+static int op_wait_vblank(struct fake_fd *f, void *d) { return wait_vblank(f, d); }
+static int op_get_sequence(struct fake_fd *f, void *d) { (void)f; return get_sequence(d); }
+static int op_queue_sequence(struct fake_fd *f, void *d) { return queue_sequence(f, d); }
+static int op_get_gamma(struct fake_fd *f, void *d) { (void)f; return get_gamma(d); }
+static int op_set_gamma(struct fake_fd *f, void *d) { (void)f; return set_gamma(d); }
+static int op_list_lessees(struct fake_fd *f, void *d)
+{
+    (void)f;
+    struct drm_mode_list_lessees *l = d;
+    if (l->pad)
+        return -EINVAL;
+    l->count_lessees = 0; /* nothing is leased */
+    return 0;
+}
+static int op_noop(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; }
+/* The syncobj ioctls of a driver without DRIVER_SYNCOBJ. */
+static int op_no_syncobj(struct fake_fd *f, void *d) { (void)f; (void)d; return -EOPNOTSUPP; }
+static int op_invalid(struct fake_fd *f, void *d) { (void)f; (void)d; return -EINVAL; }
+static int op_create_dumb(struct fake_fd *f, void *d) { return create_dumb(f, d); }
+static int op_map_dumb(struct fake_fd *f, void *d) { return map_dumb(f, d); }
+static int op_destroy_dumb(struct fake_fd *f, void *d)
+{
+    return gem_close(f, ((struct drm_mode_destroy_dumb *)d)->handle); /* drm_gem_handle_delete */
+}
+static int op_get_stats(struct fake_fd *f, void *d) { (void)f; (void)d; return 0; /* all zero */ }
+static int op_get_client(struct fake_fd *f, void *d)
+{
+    struct drm_client *c = d;
+    if (c->idx) /* only the caller itself, index 0 */
+        return -EINVAL;
+    c->auth = f->authenticated;
+    c->pid = (unsigned long)card_caller_pid();
+    c->uid = 65534; /* overflowuid */
+    c->magic = 0;
+    c->iocs = 0;
+    return 0;
+}
+/* drm_setversion: the interface version 1.4 and the driver's 1.0; asking
+ * for interface 1.1 or later gives the master its unique name. */
+static int op_set_version(struct fake_fd *f, void *d)
+{
+    (void)f;
+    struct drm_set_version *v = d;
+    int ret = 0;
+    if (v->drm_di_major != -1) {
+        if (v->drm_di_major != 1 || v->drm_di_minor < 0 || v->drm_di_minor > 4)
+            ret = -EINVAL;
+        else if (v->drm_di_minor >= 1)
+            g_unique_set = 1;
     }
-    pthread_mutex_unlock(&g_lock);
+    if (!ret && v->drm_dd_major != -1 && (v->drm_dd_major != 1 || v->drm_dd_minor < 0 || v->drm_dd_minor > 0))
+        ret = -EINVAL;
+    v->drm_di_major = 1;
+    v->drm_di_minor = 4;
+    v->drm_dd_major = 1;
+    v->drm_dd_minor = 0;
+    return ret;
+}
+/* GEM names (DRI2's sharing): no buffer gets one here, so none is found. */
+static int op_gem_flink(struct fake_fd *f, void *d)
+{
+    static int warned;
+    if (!handle_bo(f, ((struct drm_gem_flink *)d)->handle))
+        return -ENOENT;
+    if (!warned++)
+        cham_log("a program asked for a GEM name (flink); the card shares buffers by PRIME only");
+    return -EOPNOTSUPP;
+}
+static int op_gem_open(struct fake_fd *f, void *d) { (void)f; (void)d; return -ENOENT; }
+
+#define DRM_CORE_IOCTL_COUNT 0xd1 /* up to DRM_IOCTL_MODE_CLOSEFB */
+/* The kernel's permission flags (drm_ioctl.h). */
+#define AUTH 1   /* DRM_AUTH: an authenticated file (or a render file) */
+#define MASTER 2 /* DRM_MASTER: the current master */
+#define ROOT 4   /* DRM_ROOT_ONLY: CAP_SYS_ADMIN (root here) */
+#define RENDER 8 /* DRM_RENDER_ALLOW: render files may use it */
+struct ioctl_def {
+    unsigned int cmd;
+    int (*fn)(struct fake_fd *, void *);
+    int flags;
+    const char *name; /* for the report (report.c), without "DRM_IOCTL_" */
+};
+#define DEF(c, f, fl) [_IOC_NR(c)] = {(unsigned int)(c), (f), (fl), &#c[10]}
+/* Linux 6.8's core ioctls (drm_ioctls[], without the legacy ones 6.8 no
+ * longer builds), with its flags. Those the card doesn't implement have no
+ * function: after the permission checks they answer EINVAL. */
+static const struct ioctl_def k_ioctls[DRM_CORE_IOCTL_COUNT] = {
+    DEF(DRM_IOCTL_VERSION, op_version, RENDER),
+    DEF(DRM_IOCTL_GET_UNIQUE, op_get_unique, 0),
+    DEF(DRM_IOCTL_GET_MAGIC, op_get_magic, 0),
+    DEF(DRM_IOCTL_GET_CLIENT, op_get_client, 0),
+    DEF(DRM_IOCTL_GET_STATS, op_get_stats, 0),
+    DEF(DRM_IOCTL_GET_CAP, op_get_cap, RENDER),
+    DEF(DRM_IOCTL_SET_CLIENT_CAP, op_set_client_cap, 0),
+    DEF(DRM_IOCTL_SET_VERSION, op_set_version, MASTER),
+    DEF(DRM_IOCTL_SET_UNIQUE, op_invalid, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_BLOCK, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_UNBLOCK, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_AUTH_MAGIC, op_auth_magic, MASTER),
+    DEF(DRM_IOCTL_SET_MASTER, op_set_master, 0),
+    DEF(DRM_IOCTL_DROP_MASTER, op_drop_master, 0),
+    DEF(DRM_IOCTL_ADD_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_RM_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_FINISH, op_noop, AUTH),
+    DEF(DRM_IOCTL_WAIT_VBLANK, op_wait_vblank, 0),
+    DEF(DRM_IOCTL_UPDATE_DRAW, op_noop, AUTH | MASTER | ROOT),
+    DEF(DRM_IOCTL_GEM_CLOSE, op_gem_close, RENDER),
+    DEF(DRM_IOCTL_GEM_FLINK, op_gem_flink, AUTH),
+    DEF(DRM_IOCTL_GEM_OPEN, op_gem_open, AUTH),
+    DEF(DRM_IOCTL_MODE_GETRESOURCES, op_get_resources, 0),
+    DEF(DRM_IOCTL_PRIME_HANDLE_TO_FD, op_prime_handle_to_fd, RENDER),
+    DEF(DRM_IOCTL_PRIME_FD_TO_HANDLE, op_prime_fd_to_handle, RENDER),
+    DEF(DRM_IOCTL_MODE_GETPLANERESOURCES, op_get_plane_resources, 0),
+    DEF(DRM_IOCTL_MODE_GETCRTC, op_get_crtc, 0),
+    DEF(DRM_IOCTL_MODE_SETCRTC, op_set_crtc, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPLANE, op_get_plane, 0),
+    DEF(DRM_IOCTL_MODE_SETPLANE, op_set_plane, MASTER),
+    DEF(DRM_IOCTL_MODE_CURSOR, op_cursor, MASTER),
+    DEF(DRM_IOCTL_MODE_GETGAMMA, op_get_gamma, 0),
+    DEF(DRM_IOCTL_MODE_SETGAMMA, op_set_gamma, MASTER),
+    DEF(DRM_IOCTL_MODE_GETENCODER, op_get_encoder, 0),
+    DEF(DRM_IOCTL_MODE_GETCONNECTOR, op_get_connector, 0),
+    DEF(DRM_IOCTL_MODE_ATTACHMODE, op_noop, MASTER),
+    DEF(DRM_IOCTL_MODE_DETACHMODE, op_noop, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPROPERTY, op_get_property, 0),
+    DEF(DRM_IOCTL_MODE_SETPROPERTY, op_set_property, MASTER),
+    DEF(DRM_IOCTL_MODE_GETPROPBLOB, op_get_blob, 0),
+    DEF(DRM_IOCTL_MODE_GETFB, op_get_fb, 0),
+    DEF(DRM_IOCTL_MODE_GETFB2, op_get_fb2, 0),
+    DEF(DRM_IOCTL_MODE_ADDFB, op_add_fb, 0),
+    DEF(DRM_IOCTL_MODE_ADDFB2, op_add_fb2, 0),
+    DEF(DRM_IOCTL_MODE_RMFB, op_rmfb, 0),
+    DEF(DRM_IOCTL_MODE_CLOSEFB, op_closefb, 0),
+    DEF(DRM_IOCTL_MODE_PAGE_FLIP, op_page_flip, MASTER),
+    DEF(DRM_IOCTL_MODE_DIRTYFB, op_dirty_fb, MASTER),
+    DEF(DRM_IOCTL_MODE_CREATE_DUMB, op_create_dumb, 0),
+    DEF(DRM_IOCTL_MODE_MAP_DUMB, op_map_dumb, 0),
+    DEF(DRM_IOCTL_MODE_DESTROY_DUMB, op_destroy_dumb, 0),
+    DEF(DRM_IOCTL_MODE_OBJ_GETPROPERTIES, op_obj_get_properties, 0),
+    DEF(DRM_IOCTL_MODE_OBJ_SETPROPERTY, op_obj_set_property, MASTER),
+    DEF(DRM_IOCTL_MODE_CURSOR2, op_cursor2, MASTER),
+    DEF(DRM_IOCTL_MODE_ATOMIC, op_atomic, MASTER),
+    DEF(DRM_IOCTL_MODE_CREATEPROPBLOB, op_create_blob, 0),
+    DEF(DRM_IOCTL_MODE_DESTROYPROPBLOB, op_destroy_blob, 0),
+    DEF(DRM_IOCTL_SYNCOBJ_CREATE, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_DESTROY, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TRANSFER, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_WAIT, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_EVENTFD, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_RESET, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_SIGNAL, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_SYNCOBJ_QUERY, op_no_syncobj, RENDER),
+    DEF(DRM_IOCTL_CRTC_GET_SEQUENCE, op_get_sequence, 0),
+    DEF(DRM_IOCTL_CRTC_QUEUE_SEQUENCE, op_queue_sequence, 0),
+    DEF(DRM_IOCTL_MODE_CREATE_LEASE, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_LIST_LESSEES, op_list_lessees, MASTER),
+    DEF(DRM_IOCTL_MODE_GET_LEASE, NULL, MASTER),
+    DEF(DRM_IOCTL_MODE_REVOKE_LEASE, NULL, MASTER),
+};
+
+/* drm_ioctl_permit, in its order. */
+static int permit(const struct fake_fd *f, int flags)
+{
+    if ((flags & ROOT) && card_caller_uid() != 0)
+        return -EACCES;
+    if ((flags & AUTH) && !f->render && !f->authenticated)
+        return -EACCES;
+    if ((flags & MASTER) && g_master != f)
+        return -EACCES;
+    if (!(flags & RENDER) && f->render)
+        return -EACCES;
+    return 0;
+}
+
+/* As the kernel: the ioctl is found by number, the argument is copied in
+ * and out by the size the caller declares (the rest zero-filled), and only
+ * then are permission and the handler applied. */
+static int ioctl_run(struct fake_fd *f, unsigned int cmd, void *user_arg, const struct ioctl_def **found)
+{
+    static int unknown_warnings, non_master_commits;
+    unsigned int nr = _IOC_NR(cmd);
+    const struct ioctl_def *def = nr < DRM_CORE_IOCTL_COUNT && !(nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END)
+                                      ? &k_ioctls[nr]
+                                      : NULL; /* driver ioctls: this driver has none */
+    if (!def || !def->cmd) { /* not an ioctl of 6.8's */
+        if (unknown_warnings++ < 20)
+            cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
+        return -EINVAL;
+    }
+    *found = def;
+    unsigned int drv_size = _IOC_SIZE(def->cmd), in_size = _IOC_SIZE(cmd), out_size = in_size;
+    if (!(cmd & def->cmd & IOC_IN))
+        in_size = 0;
+    if (!(cmd & def->cmd & IOC_OUT))
+        out_size = 0;
+    unsigned int ksize = in_size > out_size ? in_size : out_size;
+    if (drv_size > ksize)
+        ksize = drv_size;
+    char stack[256], *kdata = ksize <= sizeof stack ? stack : malloc(ksize);
+    if (!kdata)
+        return -ENOMEM;
+    int ret = copy_from_user(kdata, (uint64_t)(uintptr_t)user_arg, in_size);
+    if (!ret) {
+        memset(kdata + in_size, 0, ksize - in_size);
+        pthread_mutex_lock(&g_lock);
+        ret = permit(f, def->flags);
+        if (ret) {
+            if (nr == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) && !f->render && non_master_commits++ < 5)
+                cham_log("refusing a commit from a file that isn't DRM master (EACCES)");
+        } else if (!def->fn) {
+            if (unknown_warnings++ < 20)
+                cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
+            ret = -EINVAL;
+        } else {
+            ret = def->fn(f, kdata);
+        }
+        pthread_mutex_unlock(&g_lock);
+        if (copy_to_user((uint64_t)(uintptr_t)user_arg, kdata, out_size))
+            ret = -EFAULT;
+    }
+    if (kdata != stack)
+        free(kdata);
+    return ret;
+}
+
+int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
+{
+    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE)
+        return -ENOTTY;
+    const struct ioctl_def *def = NULL;
+    uint64_t start = now_ns();
+    int ret = ioctl_run(f, cmd, user_arg, &def);
+    /* WAIT_VBLANK's caller asked to wait */
+    report_request(_IOC_NR(cmd), def ? def->name : NULL, _IOC_NR(cmd) == _IOC_NR(DRM_IOCTL_WAIT_VBLANK), ret,
+                   now_ns() - start);
     return ret;
 }

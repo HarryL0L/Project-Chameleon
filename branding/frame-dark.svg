@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 190" width="960" height="190" role="img">
+<style>text{font-family:-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;fill:#E6EDF3}.label{font-size:14px;font-weight:600;fill:#E6EDF3}.name{font-size:15px;font-weight:600}.sub{font-size:12px;fill:#9198A1}.pill{font-size:12px;fill:#9198A1}.num{font-size:12px;font-weight:700;fill:#151B23}</style>
+<style>.ring{fill:none;stroke:#56D364;stroke-width:2;opacity:0;transform-box:fill-box;transform-origin:center;animation:ring 7.5s ease-out infinite}.dot{fill:#56D364;animation:run 7.5s linear infinite}@keyframes run{0%{transform:translateX(0);opacity:1}80%{transform:translateX(780px);opacity:1}88%,100%{transform:translateX(780px);opacity:0}}@keyframes ring{0%{opacity:.8;transform:scale(1)}14%{opacity:0;transform:scale(1.9)}100%{opacity:0;transform:scale(1.9)}}@media (prefers-reduced-motion:reduce){.ring,.dot{animation:none;opacity:0}}</style>
+<line x1="90" y1="60" x2="870" y2="60" stroke="#3D444D" stroke-width="2"/>
+<circle class="dot" cx="90" cy="60" r="6"/>
+<circle class="ring" cx="90.0" cy="60" r="15" style="animation-delay:0.00s"/>
+<circle cx="90.0" cy="60" r="13" fill="#56D364"/>
+<text class="num" x="90.0" y="64" text-anchor="middle">1</text>
+<text class="name" x="90.0" y="104" text-anchor="middle">Render</text>
+<text class="sub" x="90.0" y="126" text-anchor="middle">the compositor draws</text>
+<text class="sub" x="90.0" y="143" text-anchor="middle">into a GPU buffer</text>
+<circle class="ring" cx="285.0" cy="60" r="15" style="animation-delay:1.50s"/>
+<circle cx="285.0" cy="60" r="13" fill="#56D364"/>
+<text class="num" x="285.0" y="64" text-anchor="middle">2</text>
+<text class="name" x="285.0" y="104" text-anchor="middle">Commit</text>
+<text class="sub" x="285.0" y="126" text-anchor="middle">atomic commit on the</text>
+<text class="sub" x="285.0" y="143" text-anchor="middle">card, with a fence</text>
+<circle class="ring" cx="480.0" cy="60" r="15" style="animation-delay:3.00s"/>
+<circle cx="480.0" cy="60" r="13" fill="#56D364"/>
+<text class="num" x="480.0" y="64" text-anchor="middle">3</text>
+<text class="name" x="480.0" y="104" text-anchor="middle">Present</text>
+<text class="sub" x="480.0" y="126" text-anchor="middle">the app copies it on the</text>
+<text class="sub" x="480.0" y="143" text-anchor="middle">GPU, hands it to Android</text>
+<circle class="ring" cx="675.0" cy="60" r="15" style="animation-delay:4.50s"/>
+<circle cx="675.0" cy="60" r="13" fill="#56D364"/>
+<text class="num" x="675.0" y="64" text-anchor="middle">4</text>
+<text class="name" x="675.0" y="104" text-anchor="middle">Display</text>
+<text class="sub" x="675.0" y="126" text-anchor="middle">shown at the</text>
+<text class="sub" x="675.0" y="143" text-anchor="middle">panel's next vsync</text>
+<circle class="ring" cx="870.0" cy="60" r="15" style="animation-delay:6.00s"/>
+<circle cx="870.0" cy="60" r="13" fill="#56D364"/>
+<text class="num" x="870.0" y="64" text-anchor="middle">5</text>
+<text class="name" x="870.0" y="104" text-anchor="middle">Page flip</text>
+<text class="sub" x="870.0" y="126" text-anchor="middle">the compositor is told,</text>
+<text class="sub" x="870.0" y="143" text-anchor="middle">timed on that vsync</text>
+</svg>

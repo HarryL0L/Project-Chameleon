@@ -3,29 +3,34 @@ package io.github.harryl0l.chameleon;
 
 /**
  * Sends CHAM_INPUT messages (common/chameleon_proto.h) to the connected
- * producer; the KWin shim turns them into org_kde_kwin_fake_input requests.
+ * producer; the KWin shim serves them as evdev devices, and the Android
+ * keyboard's text through its input method or as keys.
  */
 final class InputSender {
     static {
         System.loadLibrary("chameleon_presenter");
     }
 
-    static final int TOUCH_DOWN = 1;
-    static final int TOUCH_MOTION = 2;
-    static final int TOUCH_UP = 3;
-    static final int TOUCH_CANCEL = 4;
-    static final int TOUCH_FRAME = 5;
-    static final int POINTER_MOTION = 6;
+    static final int TOUCH_DOWN = 1; // .. TOUCH_FRAME = 5
     static final int POINTER_ABS = 7;
-    static final int BUTTON = 8;
-    static final int AXIS = 9;
     static final int KEYSYM = 10;
+    static final int KEY = 11;
+    static final int MOUSE_BUTTON = 12;
+    static final int MOUSE_WHEEL = 13;
+    static final int MOUSE_MOTION = 14;
+    static final int PAD_DOWN = 15; // .. PAD_FRAME = 19
+    static final int TIME = 20;
+    static final int TEXT_CHAR = 21;
+    static final int TEXT_COMMIT = 22;
+    static final int TEXT_PREEDIT = 23;
+    static final int TEXT_DELETE = 24;
+    /* Code points chameleon-kernel keeps per COMMIT / PREEDIT (core/text.c MAX_TEXT). */
+    private static final int TEXT_MAX = 256;
 
     // evdev button codes (linux/input-event-codes.h)
     static final int BTN_LEFT = 0x110;
     static final int BTN_RIGHT = 0x111;
     static final int BTN_MIDDLE = 0x112;
-    static final int BTN_SIDE = 0x113;
     static final int BTN_EXTRA = 0x114;
 
     static final int AXIS_VERTICAL = 0;
@@ -45,46 +50,84 @@ final class InputSender {
         return clampFraction(x, w) | clampFraction(y, h) << 32;
     }
 
-    /** Movement in surface pixels, as signed 12.20 fractions of the surface. */
-    static long delta(float dx, float dy, int w, int h) {
-        long ix = (int) (dx / Math.max(w, 1) * 1048576f);
-        long iy = (int) (dy / Math.max(h, 1) * 1048576f);
-        return (ix & 0xffffffffL) | (iy << 32);
+    /**
+     * When the events that follow happened: Android's event time in ns
+     * (SystemClock.uptimeMillis()'s clock, CLOCK_MONOTONIC), so the desktop
+     * sees the real time between them, not when they arrived in a batch.
+     */
+    static void time(long nanos) {
+        nativeSendInput(TIME, 0, nanos);
     }
 
-    static void touch(int kind, int id, long pos) {
-        nativeSendInput(kind, id, pos);
+    // A finger message: down is TOUCH_DOWN (the touchscreen) or PAD_DOWN (the
+    // touchpad), step one of these offsets from it.
+    static final int DOWN = 0, MOTION = 1, UP = 2, CANCEL = 3, FRAME = 4;
+
+    static void finger(int down, int step, int id, long pos) {
+        nativeSendInput(down + step, id, pos);
     }
 
-    static void touchFrame() {
-        nativeSendInput(TOUCH_FRAME, 0, 0);
+    static void fingersFrame(int down) {
+        nativeSendInput(down + FRAME, 0, 0);
     }
 
-    static void touchCancel() {
-        nativeSendInput(TOUCH_CANCEL, 0, 0);
-        nativeSendInput(TOUCH_FRAME, 0, 0);
-    }
-
-    static void motion(long delta) {
-        nativeSendInput(POINTER_MOTION, 0, delta);
+    static void fingersCancel(int down) {
+        nativeSendInput(down + CANCEL, 0, 0);
+        nativeSendInput(down + FRAME, 0, 0);
     }
 
     static void moveTo(long pos) {
         nativeSendInput(POINTER_ABS, 0, pos);
     }
 
-    static void button(int button, boolean pressed) {
-        nativeSendInput(BUTTON, button, pressed ? 1 : 0);
+    /** Captured mouse movement, in the mouse's own counts. */
+    static void mouseMotion(int dx, int dy) {
+        nativeSendInput(MOUSE_MOTION, 0, (dx & 0xffffffffL) | ((long) dy << 32));
     }
 
-    static void click(int button) {
-        button(button, true);
-        button(button, false);
+    /** A mouse button. */
+    static void mouseButton(int button, boolean pressed) {
+        nativeSendInput(MOUSE_BUTTON, button, pressed ? 1 : 0);
     }
 
-    /** Scroll by {@code value} (wl_pointer axis units, ~15 per wheel notch). */
-    static void axis(int axis, float value) {
-        nativeSendInput(AXIS, axis, (long) (value * 256f));
+    /** Mouse wheel movement in notches, + up / right. */
+    static void mouseWheel(int axis, float notches) {
+        nativeSendInput(MOUSE_WHEEL, axis, Math.round(notches * 120f));
+    }
+
+    /** A key of the evdev keyboard, by its Linux key code. */
+    static void key(int code, boolean pressed) {
+        nativeSendInput(KEY, code, pressed ? 1 : 0);
+    }
+
+    /**
+     * Text from the Android keyboard: committed, or the word being composed
+     * (shown as such where the desktop app's text field takes text). Long
+     * committed text (a paste) goes as several commits of TEXT_MAX code points;
+     * a CR LF line break goes as one.
+     */
+    static void text(CharSequence text, boolean commit) {
+        time(0);
+        String s = text.toString();
+        int n = 0;
+        for (int i = 0; i < s.length(); ) {
+            int cp = s.codePointAt(i);
+            i += Character.charCount(cp);
+            if (cp == '\r' && i < s.length() && s.charAt(i) == '\n')
+                continue;
+            nativeSendInput(TEXT_CHAR, cp, 0);
+            if (commit && ++n == TEXT_MAX && i < s.length()) {
+                nativeSendInput(TEXT_COMMIT, 0, 0);
+                n = 0;
+            }
+        }
+        nativeSendInput(commit ? TEXT_COMMIT : TEXT_PREEDIT, 0, 0);
+    }
+
+    /** Deletes characters (as the user sees them) before / after the cursor. */
+    static void deleteText(int before, int after) {
+        time(0);
+        nativeSendInput(TEXT_DELETE, before, after);
     }
 
     static void keysym(int keysym, boolean pressed) {

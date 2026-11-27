@@ -4,6 +4,7 @@ package io.github.harryl0l.chameleon;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
@@ -19,10 +20,12 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Display;
 import android.view.DisplayCutout;
 import android.view.Gravity;
+import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.PointerIcon;
 import android.view.SurfaceHolder;
@@ -41,7 +44,6 @@ import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
 import android.widget.ScrollView;
-import android.widget.SeekBar;
 import android.widget.Switch;
 import android.widget.TextView;
 
@@ -70,24 +72,26 @@ public class PresenterActivity extends Activity
 
     private static native void nativeStart();
     private static native void nativeSurfaceCreated(Object surface);
-    private static native void nativeSurfaceChanged(int width, int height, int refreshMilliHz);
+    private static native void nativeSurfaceChanged(int width, int height, int windowWidth, int windowHeight,
+            int refreshMilliHz);
     private static native void nativeSurfaceDestroyed();
     private static native void nativeSetFrameRateVote(float hz);
     private static native String nativeStatus();
+    private static native boolean nativeLostProducer();
     /** A connection from KWin's shim, passed on by the Termux broker (BrokerLink). */
     static native void nativeConnection(int fd);
     private static native boolean nativeScreenOff();
 
     private static final String PREFS = "chameleon";
     private static final String PREF_MODE = "input_mode";
-    private static final String PREF_SPEED = "pointer_speed";
-    private static final String PREF_TAP = "tap_to_click";
     private static final String PREF_BACK = "back_key";
     private static final String PREF_ORIENTATION = "orientation";
     private static final String PREF_KEYBOARD_RESIZE = "keyboard_resize";
     private static final String PREF_EXTRA_KEYS = "extra_keys";
     private static final String PREF_CLIPBOARD = "clipboard_sharing";
-    private static final float DEFAULT_SPEED = 1.5f;
+
+    /** The activity while its window has focus, for KeyService (main thread). */
+    static PresenterActivity sFocused;
 
     private static boolean sStarted;
     private int mWidth, mHeight;
@@ -112,6 +116,8 @@ public class PresenterActivity extends Activity
         @Override
         public void run() {
             String status = nativeStatus();
+            if ("waiting for Termux".equals(status) && nativeLostProducer() && BrokerLink.sessionRuns())
+                status = "the desktop's session still runs, but its service (chameleon-kernel) is gone";
             boolean off = nativeScreenOff();
             boolean showing = off || "showing frames".equals(status);
             mStatus.setVisibility(showing ? View.GONE : View.VISIBLE);
@@ -146,7 +152,7 @@ public class PresenterActivity extends Activity
         requestHighestRefreshRate();
 
         mPrefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-        mTouch = new TouchInput(getResources().getDisplayMetrics().density);
+        mTouch = new TouchInput();
         mClipboard = ClipboardShare.get(this);
         applyInputPrefs();
         applyOrientation();
@@ -156,10 +162,12 @@ public class PresenterActivity extends Activity
         view.getHolder().addCallback(this);
         view.setOnTouchListener(mTouch);
         view.setOnGenericMotionListener(mTouch);
+        TouchInput.unbuffered(view);
         // KWin draws its own cursor in the frames; Android's would be a second one.
         view.setPointerIcon(PointerIcon.getSystemIcon(this, PointerIcon.TYPE_NULL));
         mStatus = new TextView(this);
         mStatus.setTextColor(Color.LTGRAY);
+        mStatus.setBackgroundColor(0xC0000000); // readable over a frozen frame too
         mStatus.setTextSize(12);
         mStatus.setPadding(32, 96, 32, 32);
         // KWin turned its screen off (idle): a tap wakes it. The tap is ours,
@@ -177,6 +185,11 @@ public class PresenterActivity extends Activity
             return true;
         });
         mImeView = new ImeView(this, mKeys);
+        // A captured mouse goes to the focused view: the soft keyboard's
+        // view usually holds the focus, else the surface.
+        view.setOnCapturedPointerListener(mTouch);
+        mImeView.setOnCapturedPointerListener(mTouch);
+        TouchInput.unbuffered(mImeView);
         FrameLayout root = new FrameLayout(this);
         root.addView(view, new FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -198,6 +211,15 @@ public class PresenterActivity extends Activity
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> v.post(this::updateMenuInsets));
         setContentView(root);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            // Touches and the mouse as they come, not batched once per frame:
+            // each event carries its own time (TouchInput), so the desktop
+            // gets them sooner and still evenly spaced. Once attached, so the
+            // request reaches the window.
+            int sources = InputDevice.SOURCE_CLASS_POINTER | InputDevice.SOURCE_CLASS_TRACKBALL;
+            view.post(() -> {
+                view.requestUnbufferedDispatch(sources);
+                mImeView.requestUnbufferedDispatch(sources); // the captured mouse, while it has the focus
+            });
             root.setOnApplyWindowInsetsListener((v, insets) -> {
                 onInsets(insets);
                 return insets;
@@ -256,18 +278,18 @@ public class PresenterActivity extends Activity
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setPadding(dp(4), 0, dp(4), 0);
-        extraKey(row, "Esc", () -> mKeys.tap(KeyInput.XK_ESCAPE));
-        extraKey(row, "Tab", () -> mKeys.tap(KeyInput.XK_TAB));
+        extraKey(row, "Esc", () -> mKeys.tapKey(KeyInput.KEY_ESC, 0));
+        extraKey(row, "Tab", () -> mKeys.tapKey(KeyInput.KEY_TAB, 0));
         mCtrlKey = extraKey(row, "Ctrl", mKeys::toggleCtrl);
         mAltKey = extraKey(row, "Alt", mKeys::toggleAlt);
-        extraKey(row, "\u2190", () -> mKeys.tap(KeyInput.XK_LEFT));
-        extraKey(row, "\u2193", () -> mKeys.tap(KeyInput.XK_DOWN));
-        extraKey(row, "\u2191", () -> mKeys.tap(KeyInput.XK_UP));
-        extraKey(row, "\u2192", () -> mKeys.tap(KeyInput.XK_RIGHT));
-        extraKey(row, "Home", () -> mKeys.tap(KeyInput.XK_HOME));
-        extraKey(row, "End", () -> mKeys.tap(KeyInput.XK_END));
-        extraKey(row, "PgUp", () -> mKeys.tap(KeyInput.XK_PAGE_UP));
-        extraKey(row, "PgDn", () -> mKeys.tap(KeyInput.XK_PAGE_DOWN));
+        extraKey(row, "\u2190", () -> mKeys.tapKey(KeyInput.KEY_LEFT, 0));
+        extraKey(row, "\u2193", () -> mKeys.tapKey(KeyInput.KEY_DOWN, 0));
+        extraKey(row, "\u2191", () -> mKeys.tapKey(KeyInput.KEY_UP, 0));
+        extraKey(row, "\u2192", () -> mKeys.tapKey(KeyInput.KEY_RIGHT, 0));
+        extraKey(row, "Home", () -> mKeys.tapKey(KeyInput.KEY_HOME, 0));
+        extraKey(row, "End", () -> mKeys.tapKey(KeyInput.KEY_END, 0));
+        extraKey(row, "PgUp", () -> mKeys.tapKey(KeyInput.KEY_PAGEUP, 0));
+        extraKey(row, "PgDn", () -> mKeys.tapKey(KeyInput.KEY_PAGEDOWN, 0));
         mExtraKeys = new HorizontalScrollView(this);
         mExtraKeys.setBackgroundColor(0xE6202124);
         mExtraKeys.setHorizontalScrollBarEnabled(false);
@@ -365,6 +387,8 @@ public class PresenterActivity extends Activity
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
+        if (TouchInput.mouseBackKey(event))
+            return true;
         int code = event.getKeyCode();
         switch (code) {
             case KeyEvent.KEYCODE_VOLUME_UP:
@@ -376,8 +400,10 @@ public class PresenterActivity extends Activity
                 return super.dispatchKeyEvent(event);
             case KeyEvent.KEYCODE_BACK:
                 if (!backLeavesApp()) {
-                    if (event.getRepeatCount() == 0)
-                        InputSender.keysym(KeyInput.XK_ESCAPE, event.getAction() == KeyEvent.ACTION_DOWN);
+                    if (event.getRepeatCount() == 0) {
+                        InputSender.time(event.getEventTime() * 1_000_000L);
+                        InputSender.key(KeyInput.KEY_ESC, event.getAction() == KeyEvent.ACTION_DOWN);
+                    }
                 } else if (event.getAction() == KeyEvent.ACTION_UP) {
                     moveTaskToBack(true);
                 }
@@ -386,19 +412,39 @@ public class PresenterActivity extends Activity
         return mKeys.onKeyEvent(event) || super.dispatchKeyEvent(event);
     }
 
+    /**
+     * A key KeyService saw before Android's shortcuts: a hardware keyboard's
+     * keys are handled as if delivered to the window, except the ones
+     * Android keeps (volume, power...). Returns true if it was taken.
+     */
+    boolean onShortcutKey(KeyEvent event) {
+        if (!KeyInput.isHardwareKey(event))
+            return false;
+        switch (event.getKeyCode()) {
+            case KeyEvent.KEYCODE_VOLUME_UP:
+            case KeyEvent.KEYCODE_VOLUME_DOWN:
+            case KeyEvent.KEYCODE_VOLUME_MUTE:
+            case KeyEvent.KEYCODE_POWER:
+            case KeyEvent.KEYCODE_APP_SWITCH:
+            case KeyEvent.KEYCODE_HOME:
+                return false;
+        }
+        dispatchKeyEvent(event);
+        return true;
+    }
+
     /** Wakes KWin's screen like a mouse would: the pointer a pixel right and back. */
     private void wakeScreen() {
-        int w = mSurface.getWidth(), h = mSurface.getHeight();
-        InputSender.motion(InputSender.delta(1, 0, w, h));
-        InputSender.motion(InputSender.delta(-1, 0, w, h));
+        InputSender.time(0);
+        InputSender.mouseMotion(1, 0);
+        InputSender.mouseMotion(-1, 0);
         mWakeHint.setVisibility(View.GONE); // back if the screen stays off
     }
 
     // ---- settings ----
 
     private void applyInputPrefs() {
-        mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT,
-                mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED), mPrefs.getBoolean(PREF_TAP, true));
+        mTouch.configure(isTrackpad() ? TouchInput.Mode.TRACKPAD : TouchInput.Mode.DIRECT);
         mClipboard.setEnabled(mPrefs.getBoolean(PREF_CLIPBOARD, true));
     }
 
@@ -408,15 +454,6 @@ public class PresenterActivity extends Activity
 
     private boolean backLeavesApp() {
         return "leave".equals(mPrefs.getString(PREF_BACK, "escape"));
-    }
-
-    // Pointer speed 0.25x..3x on a SeekBar of 0..275.
-    private static int speedToProgress(float speed) {
-        return Math.round(speed * 100) - 25;
-    }
-
-    private static float progressToSpeed(int progress) {
-        return (progress + 25) / 100f;
     }
 
     /** A rounded card with a heading, added to box; the section's rows go into it. */
@@ -587,47 +624,14 @@ public class PresenterActivity extends Activity
 
         LinearLayout touch = settingsCard(box, R.string.touch_input);
         TextView modeHint = settingsHint(isTrackpad() ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
-        LinearLayout trackpadOptions = new LinearLayout(this);
-        trackpadOptions.setOrientation(LinearLayout.VERTICAL);
-        trackpadOptions.setVisibility(isTrackpad() ? View.VISIBLE : View.GONE);
         touch.addView(settingsRow(R.string.input_mode, settingsChoice(
                 new int[] {R.string.mode_direct, R.string.mode_trackpad}, new String[] {"direct", "trackpad"},
                 isTrackpad() ? "trackpad" : "direct", value -> {
                     mPrefs.edit().putString(PREF_MODE, value).apply();
                     applySettings();
-                    boolean t = isTrackpad();
-                    modeHint.setText(t ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
-                    trackpadOptions.setVisibility(t ? View.VISIBLE : View.GONE);
+                    modeHint.setText(isTrackpad() ? R.string.mode_trackpad_hint : R.string.mode_direct_hint);
                 })));
         touch.addView(modeHint);
-
-        TextView speedLabel = new TextView(this);
-        speedLabel.setTextSize(16);
-        float current = mPrefs.getFloat(PREF_SPEED, DEFAULT_SPEED);
-        speedLabel.setText(getString(R.string.pointer_speed, current));
-        SeekBar speed = new SeekBar(this);
-        speed.setMax(speedToProgress(3f));
-        speed.setProgress(speedToProgress(current));
-        speed.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            @Override
-            public void onProgressChanged(SeekBar s, int progress, boolean fromUser) {
-                speedLabel.setText(getString(R.string.pointer_speed, progressToSpeed(progress)));
-            }
-
-            @Override
-            public void onStartTrackingTouch(SeekBar s) {}
-
-            @Override
-            public void onStopTrackingTouch(SeekBar s) {
-                mPrefs.edit().putFloat(PREF_SPEED, progressToSpeed(s.getProgress())).apply();
-                applySettings();
-            }
-        });
-        trackpadOptions.addView(speedLabel, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT));
-        trackpadOptions.addView(speed);
-        trackpadOptions.addView(settingsRow(R.string.tap_to_click, settingsSwitch(PREF_TAP)));
-        touch.addView(trackpadOptions);
         touch.addView(settingsHint(R.string.mouse_hint));
 
         LinearLayout keys = settingsCard(box, R.string.keys);
@@ -638,6 +642,26 @@ public class PresenterActivity extends Activity
                     applySettings();
                 })));
         keys.addView(settingsRow(R.string.extra_keys, settingsSwitch(PREF_EXTRA_KEYS)));
+        Button shortcuts = new Button(this);
+        shortcuts.setText(R.string.shortcuts_open);
+        shortcuts.setAllCaps(false);
+        // Shaped like an unselected choice button.
+        shortcuts.setTextSize(TypedValue.COMPLEX_UNIT_PX, new RadioButton(this).getTextSize());
+        shortcuts.setTextColor(new TextView(this).getCurrentTextColor());
+        shortcuts.setStateListAnimator(null); // no shadow
+        shortcuts.setMinHeight(0);
+        shortcuts.setMinimumHeight(0);
+        shortcuts.setMinWidth(0);
+        shortcuts.setMinimumWidth(0);
+        shortcuts.setPadding(dp(12), dp(6), dp(12), dp(6));
+        GradientDrawable outline = new GradientDrawable();
+        outline.setCornerRadius(dp(16));
+        outline.setStroke(dp(1), accentColor());
+        shortcuts.setBackground(outline);
+        shortcuts.setOnClickListener(v -> startActivity(
+                new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)));
+        keys.addView(settingsRow(R.string.shortcuts, shortcuts));
+        keys.addView(settingsHint(R.string.shortcuts_hint));
 
         LinearLayout screen = settingsCard(box, R.string.screen);
         // Three choices don't fit beside the label: they go below it.
@@ -754,7 +778,7 @@ public class PresenterActivity extends Activity
     public void onDisplayChanged(int displayId) {
         Display display = display();
         if (display != null && display.getDisplayId() == displayId && mWidth > 0)
-            nativeSurfaceChanged(mWidth, mHeight, refreshMilliHz());
+            surfaceChanged();
     }
 
     @Override
@@ -766,6 +790,10 @@ public class PresenterActivity extends Activity
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
+        if (hasFocus)
+            sFocused = this;
+        else if (sFocused == this)
+            sFocused = null;
         if (hasFocus) {
             hideSystemBars();
             mClipboard.onPrimaryClipChanged(); // copied in another app meanwhile?
@@ -795,7 +823,14 @@ public class PresenterActivity extends Activity
     public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
         mWidth = width;
         mHeight = height;
-        nativeSurfaceChanged(width, height, refreshMilliHz());
+        surfaceChanged();
+    }
+
+    /** The surface's size, and the whole window's: the trackpad spans it, also under the keyboard. */
+    private void surfaceChanged() {
+        View root = (View) mSurface.getParent();
+        nativeSurfaceChanged(mWidth, mHeight, root != null ? root.getWidth() : 0, root != null ? root.getHeight() : 0,
+                refreshMilliHz());
     }
 
     @Override

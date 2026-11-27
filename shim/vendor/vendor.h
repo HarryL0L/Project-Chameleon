@@ -1,14 +1,17 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
-/* Private to libEGL_chameleon.so. */
+/* Private to libEGL_chameleon.so (bridge.c and window.c are built into
+ * libvulkan_chameleon.so too). */
 #ifndef CHAM_VENDOR_H
 #define CHAM_VENDOR_H
 
 #include <EGL/egl.h>
+#include <stdint.h>
 
 /* egl/egl.c */
 void *cham_egl_get_proc(const char *name);
 EGLDisplay cham_egl_android_display(void);
 int cham_egl_available(void); /* Android's libEGL.so loads (no driver yet) */
+void *cham_egl_device(void);  /* the card's EGLDeviceEXT (eglQueryDevicesEXT) */
 
 void *cham_egl_real(const char *name);      /* Android's entry point */
 void cham_setEGLError(EGLint error);         /* reported by eglGetError */
@@ -29,8 +32,25 @@ EGLBoolean cham_wl_destroy_surface(EGLDisplay dpy, EGLSurface surface);
 
 /* gles/gles.c */
 void *cham_gl_get_proc(const char *name);
+void *cham_gl_real(const char *name); /* Android's GLES function */
+void *cham_gl_alias(const char *name); /* core function of an OES name we add */
+void cham_egl_present_wait(int dmabuf); /* see core/wlsync.c */
+void *cham_gl_stamp_proc(const char *name); /* GL_EXT_disjoint_timer_query's entry points */
 
-/* bridge.c: is libchameleon.so (KWin's fake KMS device) in this process? */
+/* bridge.c: is libchameleon.so (the card node, gbm's buffers) in this
+ * process? It is in every program of a Chameleon session. */
 int cham_core_present(void);
+/* bridge.c: buffers can be shared with the session (cham_bo_wrap() and GEM
+ * handles on a render node file). */
+int cham_bo_sharing(void);
+/* bridge.c: this process's render node file for the buffers it shares, -1 if
+ * none. */
+int cham_render_fd(void);
+/* bridge.c: this process renders with Android's driver: hand libchameleon's
+ * crash reporter the breadcrumbs (it installs itself then). */
+void cham_crash_arm(void);
+/* bridge.c: the Android window behind one of Chameleon's gbm surfaces (and
+ * its DRM format), NULL for any other native window. */
+void *cham_gbm_window(void *native, uint32_t *format);
 
 #endif

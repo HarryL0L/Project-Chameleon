@@ -8,6 +8,7 @@
  * Any dup of that dmabuf identifies the buffer through (st_dev, st_ino).
  */
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -16,6 +17,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 #include <drm_fourcc.h>
@@ -44,6 +47,7 @@ typedef struct {
 
 static struct {
     int (*allocate)(const ahb_desc *, AHardwareBuffer **);
+    void (*acquire)(AHardwareBuffer *);
     void (*release)(AHardwareBuffer *);
     void (*describe)(const AHardwareBuffer *, ahb_desc *);
     int (*lock)(AHardwareBuffer *, uint64_t, int32_t, const void *, void **);
@@ -55,7 +59,7 @@ static struct {
 
 pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct cham_bo *g_bos;
-static uint32_t g_next_handle = 1;
+static struct cham_bo *g_dumbs; /* chameleon-kernel: the dumb buffers, found by the file of their memory */
 
 void cham_log(const char *fmt, ...)
 {
@@ -82,12 +86,14 @@ struct AHardwareBuffer {
     ahb_desc desc;
     native_handle *nh;
     void *map;
+    int refs;
 };
 static int host_allocate(const ahb_desc *d, AHardwareBuffer **out)
 {
     AHardwareBuffer *b = calloc(1, sizeof *b);
     b->desc = *d;
     b->desc.stride = d->width;
+    b->refs = 1;
     b->nh = calloc(1, sizeof(native_handle) + sizeof(int));
     b->nh->numFds = 1;
     b->nh->data[0] = memfd_create("fake-ahb", MFD_CLOEXEC);
@@ -96,8 +102,13 @@ static int host_allocate(const ahb_desc *d, AHardwareBuffer **out)
     *out = b;
     return 0;
 }
+static void host_acquire(AHardwareBuffer *b) { b->refs++; }
 static void host_release(AHardwareBuffer *b)
 {
+    if (--b->refs > 0)
+        return;
+    if (b->map)
+        munmap(b->map, (size_t)b->desc.width * b->desc.height * 4);
     close(b->nh->data[0]);
     free(b->nh);
     free(b);
@@ -125,23 +136,57 @@ static int host_recv(int sock, AHardwareBuffer **out)
         return -1;
     AHardwareBuffer *b = calloc(1, sizeof *b);
     b->desc = d;
+    b->refs = 1;
     b->nh = calloc(1, sizeof(native_handle) + sizeof(int));
     b->nh->numFds = 1;
     memcpy(&b->nh->data[0], CMSG_DATA(c), sizeof(int));
     *out = b;
     return 0;
 }
-/* Stands in for the AHardwareBuffer packet that follows BUFFER_ADD. */
+/* ...and its sending side: the description and the memfd. */
+static int host_send_desc(const ahb_desc *d, int fd, int sock)
+{
+    struct iovec iov = {.iov_base = (void *)d, .iov_len = sizeof *d};
+    union {
+        struct cmsghdr align;
+        char buf[CMSG_SPACE(sizeof(int))];
+    } control;
+    memset(&control, 0, sizeof control);
+    struct msghdr mh = {.msg_iov = &iov, .msg_iovlen = 1, .msg_control = control.buf,
+                        .msg_controllen = sizeof control.buf};
+    struct cmsghdr *c = CMSG_FIRSTHDR(&mh);
+    c->cmsg_level = SOL_SOCKET;
+    c->cmsg_type = SCM_RIGHTS;
+    c->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(c), &fd, sizeof(int));
+    return sendmsg(sock, &mh, MSG_NOSIGNAL) == (ssize_t)sizeof *d ? 0 : -1;
+}
 static int host_send(const AHardwareBuffer *b, int sock)
 {
-    (void)b;
-    char packet[16] = "fake-ahb";
-    return send(sock, packet, sizeof packet, MSG_NOSIGNAL) == (ssize_t)sizeof packet ? 0 : -1;
+    return host_send_desc(&b->desc, b->nh->data[0], sock);
+}
+/* CPU access: the file's pages, mapped once for the buffer's life. */
+static int host_lock(AHardwareBuffer *b, uint64_t usage, int32_t fence, const void *rect, void **out)
+{
+    (void)usage, (void)fence, (void)rect;
+    size_t size = (size_t)b->desc.width * b->desc.height * 4;
+    if (!b->map && (b->map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, b->nh->data[0], 0)) == MAP_FAILED)
+        b->map = NULL;
+    *out = b->map;
+    return b->map ? 0 : -1;
+}
+static int host_unlock(AHardwareBuffer *b, int32_t *fence)
+{
+    (void)b, (void)fence;
+    return 0;
 }
 static int ahb_load(void)
 {
+    ahb.lock = host_lock;
+    ahb.unlock = host_unlock;
     ahb.send_handle = host_send;
     ahb.allocate = host_allocate;
+    ahb.acquire = host_acquire;
     ahb.release = host_release;
     ahb.describe = host_describe;
     ahb.get_native_handle = host_handle;
@@ -154,10 +199,11 @@ static int ahb_load(void)
     static int loaded = -1;
     if (loaded >= 0)
         return loaded;
-    void *lib = dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so" : "/system/lib/libnativewindow.so",
-                       RTLD_NOW | RTLD_LOCAL);
+    void *lib = cham_android_dlopen(sizeof(void *) == 8 ? "/system/lib64/libnativewindow.so"
+                                                        : "/system/lib/libnativewindow.so");
     if (lib) {
         *(void **)&ahb.allocate = dlsym(lib, "AHardwareBuffer_allocate");
+        *(void **)&ahb.acquire = dlsym(lib, "AHardwareBuffer_acquire");
         *(void **)&ahb.release = dlsym(lib, "AHardwareBuffer_release");
         *(void **)&ahb.describe = dlsym(lib, "AHardwareBuffer_describe");
         *(void **)&ahb.lock = dlsym(lib, "AHardwareBuffer_lock");
@@ -166,14 +212,17 @@ static int ahb_load(void)
         *(void **)&ahb.recv_handle = dlsym(lib, "AHardwareBuffer_recvHandleFromUnixSocket");
         *(void **)&ahb.send_handle = dlsym(lib, "AHardwareBuffer_sendHandleToUnixSocket");
     }
-    loaded = lib && ahb.allocate && ahb.release && ahb.describe && ahb.get_native_handle;
+    loaded = lib && ahb.allocate && ahb.acquire && ahb.release && ahb.describe && ahb.get_native_handle;
     if (!loaded)
         cham_log("cannot use AHardwareBuffer from libnativewindow: %s", lib ? "missing symbols" : dlerror());
     return loaded;
 }
 #endif
 
-static const uint32_t k_formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888};
+/* Every format gbm allocates (ahb_format below); EGL imports them all, as a
+ * real driver imports what its gbm allocates. */
+static const uint32_t k_formats[] = {DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888, DRM_FORMAT_XRGB8888,
+                                     DRM_FORMAT_ARGB8888};
 
 const uint32_t *cham_formats(int *count)
 {
@@ -201,6 +250,22 @@ int cham_format_supported(uint32_t format)
     return ahb_format(format) != 0;
 }
 
+/* The DRM format of a buffer gbm could have allocated, from its AHB
+ * format; 0 for any other. */
+static uint32_t drm_format(uint32_t ahb_fmt)
+{
+    switch (ahb_fmt) {
+    case AHB_FORMAT_R8G8B8A8:
+        return DRM_FORMAT_ABGR8888;
+    case AHB_FORMAT_R8G8B8X8:
+        return DRM_FORMAT_XBGR8888;
+    case HAL_FORMAT_BGRA_8888:
+        return DRM_FORMAT_ARGB8888;
+    default:
+        return 0;
+    }
+}
+
 /* The handle fd that /proc calls a dmabuf, else the first one. */
 static int find_dmabuf_fd(const native_handle *nh)
 {
@@ -217,11 +282,23 @@ static int find_dmabuf_fd(const native_handle *nh)
     return nh->numFds > 0 ? nh->data[0] : -1;
 }
 
-/* ---- buffers from other processes (clients.c) ---- */
+/* ---- buffers from other processes (card.c) ---- */
 
 int ahb_send(const AHardwareBuffer *b, int sock)
 {
     return ahb_load() && ahb.send_handle ? ahb.send_handle(b, sock) : -1;
+}
+
+int bo_send(const struct cham_bo *bo, int sock)
+{
+#ifdef CHAM_HOST_TEST
+    /* Also the test driver's buffers (gbm surfaces), which aren't ours. */
+    ahb_desc d = {.width = bo->width, .height = bo->height, .layers = 1, .format = ahb_format(bo->format),
+                  .stride = bo->stride / 4};
+    return host_send_desc(&d, bo->dmabuf_fd, sock);
+#else
+    return ahb_send(bo->ahb, sock);
+#endif
 }
 
 AHardwareBuffer *ahb_recv(int sock)
@@ -238,6 +315,18 @@ void ahb_release(AHardwareBuffer *b)
         ahb.release(b);
 }
 
+void ahb_acquire(AHardwareBuffer *b)
+{
+    ahb.acquire(b);
+}
+
+uint32_t ahb_drm_format(const AHardwareBuffer *b)
+{
+    ahb_desc d;
+    ahb.describe(b, &d);
+    return drm_format(d.format);
+}
+
 int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
 {
     const native_handle *nh = ahb.get_native_handle(b);
@@ -248,6 +337,314 @@ int ahb_dmabuf_identity(const AHardwareBuffer *b, dev_t *dev, ino_t *ino)
     *dev = st.st_dev;
     *ino = st.st_ino;
     return 0;
+}
+
+static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t format);
+
+/* ---- buffers whose dmabuf outlives them ----
+ * As in the kernel, a dmabuf someone still holds keeps its buffer: KWin 6.8
+ * destroys each gbm_bo right after taking its fd, then imports the fd. The
+ * AHardwareBuffer can't be rebuilt from a dmabuf, so a buffer stays (refs 0)
+ * while its dmabuf has more references than the buffer holds itself: the
+ * kernel's own count (fdinfo "count:", every process, mapping and driver
+ * import), or where the kernel shows none, the fds of this process. That is
+ * chameleon-kernel's job for every buffer it knows, as the kernel's for its
+ * GEM objects; a process keeps its own buffer so only while chameleon-kernel
+ * doesn't have it (two keepers would keep each other alive). */
+
+/* The kernel's reference count of the dmabuf `fd` is, or -1. */
+static int fdinfo_count(int fd)
+{
+    char path[64], buf[512];
+    snprintf(path, sizeof path, "/proc/self/fdinfo/%d", fd);
+    int f = open(path, O_RDONLY | O_CLOEXEC);
+    if (f < 0)
+        return -1;
+    ssize_t n = read(f, buf, sizeof buf - 1);
+    close(f);
+    if (n <= 0)
+        return -1;
+    buf[n] = 0;
+    const char *c = strstr(buf, "\ncount:");
+    return c ? atoi(c + 7) : -1;
+}
+
+/* This process's fds of the file (dev, ino). */
+static int fds_of(dev_t dev, ino_t ino)
+{
+    int dfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    DIR *d = dfd >= 0 ? fdopendir(dfd) : NULL;
+    if (!d) {
+        if (dfd >= 0)
+            close(dfd);
+        return -1;
+    }
+    int n = 0;
+    struct dirent *e;
+    struct stat st;
+    while ((e = readdir(d))) {
+        int fd = atoi(e->d_name);
+        if (e->d_name[0] != '.' && fd != dfd && real_fstat(fd, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* The fds of the file (dev, ino) in every process that can be looked into.
+ * A memfd has no count in fdinfo, so this stands in for the kernel's count
+ * of a dmabuf: for the test build's buffers, and for a dumb buffer's
+ * memory that PRIME handed out. */
+static int fds_everywhere(dev_t dev, ino_t ino)
+{
+    DIR *procs = opendir("/proc");
+    int n = 0;
+    for (struct dirent *p; procs && (p = readdir(procs));) {
+        char dir[300];
+        if (p->d_name[0] < '1' || p->d_name[0] > '9')
+            continue;
+        snprintf(dir, sizeof dir, "/proc/%s/fd", p->d_name);
+        DIR *fds = opendir(dir);
+        for (struct dirent *e; fds && (e = readdir(fds));) {
+            char path[600];
+            struct stat st;
+            snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
+            if (e->d_name[0] != '.' && stat(path, &st) == 0 && st.st_dev == dev && st.st_ino == ino)
+                n++;
+        }
+        if (fds)
+            closedir(fds);
+    }
+    if (procs)
+        closedir(procs);
+    return n;
+}
+
+static int dmabuf_refs(const struct cham_bo *bo)
+{
+#ifdef CHAM_HOST_TEST
+    return fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino);
+#endif
+    int n = fdinfo_count(bo->dmabuf_fd);
+    static int logged;
+    if (!logged++)
+        cham_log("buffers: a handed-out dmabuf keeps its buffer while %s", n >= 0 ? "the kernel counts other references"
+                                                                         : "fds of this process refer to it");
+    return n >= 0 ? n : fds_of(bo->dmabuf_dev, bo->dmabuf_ino);
+}
+
+/* The references the buffer holds itself: our dup and the handle's fds of
+ * the same dmabuf. Counted, not measured: right after allocating, Android's
+ * allocator may still hold one more for a moment. */
+static int own_refs(const struct cham_bo *bo)
+{
+    const native_handle *nh = ahb.get_native_handle(bo->ahb);
+    int n = 1;
+    struct stat st;
+    for (int i = 0; nh && i < nh->numFds; i++)
+        if (real_fstat(nh->data[i], &st) == 0 && st.st_dev == bo->dmabuf_dev && st.st_ino == bo->dmabuf_ino)
+            n++;
+    return n;
+}
+
+static void bo_free_locked(struct cham_bo *bo)
+{
+    link_forget_bo_locked(bo);
+    if (bo->dumb) { /* plain memory: no AHardwareBuffer */
+        for (struct cham_bo **p = &g_dumbs; *p; p = &(*p)->next) {
+            if (*p == bo) {
+                *p = bo->next;
+                break;
+            }
+        }
+        munmap(bo->dumb->mem, bo->dumb->size);
+        close(bo->dumb->fd);
+        free(bo->dumb);
+        free(bo);
+        return;
+    }
+    if (bo->release_fence >= 0)
+        close(bo->release_fence);
+    for (int i = 0; i < 2; i++)
+        if (bo->fence[i] >= 0)
+            close(bo->fence[i]);
+    close(bo->dmabuf_fd);
+    if (bo->release)
+        bo->release(bo->ahb);
+    else
+        ahb.release(bo->ahb);
+    free(bo);
+}
+
+/* Frees the buffers nobody holds any more. */
+static void reap_locked(void)
+{
+    for (struct cham_bo **p = &g_bos; *p;) {
+        struct cham_bo *bo = *p;
+        if (bo->refs == 0 && dmabuf_refs(bo) <= bo->base_refs) {
+            *p = bo->next;
+            bo_free_locked(bo);
+        } else {
+            p = &bo->next;
+        }
+    }
+}
+
+dev_t g_dmabuf_dev;
+
+struct cham_bo *ahb_import(AHardwareBuffer *b, uint32_t format)
+{
+    dev_t dev;
+    ino_t ino;
+    if (!cham_format_supported(format) || ahb_dmabuf_identity(b, &dev, &ino) != 0) {
+        ahb.release(b);
+        return NULL;
+    }
+    pthread_mutex_lock(&g_lock);
+    reap_locked();
+    for (struct cham_bo *bo = g_bos; bo; bo = bo->next) {
+        if (bo->dmabuf_dev == dev && bo->dmabuf_ino == ino) {
+            bo_ref_locked(bo);
+            pthread_mutex_unlock(&g_lock);
+            ahb.release(b); /* already known */
+            return bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    ahb_desc d;
+    ahb.describe(b, &d);
+    struct cham_bo *bo = bo_new(b, ahb.get_native_handle(b), d.width, d.height, d.stride * 4, format);
+    if (!bo) {
+        ahb.release(b);
+        return NULL;
+    }
+    /* Kept while its dmabuf is held anywhere (another process, a driver),
+     * not only while handles hold it: the kernel's GEM object lifetime. */
+    bo->base_refs = own_refs(bo);
+    __atomic_store_n(&bo->exported, 1, __ATOMIC_RELAXED);
+    return bo;
+}
+
+struct cham_bo *ahb_bo_for_dmabuf(dev_t dev, ino_t ino)
+{
+    struct cham_bo *found = NULL;
+    pthread_mutex_lock(&g_lock);
+    reap_locked();
+    for (struct cham_bo *bo = g_bos; bo && !found; bo = bo->next) {
+        if (bo->dmabuf_dev == dev && bo->dmabuf_ino == ino) {
+            bo_ref_locked(bo);
+            found = bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return found;
+}
+
+struct cham_bo *ahb_bo_for_fd(int fd)
+{
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0)
+        return NULL;
+    return ahb_bo_for_dmabuf(st.st_dev, st.st_ino);
+}
+
+int ahb_is_dmabuf(int fd)
+{
+    char path[64], link[128];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", fd);
+    ssize_t n = readlink(path, link, sizeof link - 1);
+    if (n <= 0)
+        return 0;
+    link[n] = 0;
+    /* The kernel's names for a dmabuf: its own filesystem's (5.3+, and
+     * backported), or the anonymous inode's before. */
+    return strncmp(link, "/dmabuf:", 8) == 0 || strcmp(link, "anon_inode:dmabuf") == 0;
+}
+
+/* A bo for `buffer` (whose reference it takes over on success). */
+static struct cham_bo *bo_new(AHardwareBuffer *buffer, const native_handle *nh, uint32_t width, uint32_t height,
+                              uint32_t stride, uint32_t format)
+{
+    int src = nh ? find_dmabuf_fd(nh) : -1;
+    int fd = src >= 0 ? fcntl(src, F_DUPFD_CLOEXEC, 0) : -1;
+    struct stat st;
+    if (fd < 0 || real_fstat(fd, &st) != 0) {
+        cham_log("gralloc handle has no usable dmabuf fd");
+        if (fd >= 0)
+            close(fd);
+        errno = ENODEV;
+        return NULL;
+    }
+
+    struct cham_bo *bo = calloc(1, sizeof *bo);
+    bo->width = width;
+    bo->height = height;
+    bo->format = format;
+    bo->stride = stride;
+    bo->ahb = buffer;
+    bo->dmabuf_fd = fd;
+    bo->dmabuf_dev = st.st_dev;
+    bo->dmabuf_ino = st.st_ino;
+    __atomic_store_n(&g_dmabuf_dev, st.st_dev, __ATOMIC_RELAXED);
+    bo->refs = 1;
+    bo->slot = -1;
+    bo->release_fence = -1;
+    bo->fence[0] = bo->fence[1] = -1;
+
+    pthread_mutex_lock(&g_lock);
+    bo->next = g_bos;
+    g_bos = bo;
+    pthread_mutex_unlock(&g_lock);
+    return bo;
+}
+
+struct cham_bo *cham_bo_wrap(AHardwareBuffer *ahb, const void *native_handle, uint32_t width, uint32_t height,
+                             uint32_t stride, uint32_t format, void (*release)(AHardwareBuffer *))
+{
+    struct cham_bo *bo = bo_new(ahb, native_handle, width, height, stride, format);
+    if (bo)
+        bo->release = release;
+    return bo;
+}
+
+#define MAX_GBM_WINDOWS 16
+static struct {
+    void *surface, *window;
+    uint32_t format;
+} g_gbm_windows[MAX_GBM_WINDOWS]; /* under g_lock */
+
+void cham_gbm_window_set(void *surface, void *window, uint32_t format)
+{
+    pthread_mutex_lock(&g_lock);
+    int i = 0;
+    while (i < MAX_GBM_WINDOWS && g_gbm_windows[i].surface != surface)
+        i++;
+    if (i == MAX_GBM_WINDOWS && window) { /* new: a free entry */
+        i = 0;
+        while (i < MAX_GBM_WINDOWS && g_gbm_windows[i].surface)
+            i++;
+    }
+    if (i < MAX_GBM_WINDOWS) {
+        g_gbm_windows[i].surface = window ? surface : NULL;
+        g_gbm_windows[i].window = window;
+        g_gbm_windows[i].format = format;
+    }
+    pthread_mutex_unlock(&g_lock);
+}
+
+void *cham_gbm_window_get(void *surface, uint32_t *format)
+{
+    void *window = NULL;
+    pthread_mutex_lock(&g_lock);
+    for (int i = 0; surface && i < MAX_GBM_WINDOWS; i++) {
+        if (g_gbm_windows[i].surface == surface) {
+            window = g_gbm_windows[i].window;
+            *format = g_gbm_windows[i].format;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return window;
 }
 
 struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format, uint32_t usage)
@@ -262,6 +659,9 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     if (usage & (CHAM_USE_LINEAR | CHAM_USE_WRITE | CHAM_USE_CURSOR))
         desc.usage |= AHB_USAGE_CPU_READ_OFTEN | AHB_USAGE_CPU_WRITE_OFTEN;
 
+    pthread_mutex_lock(&g_lock);
+    reap_locked();
+    pthread_mutex_unlock(&g_lock);
     AHardwareBuffer *buffer = NULL;
     if (ahb.allocate(&desc, &buffer) != 0 || !buffer) {
         cham_log("AHardwareBuffer_allocate %ux%u format 0x%x failed", width, height, format);
@@ -270,38 +670,76 @@ struct cham_bo *cham_bo_create(uint32_t width, uint32_t height, uint32_t format,
     }
     ahb.describe(buffer, &desc);
 
-    const native_handle *nh = ahb.get_native_handle(buffer);
-    int src = nh ? find_dmabuf_fd(nh) : -1;
-    int fd = src >= 0 ? fcntl(src, F_DUPFD_CLOEXEC, 0) : -1;
+    struct cham_bo *bo = bo_new(buffer, ahb.get_native_handle(buffer), width, height, desc.stride * 4, format);
+    if (!bo)
+        ahb.release(buffer);
+    else
+        bo->base_refs = own_refs(bo);
+    return bo;
+}
+
+/* Frees the handed-out dumb buffers whose file nobody else has open now. */
+static void reap_dumbs_locked(void)
+{
+    for (struct cham_bo *bo = g_dumbs, *next; bo; bo = next) {
+        next = bo->next;
+        if (bo->refs == 0 && fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino) <= 1)
+            bo_free_locked(bo);
+    }
+}
+
+struct cham_bo *bo_new_dumb(uint64_t size)
+{
+    reap_dumbs_locked();
+    static uint64_t next_offset = 0x100000000ull; /* as the kernel's: past any file offset */
+    struct cham_bo *bo = calloc(1, sizeof *bo);
+    struct cham_dumb *d = calloc(1, sizeof *d);
+    int fd = (int)syscall(__NR_memfd_create, "chameleon-dumb", 1u /* MFD_CLOEXEC */);
     struct stat st;
-    if (fd < 0 || real_fstat(fd, &st) != 0) {
-        cham_log("gralloc handle has no usable dmabuf fd");
+    void *mem = fd >= 0 && ftruncate(fd, (off_t)size) == 0 && real_fstat(fd, &st) == 0
+                    ? mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (!bo || !d || mem == MAP_FAILED) {
+        if (mem != MAP_FAILED)
+            munmap(mem, size);
         if (fd >= 0)
             close(fd);
-        ahb.release(buffer);
-        errno = ENODEV;
+        free(d);
+        free(bo);
         return NULL;
     }
-
-    struct cham_bo *bo = calloc(1, sizeof *bo);
-    bo->width = width;
-    bo->height = height;
-    bo->format = format;
-    bo->stride = desc.stride * 4;
-    bo->ahb = buffer;
-    bo->dmabuf_fd = fd;
-    bo->dmabuf_dev = st.st_dev;
-    bo->dmabuf_ino = st.st_ino;
+    d->offset = __atomic_fetch_add(&next_offset, size, __ATOMIC_RELAXED);
+    d->fd = fd;
+    d->mem = mem;
+    d->size = size;
+    bo->dumb = d;
     bo->refs = 1;
     bo->slot = -1;
     bo->release_fence = -1;
-
-    pthread_mutex_lock(&g_lock);
-    bo->handle = g_next_handle++;
-    bo->next = g_bos;
-    g_bos = bo;
-    pthread_mutex_unlock(&g_lock);
+    bo->fence[0] = bo->fence[1] = -1;
+    bo->dmabuf_fd = -1;
+    bo->dmabuf_dev = st.st_dev; /* what PRIME hands out of it is this file */
+    bo->dmabuf_ino = st.st_ino;
+    bo->next = g_dumbs;
+    g_dumbs = bo;
     return bo;
+}
+
+struct cham_bo *bo_dumb_for_fd(int fd)
+{
+    struct stat st;
+    struct cham_bo *found = NULL;
+    if (real_fstat(fd, &st) != 0)
+        return NULL;
+    pthread_mutex_lock(&g_lock);
+    reap_dumbs_locked();
+    for (struct cham_bo *bo = g_dumbs; bo && !found; bo = bo->next) {
+        if (bo->dmabuf_dev == st.st_dev && bo->dmabuf_ino == st.st_ino) {
+            bo_ref_locked(bo);
+            found = bo;
+        }
+    }
+    pthread_mutex_unlock(&g_lock);
+    return found;
 }
 
 void bo_ref_locked(struct cham_bo *bo)
@@ -313,18 +751,24 @@ void bo_unref_locked(struct cham_bo *bo)
 {
     if (--bo->refs > 0)
         return;
+    /* No handle, framebuffer or plane shows it any more: the app lets go of
+     * it, as a display engine would, so its reference doesn't keep it. */
     link_forget_bo_locked(bo);
+    /* A dumb buffer PRIME handed out lives while its file is open anywhere
+     * besides here, as the kernel's object does: Mesa's software driver
+     * exports one, closes the handle and imports the file again later. */
+    if (bo->dumb && bo->exported && fds_everywhere(bo->dmabuf_dev, bo->dmabuf_ino) > 1)
+        return; /* freed by reap_dumbs_locked() */
+    if (__atomic_load_n(&bo->exported, __ATOMIC_RELAXED) && !bo->in_service && bo->base_refs > 0 &&
+        dmabuf_refs(bo) > bo->base_refs)
+        return; /* its dmabuf is still held: kept, freed by reap_locked() */
     for (struct cham_bo **p = &g_bos; *p; p = &(*p)->next) {
         if (*p == bo) {
             *p = bo->next;
             break;
         }
     }
-    if (bo->release_fence >= 0)
-        close(bo->release_fence);
-    close(bo->dmabuf_fd);
-    ahb.release(bo->ahb);
-    free(bo);
+    bo_free_locked(bo);
 }
 
 void cham_bo_unref(struct cham_bo *bo)
@@ -334,14 +778,6 @@ void cham_bo_unref(struct cham_bo *bo)
     pthread_mutex_lock(&g_lock);
     bo_unref_locked(bo);
     pthread_mutex_unlock(&g_lock);
-}
-
-struct cham_bo *bo_by_handle_locked(uint32_t handle)
-{
-    for (struct cham_bo *bo = g_bos; bo; bo = bo->next)
-        if (bo->handle == handle)
-            return bo;
-    return NULL;
 }
 
 struct cham_bo *cham_bo_from_fd(int fd)
@@ -363,6 +799,7 @@ struct cham_bo *cham_bo_from_fd(int fd)
 
 int cham_bo_export_fd(struct cham_bo *bo)
 {
+    __atomic_store_n(&bo->exported, 1, __ATOMIC_RELAXED); /* callers may hold g_lock (PRIME) */
     return fcntl(bo->dmabuf_fd, F_DUPFD_CLOEXEC, 0);
 }
 
@@ -385,14 +822,14 @@ void cham_bo_unlock(struct cham_bo *bo)
         ahb.unlock(bo->ahb, NULL);
 }
 
-void bo_wait_release_fences_locked(void)
+int bo_take_release_fences_locked(int *fences, int max)
 {
-    for (struct cham_bo *bo = g_bos; bo; bo = bo->next) {
-        if (bo->release_fence < 0)
-            continue;
-        struct pollfd pfd = {bo->release_fence, POLLIN, 0};
-        poll(&pfd, 1, 100);
-        close(bo->release_fence);
-        bo->release_fence = -1;
+    int n = 0;
+    for (struct cham_bo *bo = g_bos; bo && n < max; bo = bo->next) {
+        if (bo->release_fence >= 0) {
+            fences[n++] = bo->release_fence;
+            bo->release_fence = -1;
+        }
     }
+    return n;
 }

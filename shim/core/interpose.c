@@ -1,41 +1,59 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * libc / libdrm entry points libchameleon.so overrides when LD_PRELOADed
- * into kwin_wayland.
+ * libc entry points libchameleon.so overrides, LD_PRELOADed into every
+ * program of a Chameleon session (shim/chameleon), as a device node is
+ * there for every program.
  *
- * Opening the fake device path ($CHAMELEON_DRM_PATH, what KWIN_DRM_DEVICES
- * points at) returns the read end of a pipe: KWin polls and read()s DRM
- * events from it, and every DRM ioctl on it is answered by kms.c. stat() and
- * fstat() make it look like a DRM character device, and libdrm's
- * drmGetDevice*() describe it. bind() is watched to learn KWin's Wayland
- * socket (input.c), and the constructor hands KWin's children their
- * original LD_PRELOAD / LD_LIBRARY_PATH. (crash.c overrides sigaction.)
+ * The card's nodes (/dev/dri/card0, or $CHAMELEON_DRM_PATH, and the render
+ * node /dev/dri/renderD128; libchameleon_udev.so lists them as drm devices)
+ * are served by chameleon-kernel (card.c), as device nodes by the kernel:
+ * opening one
+ * returns the read end of a pipe the program polls and read()s DRM events
+ * from, and a DRM ioctl on it is sent there as the system call's
+ * arguments (the service reads and writes our memory itself). Each open is
+ * one file with its own state (DRM master, client caps, GEM handles),
+ * shared by its dups and by other processes it is passed to, and released
+ * once no copy of the pipe's read end is left. stat() and fstat() make it
+ * look like a DRM character device; libdrm learns the rest from the card's
+ * sysfs entries (shim/udev/sysfs.c). A pipe is only taken for a card file
+ * when it holds one page, as card files' pipes do, so ordinary pipes cost
+ * nothing. bind() is watched to tell chameleon-kernel the compositor's
+ * Wayland socket, and a dmabuf import (EGL) gets any buffer of the session
+ * from there, another process's gbm buffer or a Wayland app's
+ * (cham_buffer_ahb_acquire). (crash.c overrides
+ * sigaction.)
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <stddef.h>
+#include <stdio.h>
+#include <sys/prctl.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <linux/dma-buf.h>
+#include <time.h>
 #include <xf86drm.h>
 
+#include "../../common/cham_io.h"
+#include "../../common/chameleon_drm.h"
 #include "internal.h"
 
-/* Minor < 64 is a primary node; real Android cards are 226:0. */
-static const dev_t fake_rdev = (dev_t)((226u << 8) | 60u);
-
-/* The overrides of libc/libdrm symbols below must be exported. */
+/* The overrides of libc symbols below must be exported. */
 #pragma GCC visibility push(default)
 
-static pthread_mutex_t g_fd_lock = PTHREAD_MUTEX_INITIALIZER;
-static struct fake_fd *g_fake_fds;
 
 #define REAL(name) next_##name
 #define DECLARE_REAL(ret, name, ...)                                   \
@@ -55,20 +73,41 @@ DECLARE_REAL(int, lstat, const char *, struct stat *)
 DECLARE_REAL(int, fstatat, int, const char *, struct stat *, int)
 DECLARE_REAL(int, fstat, int, struct stat *)
 DECLARE_REAL(int, ioctl, int, int, ...)
-DECLARE_REAL(int, drmGetDevice2, int, uint32_t, drmDevicePtr *)
-DECLARE_REAL(int, drmGetDevice, int, drmDevicePtr *)
-DECLARE_REAL(char *, drmGetDeviceNameFromFd2, int)
 DECLARE_REAL(int, bind, int, const struct sockaddr *, socklen_t)
+
+/* All looked up when the library loads, not on first use: dlsym takes the
+ * dynamic linker's lock, and a forked child (Firefox launching a content
+ * process) may have inherited it held by a thread that no longer exists
+ * there. */
+__attribute__((constructor)) static void resolve_all(void)
+{
+    resolve_open();
+    resolve_openat();
+    resolve___open_2();
+    resolve___openat_2();
+    resolve_stat();
+    resolve_lstat();
+    resolve_fstatat();
+    resolve_fstat();
+    resolve_ioctl();
+    resolve_bind();
+}
 
 static const char *fake_path(void)
 {
     const char *p = getenv("CHAMELEON_DRM_PATH");
-    return p && *p ? p : "/data/data/com.termux/files/usr/tmp/chameleon-card0";
+    return p && *p ? p : CHAM_DRM_PATH;
 }
 
+/* 1 for the primary node, as udev names it or libdrm does from sysfs; 2
+ * for the render node; 0 for any other path. */
 static int is_fake_path(const char *path)
 {
-    return path && strcmp(path, fake_path()) == 0;
+    if (!path)
+        return 0;
+    if (strcmp(path, fake_path()) == 0 || strcmp(path, CHAM_DRM_PATH) == 0)
+        return 1;
+    return strcmp(path, CHAM_RENDER_PATH) == 0 ? 2 : 0;
 }
 
 __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
@@ -77,55 +116,353 @@ __attribute__((visibility("hidden"))) int real_fstat(int fd, struct stat *st)
     return REAL(fstat)(fd, st);
 }
 
-static struct fake_fd *fake_fd_lookup(int fd)
+/* ---- chameleon-kernel ---- */
+
+/* One connection per process, one call at a time (the service learns the
+ * caller from it, so a forked child makes its own). */
+static pthread_mutex_t g_conn_lock = PTHREAD_MUTEX_INITIALIZER;
+static int g_conn = -1;
+static pid_t g_conn_pid;
+
+/* Pipes known to be card files here, and pipes known not to be: pipe inode
+ * numbers aren't reused, so neither answer goes stale. Under g_conn_lock. */
+#define KNOWN 64
+static struct known {
+    dev_t dev;
+    ino_t ino;
+    uint32_t id; /* 0: not the card */
+    int render;
+} g_known[KNOWN];
+static unsigned g_known_next;
+
+static void lock_conn(void) { pthread_mutex_lock(&g_conn_lock); }
+static void unlock_conn(void) { pthread_mutex_unlock(&g_conn_lock); }
+
+__attribute__((constructor)) static void fork_safety(void)
 {
-    struct stat st;
-    if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode))
-        return NULL;
-    pthread_mutex_lock(&g_fd_lock);
-    struct fake_fd *f = g_fake_fds;
-    while (f && !(f->dev == st.st_dev && f->ino == st.st_ino))
-        f = f->next;
-    pthread_mutex_unlock(&g_fd_lock);
-    return f;
+    /* Nobody may hold the connection across fork: the child would inherit it locked. */
+    pthread_atfork(lock_conn, unlock_conn, unlock_conn);
 }
 
-static void fake_stat(struct stat *st)
+static void disconnect_locked(void)
+{
+    if (g_conn >= 0)
+        close(g_conn);
+    g_conn = -1;
+    memset(g_known, 0, sizeof g_known); /* a new service has new files */
+}
+
+static int connect_locked(void)
+{
+    if (g_conn >= 0 && g_conn_pid == getpid())
+        return g_conn;
+    if (g_conn >= 0) { /* the parent's, inherited: never speak for it */
+        close(g_conn);
+        g_conn = -1;
+    }
+    const char *dir = getenv("XDG_RUNTIME_DIR");
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    if (!dir || snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", dir, CHAM_CARD_SOCKET_NAME) >=
+                    (int)sizeof addr.sun_path)
+        return -1;
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
+    if (s >= 0 && connect(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        close(s);
+        s = -1;
+    }
+    /* The service copies to and from our memory as the kernel would; let it
+     * where Yama lets only ancestors do that (ptrace_scope 1). */
+    struct ucred cred;
+    socklen_t len = sizeof cred;
+    if (s >= 0 && getsockopt(s, SOL_SOCKET, SO_PEERCRED, &cred, &len) == 0)
+        prctl(PR_SET_PTRACER, (unsigned long)cred.pid, 0, 0, 0);
+    g_conn = s;
+    g_conn_pid = getpid();
+    return s;
+}
+
+/* The service answered here before and no longer does: it was stopped or
+ * killed (by Android, in the background) or crashed. Said once per program,
+ * as nothing else tells why the card went quiet. */
+static int g_served;
+
+static void service_lost_locked(void)
+{
+    static int said;
+    disconnect_locked();
+    if (!g_served || said++)
+        return;
+#ifdef __ANDROID__
+    const char *prog = getprogname();
+#else
+    const char *prog = program_invocation_short_name;
+#endif
+    cham_log("%s: chameleon-kernel is gone (stopped, killed or crashed): the card no longer works here", prog);
+}
+
+/* Sends a request (with fd, or followed by a bo's AHardwareBuffer) and answers
+ * the service's questions until its CARD_DONE; returns that result, and its
+ * fd in *fd_out. -ENODEV when there is no service. */
+static int64_t call_locked(struct cham_msg req, int fd, const struct cham_bo *bo, int *fd_out)
+{
+    if (fd_out)
+        *fd_out = -1;
+    int s = connect_locked();
+    if (s < 0 || cham_send(s, &req, fd) != 0 || (bo && bo_send(bo, s) != 0)) {
+        service_lost_locked();
+        return -ENODEV;
+    }
+    for (;;) {
+        struct cham_msg m;
+        int got = -1;
+        if (cham_recv(s, &m, &got) != 1) {
+            service_lost_locked();
+            return -ENODEV;
+        }
+        if (m.type == CARD_DONE) {
+            g_served = 1;
+            if (fd_out)
+                *fd_out = got;
+            else if (got >= 0)
+                close(got);
+            return (int64_t)m.a;
+        }
+        struct cham_msg reply = {CARD_FD, 0, 0, 0};
+        int send_fd = -1;
+        if (m.type == CARD_GET_FD) { /* fget: a copy of our fd */
+            send_fd = (int)(int64_t)m.a;
+            if (send_fd < 0 || fcntl(send_fd, F_GETFD) < 0)
+                reply.a = (uint64_t)(int64_t)-EBADF, send_fd = -1;
+        } else if (m.type == CARD_PUT_FD) { /* fd_install: it arrived close-on-exec */
+            if (got >= 0 && !m.a)
+                fcntl(got, F_SETFD, 0);
+            reply.a = got >= 0 ? (uint64_t)got : (uint64_t)(int64_t)-EMFILE;
+            got = -1; /* the program's now */
+        }
+        if (got >= 0)
+            close(got);
+        if (cham_send(s, &reply, send_fd) != 0) {
+            service_lost_locked();
+            return -ENODEV;
+        }
+    }
+}
+
+static void remember_locked(const struct stat *st, int64_t file)
+{
+    g_known[g_known_next++ % KNOWN] =
+        (struct known){st->st_dev, st->st_ino, file > 0 ? CARD_FILE_ID(file) : 0, file > 0 && CARD_FILE_RENDER(file)};
+}
+
+/* The card file `fd` is (its id), or 0; *render tells whether it is the
+ * render node's. Only a one-page pipe can be one. */
+static uint32_t card_file(int fd, int *render)
+{
+    struct stat st;
+    *render = 0;
+    if (fd < 0 || real_fstat(fd, &st) != 0 || !S_ISFIFO(st.st_mode) ||
+        fcntl(fd, F_GETPIPE_SZ) != CHAM_CARD_PIPE_SIZE)
+        return 0;
+    lock_conn();
+    for (int i = 0; i < KNOWN; i++) {
+        if (g_known[i].ino == st.st_ino && g_known[i].dev == st.st_dev) { /* st_ino is never 0 */
+            uint32_t id = g_known[i].id;
+            *render = g_known[i].render;
+            unlock_conn();
+            return id;
+        }
+    }
+    /* A copy we haven't seen here (inherited, passed): the service knows. */
+    struct cham_msg req = {CARD_ATTACH, 0, 0, 0};
+    int64_t ret = call_locked(req, fd, NULL, NULL);
+    uint32_t id = ret > 0 ? CARD_FILE_ID(ret) : 0;
+    *render = ret > 0 && CARD_FILE_RENDER(ret);
+    if (ret != -ENODEV)
+        remember_locked(&st, ret);
+    unlock_conn();
+    return id;
+}
+
+/* What stat() says of a node: a DRM character device, the render node
+ * open to every user as distributions make it. */
+static void fake_stat(struct stat *st, int render)
 {
     memset(st, 0, sizeof *st);
-    st->st_mode = S_IFCHR | 0660;
-    st->st_rdev = fake_rdev;
+    st->st_mode = S_IFCHR | (render ? 0666 : 0660);
+    st->st_rdev = makedev(226, render ? CHAM_RENDER_MINOR : CHAM_DRM_MINOR);
     st->st_nlink = 1;
     st->st_uid = getuid();
     st->st_gid = getgid();
 }
 
-static int fake_open(void)
+static int fake_open(int node)
 {
-    kms_init_once();
-    int p[2];
-    if (pipe2(p, O_CLOEXEC | O_NONBLOCK) != 0)
-        return -1;
+    struct cham_msg req = {CARD_OPEN, 0, node == 2, 0};
+    int fd;
     struct stat st;
-    real_fstat(p[0], &st);
-    struct fake_fd *f = calloc(1, sizeof *f);
-    f->dev = st.st_dev;
-    f->ino = st.st_ino;
-    f->event_wfd = p[1];
-    pthread_mutex_lock(&g_fd_lock);
-    f->next = g_fake_fds;
-    g_fake_fds = f;
-    pthread_mutex_unlock(&g_fd_lock);
-    cham_log("opened fake DRM device %s (fd %d)", fake_path(), p[0]);
-    return p[0];
+    lock_conn();
+    int64_t ret = call_locked(req, -1, NULL, &fd);
+    if (ret > 0 && fd >= 0 && real_fstat(fd, &st) == 0)
+        remember_locked(&st, ret);
+    unlock_conn();
+    if (ret <= 0 || fd < 0) {
+        if (fd >= 0)
+            close(fd);
+        cham_log("cannot open the %s: %s", node == 2 ? "render node" : "card",
+                 ret == -ENODEV ? "chameleon-kernel isn't running" : strerror((int)-ret));
+        errno = ret < 0 ? (int)-ret : ENODEV;
+        return -1;
+    }
+    return fd;
+}
+
+/* ---- our gbm's buffers (cham_shim.h) ---- */
+
+uint32_t cham_bo_handle_open(struct cham_bo *bo, int fd)
+{
+    int render;
+    uint32_t id = card_file(fd, &render);
+    if (!id)
+        return 0;
+    struct cham_msg req = {CARD_IMPORT, id, bo->format, 0};
+    lock_conn();
+    int64_t ret = call_locked(req, -1, bo, NULL);
+    unlock_conn();
+    if (ret > 0)
+        __atomic_store_n(&bo->in_service, 1, __ATOMIC_RELAXED);
+    return ret > 0 ? (uint32_t)ret : 0;
+}
+
+/* ---- the session's buffers (cham_shim.h) ---- */
+
+AHardwareBuffer *cham_buffer_ahb_acquire(int dmabuf)
+{
+    struct cham_msg req = {CARD_BUFFER_AHB, 0, 0, 0};
+    AHardwareBuffer *b = NULL;
+    lock_conn();
+    if (call_locked(req, dmabuf, NULL, NULL) == 1 && !(b = ahb_recv(g_conn)))
+        disconnect_locked(); /* out of step */
+    unlock_conn();
+    struct stat st;
+    if (b && real_fstat(dmabuf, &st) == 0)
+        __atomic_store_n(&g_dmabuf_dev, st.st_dev, __ATOMIC_RELAXED);
+    return b;
+}
+
+void cham_buffer_ahb_release(AHardwareBuffer *b)
+{
+    ahb_release(b);
+}
+
+struct cham_bo *cham_bo_import(int dmabuf)
+{
+    struct cham_bo *bo = ahb_bo_for_fd(dmabuf); /* one of this process's */
+    if (bo)
+        return bo;
+    AHardwareBuffer *b = cham_buffer_ahb_acquire(dmabuf);
+    if (!b) {
+        errno = ahb_is_dmabuf(dmabuf) ? ENODEV : EINVAL; /* as PRIME_FD_TO_HANDLE */
+        return NULL;
+    }
+    bo = ahb_import(b, ahb_drm_format(b)); /* takes over b's reference */
+    if (!bo)
+        errno = EINVAL; /* a format gbm doesn't make */
+    return bo;
+}
+
+int ioctl(int fd, int request, ...); /* ours, below */
+
+/* ---- a commit's fence travels with it ----
+ * An atomic commit's IN_FENCE_FD is an fd of ours the service would have to
+ * ask for (the kernel's fget), a second round trip on every commit. So the
+ * one fence a commit names goes along with the request instead. Which
+ * property is IN_FENCE_FD is learnt the standard way, by its name, once per
+ * id. The commit is read with the same checks the service applies: a bad
+ * pointer only means nothing is sent ahead, and the service asks as before. */
+
+static pthread_mutex_t g_prop_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct {
+    uint32_t id;
+    int fence;
+} g_props[64];
+static int g_nprops;
+
+static int is_fence_prop(int fd, uint32_t id)
+{
+    pthread_mutex_lock(&g_prop_lock);
+    for (int i = 0; i < g_nprops; i++) {
+        if (g_props[i].id == id) {
+            int fence = g_props[i].fence;
+            pthread_mutex_unlock(&g_prop_lock);
+            return fence;
+        }
+    }
+    pthread_mutex_unlock(&g_prop_lock);
+    struct drm_mode_get_property p = {.prop_id = id};
+    int fence = ioctl(fd, (int)DRM_IOCTL_MODE_GETPROPERTY, &p) == 0 && strcmp(p.name, "IN_FENCE_FD") == 0;
+    pthread_mutex_lock(&g_prop_lock);
+    if (g_nprops < (int)(sizeof g_props / sizeof g_props[0]))
+        g_props[g_nprops].id = id, g_props[g_nprops++].fence = fence;
+    pthread_mutex_unlock(&g_prop_lock);
+    return fence;
+}
+
+/* Our own memory, read without trusting the pointer (the service would
+ * answer EFAULT for a bad one, so must we not crash on it). */
+static int read_own(void *to, uint64_t from, size_t n)
+{
+    struct iovec local = {to, n}, remote = {(void *)(uintptr_t)from, n};
+    return n == 0 || process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == (ssize_t)n ? 0 : -1;
+}
+
+/* The fds a commit gives as IN_FENCE_FD (one per plane: the primary's and
+ * the cursor's), into found[2]; how many: none for more, or for anything
+ * unreadable (the service then asks, as for any other fd). */
+static int commit_fences(int fd, const void *arg, int found[2])
+{
+    struct drm_mode_atomic a;
+    uint32_t counts[16], props[128];
+    uint64_t values[128];
+    if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a) || a.count_objs > 16 ||
+        read_own(counts, a.count_props_ptr, a.count_objs * sizeof counts[0]))
+        return 0;
+    uint32_t total = 0;
+    for (uint32_t i = 0; i < a.count_objs; i++)
+        total += counts[i] < 128 ? counts[i] : 128;
+    if (total > 128 || read_own(props, a.props_ptr, total * sizeof props[0]) ||
+        read_own(values, a.prop_values_ptr, total * sizeof values[0]))
+        return 0;
+    int n = 0;
+    for (uint32_t k = 0; k < total; k++) {
+        if ((int64_t)values[k] < 0 || values[k] > INT32_MAX || !is_fence_prop(fd, props[k]))
+            continue;
+        if (n == 2 || fcntl((int)values[k], F_GETFD) < 0)
+            return 0;
+        if (n == 0 || found[0] != (int)values[k])
+            found[n++] = (int)values[k];
+    }
+    return n;
+}
+
+void cham_bo_handle_close(int fd, uint32_t handle)
+{
+    struct drm_gem_close c = {.handle = handle};
+    ioctl(fd, (int)DRM_IOCTL_GEM_CLOSE, &c);
+}
+
+/* No app link in this process: buffers here are never shown from here. */
+void link_forget_bo_locked(struct cham_bo *bo)
+{
+    (void)bo;
 }
 
 /* ---- open ---- */
 
 int open(const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_open();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -141,8 +478,9 @@ int open64(const char *path, int flags, ...) __attribute__((alias("open")));
 
 int openat(int dirfd, const char *path, int flags, ...)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve_openat();
     mode_t mode = 0;
     if (flags & (O_CREAT | O_TMPFILE)) {
@@ -158,16 +496,18 @@ int openat64(int dirfd, const char *path, int flags, ...) __attribute__((alias("
 
 int __open_2(const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___open_2();
     return REAL(__open_2)(path, flags);
 }
 
 int __openat_2(int dirfd, const char *path, int flags)
 {
-    if (is_fake_path(path))
-        return fake_open();
+    int node = is_fake_path(path);
+    if (node)
+        return fake_open(node);
     resolve___openat_2();
     return REAL(__openat_2)(dirfd, path, flags);
 }
@@ -176,8 +516,9 @@ int __openat_2(int dirfd, const char *path, int flags)
 
 int stat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_stat();
@@ -186,8 +527,9 @@ int stat(const char *path, struct stat *st)
 
 int lstat(const char *path, struct stat *st)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_lstat();
@@ -196,8 +538,9 @@ int lstat(const char *path, struct stat *st)
 
 int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 {
-    if (is_fake_path(path)) {
-        fake_stat(st);
+    int node = is_fake_path(path);
+    if (node) {
+        fake_stat(st, node == 2);
         return 0;
     }
     resolve_fstatat();
@@ -206,9 +549,9 @@ int fstatat(int dirfd, const char *path, struct stat *st, int flags)
 
 int fstat(int fd, struct stat *st)
 {
-    int ret = real_fstat(fd, st);
-    if (ret == 0 && S_ISFIFO(st->st_mode) && fake_fd_lookup(fd))
-        fake_stat(st);
+    int ret = real_fstat(fd, st), render;
+    if (ret == 0 && S_ISFIFO(st->st_mode) && card_file(fd, &render))
+        fake_stat(st, render);
     return ret;
 }
 
@@ -233,6 +576,153 @@ int fstat64(int fd, struct stat64 *st)
     return fstat(fd, (struct stat *)st);
 }
 
+/* ---- the fences of the session's buffers (dmabuf.c) ---- */
+
+#define NOT_OURS (-2)
+
+/* Asks the service about the dmabuf `fd`; NOT_OURS unless it can be one of
+ * the session's buffers and the service knows it. A dmabuf's stat() names the
+ * one filesystem all dmabufs are on, so any other file costs an fstat(). */
+static int64_t dmabuf_call(int fd, int op, unsigned arg, int fence, int *out)
+{
+    dev_t dev = __atomic_load_n(&g_dmabuf_dev, __ATOMIC_RELAXED);
+    struct stat st;
+    if (out)
+        *out = -1;
+    if (!dev || fd < 0 || real_fstat(fd, &st) != 0 || st.st_dev != dev)
+        return NOT_OURS;
+    struct cham_msg req = {CARD_DMABUF, (uint32_t)op | arg << 8, (uint64_t)st.st_dev, (uint64_t)st.st_ino};
+    lock_conn();
+    int64_t ret = call_locked(req, fence, NULL, out);
+    unlock_conn();
+    return ret == -ENOENT || ret == -ENODEV ? NOT_OURS : ret;
+}
+
+int cham_dmabuf_write_fence(int dmabuf, int fence)
+{
+    static int always = -1; /* CHAMELEON_SYNC_WAIT=1: writers never leave the wait to the reader */
+    if (always < 0) {
+        const char *e = getenv("CHAMELEON_SYNC_WAIT");
+        always = e && *e == '1';
+    }
+    return dmabuf_call(dmabuf, DMABUF_WRITE, 0, fence, NULL) == 1 && !always;
+}
+
+/* DMA_BUF_IOCTL_EXPORT_SYNC_FILE and _IMPORT_SYNC_FILE on one of the
+ * session's buffers. */
+static int dmabuf_ioctl(int fd, unsigned int request, void *arg)
+{
+    int64_t ret;
+    if (request == DMA_BUF_IOCTL_EXPORT_SYNC_FILE) {
+        struct dma_buf_export_sync_file a;
+        int fence;
+        if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a))
+            return NOT_OURS; /* the kernel says what it says of that */
+        ret = dmabuf_call(fd, DMABUF_EXPORT, a.flags, -1, &fence);
+        if (ret == 0)
+            ((struct dma_buf_export_sync_file *)arg)->fd = fence;
+        else if (fence >= 0)
+            close(fence);
+    } else if (request == DMA_BUF_IOCTL_IMPORT_SYNC_FILE) {
+        struct dma_buf_import_sync_file a;
+        if (read_own(&a, (uint64_t)(uintptr_t)arg, sizeof a))
+            return NOT_OURS;
+        ret = dmabuf_call(fd, DMABUF_IMPORT, a.flags, a.fd >= 0 && fcntl(a.fd, F_GETFD) >= 0 ? a.fd : -1, NULL);
+    } else {
+        return NOT_OURS;
+    }
+    if (ret == NOT_OURS)
+        return NOT_OURS;
+    if (ret < 0) {
+        errno = (int)-ret;
+        return -1;
+    }
+    return 0;
+}
+
+/* poll() itself: nothing looked up, nothing locked (see real_mmap()). */
+static int real_ppoll(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask)
+{
+    struct timespec t; /* the kernel writes the time left into its copy */
+    if (timeout)
+        t = *timeout;
+    return (int)syscall(__NR_ppoll, fds, n, timeout ? &t : NULL, mask, mask ? 8 /* the kernel's sigset_t */ : 0);
+}
+
+static int64_t now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
+/* poll() of one of the session's buffers alone (dma_buf_poll): readable once
+ * nothing is writing it, writable once nothing uses it. `timeout` in ms, <0
+ * for none. The result, or NOT_OURS. A dmabuf polled together with other
+ * files isn't looked at (each file of every poll() would cost an fstat()):
+ * the kernel answers, for Android's fenceless buffers always "ready". */
+static int dmabuf_poll(struct pollfd *p, int64_t timeout)
+{
+    int64_t end = timeout > 0 ? now_ms() + timeout : 0;
+    for (;;) {
+        int fence;
+        int64_t ret = dmabuf_call(p->fd, DMABUF_POLL, (unsigned)p->events & (POLLIN | POLLOUT), -1, &fence);
+        if (ret < 0) {
+            if (fence >= 0)
+                close(fence);
+            return NOT_OURS;
+        }
+        int64_t left = timeout > 0 ? end - now_ms() : timeout;
+        if (ret || fence < 0 || timeout == 0 || (timeout > 0 && left <= 0)) {
+            if (fence >= 0)
+                close(fence);
+            p->revents = (short)ret;
+            return ret ? 1 : 0;
+        }
+        struct pollfd w = {.fd = fence, .events = POLLIN};
+        struct timespec t = {left / 1000, left % 1000 * 1000000};
+        int r = real_ppoll(&w, 1, left < 0 ? NULL : &t, NULL);
+        int saved = errno;
+        close(fence);
+        errno = saved;
+        if (r < 0)
+            return -1;
+        /* signalled or out of time: ask again what is ready */
+    }
+}
+
+int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask)
+{
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized" /* glibc declares the array write-only */
+#endif
+    if (n == 1 && fds && !mask && (fds[0].events & (POLLIN | POLLOUT))) {
+        int ret = dmabuf_poll(fds, timeout ? (int64_t)timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000 : -1);
+        if (ret != NOT_OURS)
+            return ret;
+    }
+    return real_ppoll(fds, n, timeout, mask);
+}
+
+int poll(struct pollfd *fds, nfds_t n, int timeout)
+{
+    struct timespec t = {timeout / 1000, timeout % 1000 * 1000000};
+    return ppoll(fds, n, timeout < 0 ? NULL : &t, NULL);
+}
+
+/* What a fortified program calls. */
+int __poll_chk(struct pollfd *fds, nfds_t n, int timeout, size_t size)
+{
+    (void)size;
+    return poll(fds, n, timeout);
+}
+
+int __ppoll_chk(struct pollfd *fds, nfds_t n, const struct timespec *timeout, const sigset_t *mask, size_t size)
+{
+    (void)size;
+    return ppoll(fds, n, timeout, mask);
+}
+
 /* ---- ioctl ---- */
 
 int ioctl(int fd, int request, ...)
@@ -242,25 +732,122 @@ int ioctl(int fd, int request, ...)
     void *arg = va_arg(ap, void *);
     va_end(ap);
 
+    if (_IOC_TYPE((unsigned int)request) == DMA_BUF_BASE && _IOC_NR((unsigned int)request) >= 2) {
+        int ret = dmabuf_ioctl(fd, (unsigned int)request, arg);
+        if (ret != NOT_OURS)
+            return ret;
+    }
+
+    /* DRM ioctls go to the card; every other ioctl passes untouched, at no
+     * cost: the GPU driver's (many per frame) and FIONREAD, which Qt and
+     * D-Bus call on every socket read. On the card the pipe answers those
+     * (TCGETS: ENOTTY as a DRM device; FIONREAD: a byte count where a DRM
+     * device says ENOTTY, which no program asks a card). */
     if (_IOC_TYPE((unsigned int)request) == DRM_IOCTL_BASE) {
-        struct fake_fd *f = fake_fd_lookup(fd);
-        if (f) {
-            int ret = kms_ioctl(f, (unsigned int)request, arg);
+        int render;
+        uint32_t id = card_file(fd, &render);
+        struct drm_prime_handle prime;
+        if (id && (unsigned int)request == DRM_IOCTL_PRIME_FD_TO_HANDLE && read_own(&prime, (uint64_t)(uintptr_t)arg,
+                                                                                     sizeof prime) == 0) {
+            /* A dmabuf of a buffer this process allocated, as the kernel finds
+             * its own: the service gets the buffer itself (it can't rebuild one
+             * from a dmabuf), and gives the same handle each time. */
+            struct cham_bo *bo = cham_bo_from_fd(prime.fd);
+            uint32_t handle = bo ? cham_bo_handle_open(bo, fd) : 0;
+            if (handle) {
+                ((struct drm_prime_handle *)arg)->handle = handle;
+                return 0;
+            }
+        }
+        if (id) {
+            struct cham_msg req = {CARD_IOCTL, id, (unsigned int)request, (uint64_t)(uintptr_t)arg};
+            int fences[2] = {-1, -1};
+            int n = _IOC_NR((unsigned int)request) == _IOC_NR(DRM_IOCTL_MODE_ATOMIC) ? commit_fences(fd, arg, fences) : 0;
+            if (n)
+                req.a |= (uint64_t)(fences[0] + 1) << 32; /* which of our fds it is */
+            lock_conn();
+            if (n == 2) { /* the second one ahead of the request */
+                struct cham_msg ahead = {CARD_SEND_FD, 0, (uint64_t)fences[1], 0};
+                int s = connect_locked();
+                if (s >= 0)
+                    cham_send(s, &ahead, fences[1]);
+            }
+            int64_t ret = call_locked(req, fences[0], NULL, NULL);
+            unlock_conn();
             if (ret < 0) {
-                errno = -ret;
+                errno = (int)-ret;
                 return -1;
             }
-            return ret;
+            return (int)ret;
         }
     }
     resolve_ioctl();
     return REAL(ioctl)(fd, request, arg);
 }
 
-/* ---- KWin's Wayland socket ---- */
+/* ---- mmap ---- */
 
-/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N"; input.c connects
- * to it to inject input through KWin's fake-input protocol. */
+/* The system call itself: every program maps memory all the time, also
+ * before this library is ready and in a forked child, so nothing is looked
+ * up and nothing locked on the way. */
+static void *real_mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+#ifdef __NR_mmap
+    return (void *)syscall(__NR_mmap, addr, len, prot, flags, fd, off);
+#else
+    return (void *)syscall(__NR_mmap2, addr, len, prot, flags, fd, off >> 12);
+#endif
+}
+
+/* mmap() of the card maps a dumb buffer's memory, at the offset MAP_DUMB
+ * gave for it (drm_gem_mmap); shared only, as a shmem driver's. */
+void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t off)
+{
+    int render;
+    uint32_t id = fd >= 0 && !(flags & MAP_ANONYMOUS) ? card_file(fd, &render) : 0;
+    if (!id)
+        return real_mmap(addr, len, prot, flags, fd, off);
+    struct cham_msg req = {CARD_MMAP, id, (uint64_t)off, (uint64_t)len};
+    int mem = -1;
+    lock_conn();
+    int64_t ret = call_locked(req, -1, NULL, &mem);
+    unlock_conn();
+    if (ret == 0 && (flags & MAP_TYPE) != MAP_SHARED)
+        ret = -EINVAL;
+    void *p = MAP_FAILED;
+    if (ret == 0 && mem >= 0)
+        p = real_mmap(addr, len, prot, flags, mem, 0);
+    else
+        errno = ret < 0 ? (int)-ret : EINVAL;
+    if (mem >= 0) {
+        int saved = errno;
+        close(mem);
+        errno = saved;
+    }
+    return p;
+}
+
+void *mmap64(void *addr, size_t len, int prot, int flags, int fd, off64_t off)
+{
+    return mmap(addr, len, prot, flags, fd, (off_t)off);
+}
+
+/* ---- the compositor's Wayland socket ---- */
+
+/* For chameleon-kernel: its input thread connects to it for the clipboard
+ * and the keyboard layout (input.c). */
+static void note_socket(const char *path)
+{
+    struct cham_msg req = {CARD_WAYLAND, 0, 0, 0};
+    lock_conn();
+    int s = connect_locked();
+    if (s < 0 || cham_send(s, &req, -1) != 0 || send(s, path, strlen(path), MSG_NOSIGNAL) < 0)
+        disconnect_locked();
+    unlock_conn();
+}
+
+/* libwayland-server binds "$XDG_RUNTIME_DIR/wayland-N" (kwin_wayland_wrapper
+ * does for KWin). */
 int bind(int fd, const struct sockaddr *addr, socklen_t len)
 {
     resolve_bind();
@@ -275,100 +862,10 @@ int bind(int fd, const struct sockaddr *addr, socklen_t len)
         path[n] = 0;
         const char *base = strrchr(path, '/');
         base = base ? base + 1 : path;
-        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock / .chameleon */
-            input_note_socket(path);
+        if (path[0] == '/' && strncmp(base, "wayland-", 8) == 0 && !strchr(base, '.')) /* not .lock */
+            note_socket(path);
     }
     return ret;
-}
-
-/* ---- libdrm device identity ---- */
-
-/* Laid out the way libdrm's drmFreeDevice() frees it: one block for the
- * device, bus/device info and node paths, plus a separately allocated
- * `compatible` array whose strings are each freed on their own. */
-static drmDevicePtr make_device(void)
-{
-    const char *path = fake_path();
-    size_t path_len = strlen(path) + 1;
-    size_t size = sizeof(drmDevice) + DRM_NODE_MAX * sizeof(char *) + sizeof(drmPlatformBusInfo) +
-                  sizeof(drmPlatformDeviceInfo) + path_len;
-    char *mem = calloc(1, size);
-    char **compatible = calloc(2, sizeof(char *));
-    char *name = strdup("chameleon");
-    if (!mem || !compatible || !name) {
-        free(mem);
-        free(compatible);
-        free(name);
-        return NULL;
-    }
-    drmDevicePtr dev = (drmDevicePtr)mem;
-    char *p = mem + sizeof(drmDevice);
-    dev->nodes = (char **)p;
-    p += DRM_NODE_MAX * sizeof(char *);
-    dev->businfo.platform = (drmPlatformBusInfoPtr)p;
-    p += sizeof(drmPlatformBusInfo);
-    dev->deviceinfo.platform = (drmPlatformDeviceInfoPtr)p;
-    p += sizeof(drmPlatformDeviceInfo);
-    memcpy(p, path, path_len);
-    dev->nodes[DRM_NODE_PRIMARY] = p;
-    compatible[0] = name;
-    dev->deviceinfo.platform->compatible = compatible;
-    strcpy(dev->businfo.platform->fullname, "/chameleon");
-    dev->available_nodes = 1 << DRM_NODE_PRIMARY;
-    dev->bustype = DRM_BUS_PLATFORM;
-    return dev;
-}
-
-int drmGetDevice2(int fd, uint32_t flags, drmDevicePtr *device)
-{
-    if (fake_fd_lookup(fd)) {
-        *device = make_device();
-        return *device ? 0 : -ENOMEM;
-    }
-    resolve_drmGetDevice2();
-    return REAL(drmGetDevice2) ? REAL(drmGetDevice2)(fd, flags, device) : -ENOSYS;
-}
-
-int drmGetDevice(int fd, drmDevicePtr *device)
-{
-    if (fake_fd_lookup(fd)) {
-        *device = make_device();
-        return *device ? 0 : -ENOMEM;
-    }
-    resolve_drmGetDevice();
-    return REAL(drmGetDevice) ? REAL(drmGetDevice)(fd, device) : -ENOSYS;
-}
-
-char *drmGetDeviceNameFromFd2(int fd)
-{
-    if (fake_fd_lookup(fd))
-        return strdup(fake_path());
-    resolve_drmGetDeviceNameFromFd2();
-    return REAL(drmGetDeviceNameFromFd2) ? REAL(drmGetDeviceNameFromFd2)(fd) : NULL;
-}
-
-/* ---- environment ----
- * The launcher saves the user's LD_PRELOAD / LD_LIBRARY_PATH. The dynamic
- * linker has already read ours, so restore theirs: Xwayland and every app
- * KWin starts must get Termux's normal Mesa, not this shim. */
-__attribute__((constructor)) static void restore_environment(void)
-{
-    const char *saved = getenv("CHAMELEON_ORIG_LD_PRELOAD");
-    if (saved) {
-        if (*saved)
-            setenv("LD_PRELOAD", saved, 1);
-        else
-            unsetenv("LD_PRELOAD");
-        unsetenv("CHAMELEON_ORIG_LD_PRELOAD");
-    }
-    saved = getenv("CHAMELEON_ORIG_LD_LIBRARY_PATH");
-    if (saved) {
-        if (*saved)
-            setenv("LD_LIBRARY_PATH", saved, 1);
-        else
-            unsetenv("LD_LIBRARY_PATH");
-        unsetenv("CHAMELEON_ORIG_LD_LIBRARY_PATH");
-    }
 }
 
 #pragma GCC visibility pop

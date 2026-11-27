@@ -17,7 +17,6 @@ import android.util.Log;
 
 import java.io.ByteArrayOutputStream;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
@@ -41,8 +40,9 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
     private static final int REQUEST = 7;
     // Android's clipboard goes through Binder, which refuses much more.
     private static final int MAX_BYTES = 1 << 20;
-    // A desktop app that stops writing mid-copy must not stall this thread.
-    private static final int READ_TIMEOUT_MS = 5000;
+    // A desktop app that stops writing mid-copy, or stops reading mid-paste,
+    // must not stall this thread.
+    private static final int TIMEOUT_MS = 5000;
     // ClipDescription.EXTRA_IS_SENSITIVE, API 33; older Androids ignore it.
     private static final String EXTRA_IS_SENSITIVE = "android.content.extra.IS_SENSITIVE";
 
@@ -138,7 +138,7 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
         try (FileInputStream in = new FileInputStream(pipe.getFileDescriptor())) {
             for (;;) {
                 try {
-                    if (Os.poll(new StructPollfd[] {readable}, READ_TIMEOUT_MS) == 0) {
+                    if (Os.poll(new StructPollfd[] {readable}, TIMEOUT_MS) == 0) {
                         Log.w(TAG, "clipboard: the desktop app stopped sending its text; not copied to Android");
                         return;
                     }
@@ -179,8 +179,26 @@ final class ClipboardShare implements ClipboardManager.OnPrimaryClipChangedListe
         String text = mText;
         if (text == null)
             return;
-        try (FileOutputStream out = new FileOutputStream(pipe.getFileDescriptor())) {
-            out.write(text.getBytes(StandardCharsets.UTF_8));
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        StructPollfd writable = new StructPollfd();
+        writable.fd = pipe.getFileDescriptor();
+        writable.events = (short) OsConstants.POLLOUT;
+        try {
+            Os.fcntlInt(writable.fd, OsConstants.F_SETFL, OsConstants.O_NONBLOCK);
+            for (int done = 0; done < bytes.length;) {
+                if (Os.poll(new StructPollfd[] {writable}, TIMEOUT_MS) == 0) {
+                    Log.w(TAG, "clipboard: the desktop app stopped reading the text it pastes");
+                    return;
+                }
+                try {
+                    done += Os.write(writable.fd, bytes, done, bytes.length - done);
+                } catch (ErrnoException e) {
+                    if (e.errno != OsConstants.EAGAIN)
+                        throw e;
+                }
+            }
+        } catch (ErrnoException e) {
+            throw new IOException(e);
         }
     }
 }

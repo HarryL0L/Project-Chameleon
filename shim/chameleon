@@ -1,22 +1,33 @@
 #!/data/data/com.termux/files/usr/bin/sh
 # SPDX-License-Identifier: GPL-2.0-or-later
-# Runs a KWin or Plasma session on the Chameleon app's screen, rendering with
-# Android's GPU. Open the Chameleon app first (or within CHAMELEON_WAIT s).
+# Runs a Wayland compositor or a whole session on the Chameleon app's screen,
+# rendering with Android's GPU. Open the Chameleon app first (or within
+# CHAMELEON_WAIT s).
 #
-#   chameleon kwin_wayland              # just KWin
-#   chameleon kwin_wayland konsole      # KWin plus a first app
 #   chameleon startplasma-wayland       # a Plasma session
+#   chameleon kwin_wayland konsole      # KWin plus a first app
+#   chameleon weston                    # Weston
+#   chameleon sway                      # sway
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
-# Every kwin_wayland started inside - directly, by kwin_wayland_wrapper or by
-# startplasma-wayland - goes through bin/kwin_wayland, which attaches the shim
-# to KWin alone; the rest of the session runs as usual.
+#   chameleon --debug-log PROGRAM...    # the same, recorded for a bug report:
+#                                       # all the session prints, with times,
+#                                       # and what the card was asked
+#   chameleon --report                  # what the running session's card was
+#                                       # asked and answered so far
+#   chameleon --probe                   # test the GPU drivers as the session's
+#                                       # programs get them
+#
+# chameleon-kernel serves the card, the input devices and the link to the app
+# for the whole session, as the kernel would, below chameleon-init. Every program in the session
+# gets the same device layer: libchameleon.so (the card node, gbm's buffers),
+# libchameleon_udev.so (udev and the evdev nodes) and this directory's libgbm.
 set -e
 SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$1" in
 "" | -h | --help)
-    sed -n '2,12s/^# \{0,1\}//p' "$0"
+    sed -n '2,25s/^# \{0,1\}//p' "$0"
     exit 0
     ;;
 --install)
@@ -24,27 +35,124 @@ case "$1" in
     echo "installed: $PREFIX/bin/chameleon -> $SHIM_DIR/chameleon"
     exit 0
     ;;
+--report)
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+    exec "$SHIM_DIR/chameleon-kernel" --report
+    ;;
+--probe)
+    # chameleon-probe (shim/probe/probe.c) with the session's graphics stack:
+    # as it is inside a session; else as a session of its own, which doesn't
+    # wait for the app (the probe draws off screen).
+    case ":${LD_PRELOAD:-}:" in
+    *":$SHIM_DIR/libchameleon.so:"*)
+        shift
+        exec "$SHIM_DIR/chameleon-probe" "$@"
+        ;;
+    esac
+    if XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)} "$SHIM_DIR/chameleon-kernel" --report \
+        >/dev/null 2>&1; then
+        echo "chameleon: a session is running: run this in a terminal inside it (Konsole), or end it first" >&2
+        exit 2
+    fi
+    shift
+    export CHAMELEON_WAIT=${CHAMELEON_WAIT:-1}
+    set -- "$SHIM_DIR/chameleon-probe" "$@"
+    ;;
+--debug-log)
+    # The session as without it, with everything it prints going through
+    # the recorder (shim/log/log.c) into a file of at most 28 MiB;
+    # CHAMELEON_DEBUG_LOG makes chameleon-kernel say more (shim/core/report.c).
+    shift
+    if [ $# -eq 0 ]; then
+        echo "usage: chameleon --debug-log PROGRAM..." >&2
+        exit 2
+    fi
+    run=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+    mkdir -p "$run" && chmod 700 "$run"
+    export CHAMELEON_DEBUG_LOG="${CHAMELEON_DEBUG_DIR:-$HOME}/chameleon-debug-$(date +%Y%m%d-%H%M%S).log"
+    pipe="$run/chameleon-debug.$$"
+    rm -f "$pipe"
+    mkfifo -m 600 "$pipe"
+    "$SHIM_DIR/chameleon-log" "$CHAMELEON_DEBUG_LOG" < "$pipe" &
+    recorder=$!
+    trap : INT # ^C is the session's: this waits for it to end
+    status=0
+    {
+        echo "chameleon: debug log of: $*"
+        dpkg-query -W -f 'chameleon: package ${Package} ${Version}\n' chameleon 2>/dev/null || true
+        echo "chameleon: system: $(uname -srm)"
+        if [ -x /system/bin/getprop ]; then
+            for prop in ro.product.manufacturer ro.product.model ro.build.version.release ro.build.version.sdk \
+                ro.soc.model ro.board.platform ro.hardware.egl ro.hardware.vulkan; do
+                echo "chameleon: $prop: $(env -u LD_PRELOAD -u LD_LIBRARY_PATH /system/bin/getprop "$prop")"
+            done
+        fi
+        "$0" "$@"
+    } > "$pipe" 2>&1 || status=$?
+    kill -TERM "$recorder" 2>/dev/null || true
+    wait "$recorder" || true
+    rm -f "$pipe"
+    exit "$status"
+    ;;
 esac
 
-chmod +x "$SHIM_DIR/bin/kwin_wayland" 2>/dev/null || true
+# The session's init (shim/init/init.c), above everything else: programs that
+# detach from their parent - the bus's services, chameleon-kernel, a sound
+# server - stay the session's, as under systemd on a Linux desktop, instead
+# of becoming orphans of Android's init, which some phones kill.
+if ! kill -0 "${CHAMELEON_INIT:-}" 2>/dev/null; then
+    exec "$SHIM_DIR/chameleon-init" "$0" "$@"
+fi
 
-# A session bus for KWin and Plasma, started before anything else.
+for lib in libchameleon.so libchameleon_udev.so libgbm.so libEGL_chameleon.so; do
+    if [ ! -f "$SHIM_DIR/$lib" ]; then
+        echo "chameleon: $SHIM_DIR/$lib is missing" >&2
+        exit 1
+    fi
+done
+
+# The device layer for every program in the session (the bus's services
+# too), as a device node is there for every program: the card, Chameleon's
+# input devices and working udev monitors, and gbm on the card.
+case ":${LD_PRELOAD:-}:" in
+*":$SHIM_DIR/libchameleon.so:"*) ;;
+*) export LD_PRELOAD="$SHIM_DIR/libchameleon.so:$SHIM_DIR/libchameleon_udev.so${LD_PRELOAD:+:$LD_PRELOAD}" ;;
+esac
+case ":${LD_LIBRARY_PATH:-}:" in
+*":$SHIM_DIR:"*) ;;
+*) export LD_LIBRARY_PATH="$SHIM_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ;;
+esac
+
+# A session bus for the compositor and its desktop, started before anything else.
 if [ -z "$DBUS_SESSION_BUS_ADDRESS" ] && command -v dbus-run-session >/dev/null 2>&1; then
     exec dbus-run-session -- "$0" "$@"
 fi
 
-export CHAMELEON_SHIM_DIR="$SHIM_DIR"
-export PATH="$SHIM_DIR/bin:$PATH"
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
-# This session gets its displays from KWin, not from an outer X/Wayland server.
+# The standard file names of gbm and libdrm, which some programs load by name
+# (Firefox: dlopen("libgbm.so.1"), dlopen("libdrm.so.2")); Termux installs
+# them without the version.
+NAMES_DIR="$XDG_RUNTIME_DIR/chameleon-lib"
+mkdir -p "$NAMES_DIR"
+ln -sf "$SHIM_DIR/libgbm.so" "$NAMES_DIR/libgbm.so.1"
+[ ! -e "$PREFIX/lib/libdrm.so" ] || ln -sf "$PREFIX/lib/libdrm.so" "$NAMES_DIR/libdrm.so.2"
+# Xwayland with glamor names our gbm (backend "chameleon") as the GLX vendor
+# of its screen; X11 OpenGL apps then load libGLX_chameleon, which is
+# Mesa's: GLX stays Mesa's, as without glamor.
+[ ! -e "$PREFIX/lib/libGLX_mesa.so.0" ] || ln -sf "$PREFIX/lib/libGLX_mesa.so.0" "$NAMES_DIR/libGLX_chameleon.so.0"
+case ":$LD_LIBRARY_PATH:" in
+*":$NAMES_DIR:"*) ;;
+*) export LD_LIBRARY_PATH="$LD_LIBRARY_PATH:$NAMES_DIR" ;;
+esac
+# This session gets its displays from its own compositor, not from an outer
+# X/Wayland server; with neither set, compositors pick their DRM backend.
 unset WAYLAND_DISPLAY DISPLAY
 export XDG_SESSION_TYPE=wayland
 
-# EGL for the whole session (plasmashell and apps started by Plasma are not
-# KWin's children): the Chameleon vendor first - it renders Wayland windows
-# on the GPU when their compositor is a Chameleon KWin - then the installed
-# vendors (Mesa) for everything else.
+# EGL for the whole session: the Chameleon vendor first - it takes the
+# compositor's GBM display and Wayland windows under a compositor running
+# on Chameleon - then the installed vendors (Mesa) for everything else.
 VENDOR_JSON="$XDG_RUNTIME_DIR/chameleon-egl-vendor.json"
 printf '{"file_format_version": "1.0.0", "ICD": {"library_path": "%s"}}\n' \
     "$SHIM_DIR/libEGL_chameleon.so" > "$VENDOR_JSON"
@@ -60,10 +168,33 @@ else
 fi
 export __EGL_VENDOR_LIBRARY_FILENAMES="$VENDORS"
 
-# The app can't open the socket in $PREFIX/tmp that KWin's shim connects to.
-# A broker from the app's APK does, running here as the Termux user, and hands
-# each connection to the app. It exits with this process ($$, the session
-# after the exec below).
+# Vulkan for the whole session: the card's driver, on Android's, listed to
+# the Vulkan loader. CHAMELEON_VULKAN=0 leaves Vulkan to the installed
+# drivers. (api_version: the Vulkan that shim/vulkan/vk_forward.h reaches.)
+if [ "${CHAMELEON_VULKAN:-1}" != 0 ] && [ -f "$SHIM_DIR/libvulkan_chameleon.so" ]; then
+    ICD_JSON="$XDG_RUNTIME_DIR/chameleon-vulkan.json"
+    printf '{"file_format_version": "1.0.1", "ICD": {"library_path": "%s", "api_version": "1.4.0"}}\n' \
+        "$SHIM_DIR/libvulkan_chameleon.so" > "$ICD_JSON"
+    case ":${VK_ADD_DRIVER_FILES:-}:" in
+    *":$ICD_JSON:"*) ;;
+    *) export VK_ADD_DRIVER_FILES="$ICD_JSON${VK_ADD_DRIVER_FILES:+:$VK_ADD_DRIVER_FILES}" ;;
+    esac
+    # Another installed driver for the same GPU (Mesa's own, a wrapper of
+    # Android's) would list the GPU a second time: the loader has no order
+    # between the two, and a program that counts GPUs finds more than the
+    # card. So the session's programs see the card's driver and Mesa's
+    # software one. CHAMELEON_VULKAN=all lists every installed driver, and
+    # a filter of the user's own stays; one program gets another driver
+    # with VK_LOADER_DRIVERS_SELECT set for it.
+    if [ "${CHAMELEON_VULKAN:-1}" != all ] && [ -z "${VK_LOADER_DRIVERS_SELECT+set}" ]; then
+        export VK_LOADER_DRIVERS_SELECT="chameleon-vulkan.json,lvp_icd*"
+    fi
+fi
+
+# The app can't open the socket in $PREFIX/tmp that chameleon-kernel
+# connects to. A broker from the app's APK does, running here as the Termux
+# user, and hands each connection to the app. It exits with this process
+# ($$, the session after the exec below).
 APP=io.github.harryl0l.chameleon
 APK=$(env -u LD_PRELOAD -u LD_LIBRARY_PATH /system/bin/pm path "$APP" 2>/dev/null | sed -n 's/^package://p' | head -n 1)
 if [ -z "$APK" ]; then
@@ -74,5 +205,18 @@ export CHAMELEON_SOCKET=${CHAMELEON_SOCKET:-$PREFIX/tmp/chameleon-0}
 CLASSPATH="$APK" env -u LD_PRELOAD -u LD_LIBRARY_PATH \
     /system/bin/app_process / --nice-name=chameleon-broker "$APP.Broker" "$$" "$CHAMELEON_SOCKET" \
     >"$XDG_RUNTIME_DIR/chameleon-broker.log" 2>&1 &
+
+# The card, the input devices and the link to the app, as the kernel would
+# be (shim/core/main.c): it answers before the command starts, and exits
+# with this process too.
+if ! env -u LD_PRELOAD -u LD_LIBRARY_PATH "$SHIM_DIR/chameleon-kernel" "$$"; then
+    echo "chameleon: chameleon-kernel didn't start" >&2
+    exit 1
+fi
+
+# A recorded session starts with what its graphics stack has and does.
+if [ -n "${CHAMELEON_DEBUG_LOG:-}" ] && [ "$1" != "$SHIM_DIR/chameleon-probe" ]; then
+    "$SHIM_DIR/chameleon-probe" || true
+fi
 
 exec "$@"
