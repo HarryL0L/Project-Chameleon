@@ -50,6 +50,13 @@ KWin, wlroots compositors such as sway, Weston, Mutter.
   hardware keyboards, and the Android on-screen keyboard as the desktop's
   input method.
 
+<p align="center">
+  <img src="branding/screenshots/firefox-webgl.jpg" width="100%" alt="Firefox in a Plasma session on a phone, running the WebGL Aquarium demo with 500 fish at 100 frames a second">
+</p>
+<p align="center">
+  <img src="branding/screenshots/vkcube.jpg" width="100%" alt="The Plasma desktop on a phone: Konsole next to vkcube, a Vulkan program in a Wayland window on the phone's Mali-G77 driver">
+</p>
+
 ## What works today
 
 Seen on a Mali-G77 phone on Android 13; the Vulkan items also on an
@@ -258,6 +265,18 @@ Code: [`shim/core/clipboard.c`](shim/core/clipboard.c), [`ClipboardShare.java`](
 - Every 5 seconds the service logs how many frames were committed,
   presented and shown on the vsync.
 
+For a bug report, three commands:
+
+```sh
+chameleon --debug-log startplasma-wayland   # records the session into a file
+chameleon --report                          # what the card was asked so far
+chameleon --probe                           # tests the graphics stack
+```
+
+`--debug-log` writes `~/chameleon-debug-DATE-TIME.log` (under 28 MiB): the
+phone's model and Android version, the probe's result, everything the
+session prints, and the report at the end. Read it before sharing it.
+
 </details>
 
 ## What a phone needs
@@ -321,9 +340,10 @@ and a phone that meets the list above.
 1. Download the `chameleon-<commit>` artifact from the latest
    [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml)
    and unzip it.
-2. Install `chameleon.apk` and open **Chameleon**. Uninstall an older
-   Chameleon app first if Android refuses the update: builds signed with a
-   different key can't replace each other.
+2. Install `chameleon.apk` and open **Chameleon**. Uninstall a Chameleon
+   app from v0.1.0 or from a build before 0.2.0 first: the signing key
+   changed with 0.2.0, and builds signed with different keys can't replace
+   each other.
 3. In Termux, install the package (run `termux-setup-storage` once first, so
    Termux can read `/sdcard`):
 
@@ -396,7 +416,7 @@ Locally:
 gradle -p android assembleRelease                                     # the app
 CC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android29-clang \
     shim/build-android.sh out/chameleon                               # the shim
-packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/         # the Termux package
+packaging/build-deb.sh out/chameleon out/ahb_probe 0.2.0 out/         # the Termux package
 shim/test/run-host-test.sh     # host tests
 shim/test/run-conformance.sh   # against a real kernel in QEMU
 ```

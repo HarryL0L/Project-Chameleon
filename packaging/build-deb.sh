@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
 # Builds the Termux package (aarch64 .deb) from a built shim directory:
 #
-#   packaging/build-deb.sh out/chameleon out/ahb_probe 0.1.0 out/
+#   packaging/build-deb.sh out/chameleon out/ahb_probe 0.2.0 out/
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
 #   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, libvulkan_chameleon.so, the launch

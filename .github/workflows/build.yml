@@ -61,9 +61,10 @@ jobs:
         env:
           RELEASE_VERSION: ${{ inputs.version }}
         run: |
-          # Commit time first, so newer builds always sort higher for apt (the
-          # hash alone compares at random: 4d83f62 < d7f4a01).
-          VERSION="0.1.0~git$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
+          # A build after release 0.2.0 sorts above it ("+"). Commit time
+          # first, so newer builds always sort higher for apt (the hash alone
+          # compares at random: 4d83f62 < d7f4a01).
+          VERSION="0.2.0+git$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M%S).$(git rev-parse --short HEAD)"
           if [ -n "$RELEASE_VERSION" ]; then
             VERSION="${RELEASE_VERSION#v}"
           fi
