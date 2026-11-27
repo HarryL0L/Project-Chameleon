@@ -429,7 +429,6 @@ More switches and the details of each piece are in
 | [`shim/chameleon`](shim/chameleon), [`shim/chameleon-vendor-install`](shim/chameleon-vendor-install) | Launchers |
 | [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd, Vulkan with the real loader on lavapipe; conformance tests against a real Linux kernel in QEMU |
 | [`probe/`](probe/) | `ahb_probe`, installed as `chameleon-probe`: checks a phone's EGL / AHardwareBuffer / fence support |
-| [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |
 | [`branding/`](branding/) | Logo, launcher-icon and diagram generators, screenshots |
 

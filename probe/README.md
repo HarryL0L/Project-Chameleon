@@ -25,7 +25,7 @@ CHAMELEON_PROBE_GLVND=1 CHAMELEON_EGL_DEFAULT=1 chameleon-probe
                              # the same through glvnd and the Chameleon vendor
 ```
 
-Or build it from source: `pkg install clang && ./build.sh && ./ahb_probe`.
+Or build it from source: `pkg install clang && clang -O2 -o ahb_probe ahb_probe.c -ldl && ./ahb_probe`.
 
 `PASS`/`FAIL` lines are critical checks, `WARN` lines are things the shim can
 work around. Paste the whole output back, including the `EGL_EXTENSIONS` line.
