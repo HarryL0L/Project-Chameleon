@@ -471,7 +471,7 @@ libxcb-present0 libx11-xcb1`; the conformance tests also need
 - [x] The card's older modesetting calls and dumb buffers
 - [x] Fences on the session's buffers, and GPU timestamps
 - [x] A session recorder, a report and a probe for bug reports
-- [ ] Windows of any other GPU driver
+- [ ] Windows of programs on a separate Mesa driver (Termux's Turnip or PanVK)
 - [ ] Each app window as an Android window of its own
 
 ## Notes
