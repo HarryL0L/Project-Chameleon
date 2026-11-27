@@ -5,12 +5,30 @@
 <h1 align="center">Project Chameleon</h1>
 
 <p align="center">
-  <b>Makes an Android phone look like a Linux PC with a graphics card.</b><br>
-  Wayland compositors in Termux run on it as they are · full Plasma on KWin · the phone's own GPU · no root
+  <b>DRM/KMS, GBM, EGL and Vulkan for Termux.</b><br>
+  Linux compositors run on a phone as they do on a PC.
 </p>
 
 <p align="center">
-  <a href="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml"><img src="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml/badge.svg" alt="Build"></a>
+  <img src="branding/screenshots/vkcube.jpg" width="100%" alt="The Plasma desktop on a phone: Konsole next to vkcube, a Vulkan program in a Wayland window on the phone's Mali-G77 driver">
+</p>
+
+Chameleon gives Termux the device interfaces Linux desktops are built on: a
+DRM/KMS display, GBM buffers, EGL and Vulkan drivers, and udev and evdev
+input. Each one is backed by a public Android API. KWin starts on its DRM
+backend as it does on a PC, a full Plasma session runs on top, and
+everything drawn on the GPU uses the phone's own driver.
+
+<p align="center">
+  arm64 · Android 10 or newer · Termux · no root
+</p>
+
+<p align="center">
+  <a href="https://github.com/HarryL0L/Project-Chameleon/releases/latest"><b>Get the latest release</b></a>
+  &nbsp;·&nbsp;
+  <a href="#getting-started">Getting started</a>
+  &nbsp;·&nbsp;
+  <a href="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml"><img src="https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml/badge.svg" alt="Build" valign="middle"></a>
 </p>
 
 > [!NOTE]
@@ -20,11 +38,47 @@
 > can change or break between commits. `main` has the older state and gets
 > these changes when this branch is merged into it.
 
+## What works today
+
+Seen on a Mali-G77 phone on Android 13; the Vulkan items also on an
+Adreno 618 on Android 17:
+
+- A full Plasma 6.8 session: start, rotation, the keyboard resizing the
+  desktop, 60 and 120 Hz, screen off and on, long stretches in the
+  background, logout.
+- Qt Quick apps (plasmashell, System Settings) and Firefox on the GPU,
+  including WebGL in Firefox.
+- Vulkan programs in Wayland and X11 windows, on the phone's driver or on a
+  driver of your own below Chameleon's (Mesa's Turnip or PanVK built for
+  Android).
+- X11 apps through Xwayland, which draws on the GPU when it is built with
+  glamor.
+- A cursor plane, page flips timed on the panel's vsync, and a render
+  node next to the card, as on a PC.
+- Typing with the Android keyboard (Gboard, HeliBoard, AOSP), with
+  suggestions, emoji and pasted text.
+- Clipboard text both ways between Android and the desktop.
+- Screen and window recording through KWin's PipeWire screencast, when
+  PipeWire runs in the session.
+
 <p align="center">
-  <img src="branding/gears.gif" width="300" alt="Two pixel-art gears, a big one and a small one, turning together">
+  <img src="branding/screenshots/firefox-webgl.jpg" width="100%" alt="Firefox in a Plasma session on a phone, running the WebGL Aquarium demo with 500 fish at 100 frames a second">
 </p>
 
----
+GNOME Shell (Mutter), sway and Weston have run on the same device layer
+too, but get far less testing than KWin, which every change is tried with
+on phones.
+
+### Not there yet
+
+- Windows of Vulkan drivers other than Chameleon's don't show.
+- Desktop OpenGL on the GPU needs setting up by hand: Mesa's zink runs on
+  Chameleon's Vulkan driver, but needs a newer Vulkan below it than many
+  phones' own drivers have.
+- An X11 window can flash black while it is being resized.
+- A keyboard's autocorrection can still double a word in some apps.
+
+## How it works
 
 Linux desktop software expects a kernel with a display, a GPU and input
 devices behind standard interfaces: DRM/KMS, GBM, EGL, Vulkan, udev and
@@ -51,45 +105,6 @@ KWin, wlroots compositors such as sway, Weston, Mutter.
   input method.
 
 <p align="center">
-  <img src="branding/screenshots/firefox-webgl.jpg" width="100%" alt="Firefox in a Plasma session on a phone, running the WebGL Aquarium demo with 500 fish at 100 frames a second">
-</p>
-<p align="center">
-  <img src="branding/screenshots/vkcube.jpg" width="100%" alt="The Plasma desktop on a phone: Konsole next to vkcube, a Vulkan program in a Wayland window on the phone's Mali-G77 driver">
-</p>
-
-## What works today
-
-Seen on a Mali-G77 phone on Android 13; the Vulkan items also on an
-Adreno 618 on Android 17:
-
-- A full Plasma 6.8 session: start, rotation, the keyboard resizing the
-  desktop, 60 and 120 Hz, screen off and on, long stretches in the
-  background, logout.
-- Qt Quick apps (plasmashell, System Settings) and Firefox on the GPU,
-  including WebGL in Firefox.
-- Vulkan programs in Wayland windows, on the phone's driver or on a driver
-  of your own below Chameleon's (Mesa's Turnip or PanVK built for Android).
-- A cursor plane, page flips timed on the panel's vsync, and a render
-  node next to the card, as on a PC.
-- Typing with the Android keyboard (Gboard, HeliBoard, AOSP), with
-  suggestions, emoji and pasted text.
-- Clipboard text both ways between Android and the desktop.
-- Screen and window recording through KWin's PipeWire screencast, when
-  PipeWire runs in the session.
-
-Not there yet: windows of Vulkan drivers other than Chameleon's, and
-desktop OpenGL on the GPU without setting it up by hand (Mesa's zink runs
-on Chameleon's Vulkan driver, but needs a newer Vulkan below it than many
-phones' own drivers have). An
-X11 window can flash black while it is being resized. A keyboard's
-autocorrection can still double a word in some apps.
-GNOME Shell (Mutter), sway and Weston have run on the same device layer
-too, but get far less testing than KWin, which every change is tried with
-on phones.
-
-## How it works
-
-<p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="branding/architecture-dark.svg">
     <img src="branding/architecture-light.svg" width="100%" alt="Three layers. Linux as packaged: a compositor (KWin, wlroots, Weston, Mutter), Wayland apps, Vulkan apps. Chameleon, the device layer: chameleon-kernel, libgbm, an EGL vendor, a Vulkan driver. Android, without root: the Chameleon app, the GPU driver, SurfaceFlinger. Between Linux and Chameleon are the standard interfaces DRM/KMS, GBM, EGL and GLES, Vulkan, udev and evdev, and the input method; between Chameleon and Android are AHardwareBuffer, sync fences, ASurfaceControl and AImageReader.">
@@ -106,7 +121,7 @@ is running.
 | `libchameleon.so`, `libchameleon_udev.so` | device nodes, udev, sysfs | Preloaded into every program of the session. Opening the card, its ioctls, `/dev/input/event*`, udev listings and hotplug events all behave as on Linux and are answered by `chameleon-kernel`. |
 | `libgbm.so` | Mesa's libgbm | Every `gbm_bo` is an `AHardwareBuffer`. Its dma-buf is the one inside the gralloc handle, so the usual gbm → PRIME → framebuffer → EGL import path works unchanged. |
 | `libEGL_chameleon.so` | Mesa's EGL driver | A glvnd vendor on Android's `libEGL` and `libGLESv2`. Adds the GBM and Wayland platforms, dma-buf import and export, and the card as an `EGLDevice`. |
-| `libvulkan_chameleon.so` | Mesa's Vulkan driver | A driver for the Vulkan loader on Android's `libvulkan`. Names the card's nodes and gives programs Wayland windows. |
+| `libvulkan_chameleon.so` | Mesa's Vulkan driver | A driver for the Vulkan loader on Android's `libvulkan`. Names the card's nodes and gives programs Wayland and X11 windows. |
 | `chameleon-ime` | an on-screen keyboard | The Android keyboard as the compositor's input method (`input-method-v1`). |
 | `chameleon-init` | `systemd --user` | The session's first process. Adopts and reaps programs that detach, so none becomes an orphan of Android's init (some phones' process cleaners kill those). |
 | The Chameleon app | the monitor and the input hardware | Shows each frame through `ASurfaceControl` and sends touch, mouse, keys, keyboard text, window size and refresh rate back. |
@@ -196,10 +211,17 @@ Code: [`shim/core/`](shim/core/) · protocol: [`common/chameleon_proto.h`](commo
 - **Firefox:** finds `libgbm.so.1` and the render node, and shares WebGL
   frames through `EGL_MESA_image_dma_buf_export`.
 - **Vulkan:** programs get the phone's driver through Chameleon's, with
-  Wayland windows built on Android's own swapchain. With
+  Wayland and X11 windows built on Android's own swapchain. With
   `CHAMELEON_VULKAN_DRIVER=/path/driver.so` and Termux's `libadrenotools`
   package, another Android-built driver runs below it instead, which can
   give a phone a newer Vulkan than its own driver has.
+- **X11:** Xwayland draws with glamor on the same driver, and a Vulkan
+  program's X11 window hands its frames to Xwayland through DRI3 and
+  Present.
+- **Fences:** a session buffer's dma-buf answers `poll` and the sync-file
+  export and import calls as a kernel's does, so a compositor can wait for
+  a frame the GPU is still drawing. GPU timestamp queries are answered from
+  Android's fences.
 - **Driver quirks** are worked around in the EGL vendor, not required of
   the phone: a GLSL construct strict drivers reject, extensions that
   misbehave, context attributes a driver mishandles.
@@ -261,7 +283,7 @@ Code: [`shim/core/clipboard.c`](shim/core/clipboard.c), [`ClipboardShare.java`](
 - The terminal says when the app's window came back and how fast the
   compositor answered, and each program says once when it lost the card.
 - A crash in a program that renders with Android's driver logs the last
-  GL and EGL calls and a symbolised backtrace.
+  GL call, the last texture upload and a symbolised backtrace.
 - Every 5 seconds the service logs how many frames were committed,
   presented and shown on the vsync.
 
@@ -326,18 +348,25 @@ everything else works the same.
 
 Qt, GTK and other apps need nothing beyond this.
 
-Run `chameleon-probe` on the phone to check it. It lists every EGL and
-OpenGL ES item above as PASS, FAIL or WARN, renders into an
-`AHardwareBuffer`, passes it across a socket and renders an `AImageReader`
-frame.
+Run `chameleon-probe` in Termux to check a phone; it needs no session. It
+lists every EGL and OpenGL ES item above as PASS, FAIL or WARN, renders
+into an `AHardwareBuffer`, passes it across a socket and renders an
+`AImageReader` frame. `chameleon --probe` is a different test: it runs the
+whole stack as a session's programs see it, the card, OpenGL ES and Vulkan.
 
 ## Getting started
 
 You need Termux (from [GitHub](https://github.com/termux/termux-app/releases)
-or [F-Droid](https://f-droid.org/packages/com.termux/)) with KWin installed,
-and a phone that meets the list above.
+or [F-Droid](https://f-droid.org/packages/com.termux/)) with KWin's Wayland
+compositor installed, and a phone that meets the list above. Termux's own
+repository doesn't have that KWin yet; the
+[release page](https://github.com/HarryL0L/Project-Chameleon/releases/latest)
+has the packages and the steps to install them.
 
-1. Download the `chameleon-<commit>` artifact from the latest
+1. Download `chameleon.apk` and the `chameleon` package from the
+   [latest release](https://github.com/HarryL0L/Project-Chameleon/releases/latest).
+   For a development build, take the `chameleon-<commit>` artifact of the
+   latest
    [Actions run](https://github.com/HarryL0L/Project-Chameleon/actions/workflows/build.yml)
    and unzip it.
 2. Install `chameleon.apk` and open **Chameleon**. Uninstall a Chameleon
@@ -348,7 +377,7 @@ and a phone that meets the list above.
    Termux can read `/sdcard`):
 
    ```sh
-   apt install /sdcard/Download/chameleon-*/chameleon_*_aarch64.deb
+   apt install /sdcard/Download/chameleon_*_aarch64.deb
    ```
 
 4. Start KWin with a terminal, or a full Plasma session:
@@ -393,16 +422,16 @@ More switches and the details of each piece are in
 | [`shim/ime/`](shim/ime/) | `chameleon-ime`: the Android keyboard as the compositor's input method |
 | [`shim/init/`](shim/init/) | `chameleon-init`: the session's init, adopts and reaps the programs that detach in it |
 | [`shim/log/`](shim/log/) | `chameleon-log`: the recorder of `chameleon --debug-log` |
-| [`shim/probe/`](shim/probe/) | `chameleon-probe`: tests the session's graphics stack (`chameleon --probe`) |
+| [`shim/probe/`](shim/probe/) | The test behind `chameleon --probe`: the card, OpenGL ES and Vulkan as a session's programs see them |
 | [`shim/gbm/`](shim/gbm/) | Fake `libgbm.so` on `AHardwareBuffer` |
 | [`shim/vendor/`](shim/vendor/), [`shim/egl/`](shim/egl/), [`shim/gles/`](shim/gles/) | `libEGL_chameleon.so`, the glvnd EGL vendor; `vendor/window.c`: an app's window, for EGL and Vulkan |
-| [`shim/vulkan/`](shim/vulkan/) | `libvulkan_chameleon.so`, the card's Vulkan driver on Android's, with Wayland windows |
+| [`shim/vulkan/`](shim/vulkan/) | `libvulkan_chameleon.so`, the card's Vulkan driver on Android's, with Wayland and X11 windows |
 | [`shim/chameleon`](shim/chameleon), [`shim/chameleon-vendor-install`](shim/chameleon-vendor-install) | Launchers |
 | [`shim/test/`](shim/test/) | Host tests: fake KMS with real libdrm, input and screen size with real libwayland, vendor with real glvnd, Vulkan with the real loader on lavapipe; conformance tests against a real Linux kernel in QEMU |
-| [`probe/`](probe/) | `ahb_probe`: checks a device's EGL / AHardwareBuffer / fence support |
+| [`probe/`](probe/) | `ahb_probe`, installed as `chameleon-probe`: checks a phone's EGL / AHardwareBuffer / fence support |
 | [`docs/`](docs/) | Design notes ([KWin integration](docs/kwin-integration.md)) |
 | [`packaging/`](packaging/) | Termux `.deb` packaging |
-| [`branding/`](branding/) | Logo and launcher-icon generator |
+| [`branding/`](branding/) | Logo, launcher-icon and diagram generators, screenshots |
 
 ## Building
 
@@ -423,7 +452,8 @@ shim/test/run-conformance.sh   # against a real kernel in QEMU
 
 The host tests need `libdrm-dev libwayland-dev libegl-dev libgles-dev
 libudev-dev libinput-dev libvulkan-dev mesa-vulkan-drivers
-vulkan-validationlayers vulkan-tools`; the conformance tests also need
+vulkan-validationlayers vulkan-tools libxcb1-dev libxcb-dri3-0
+libxcb-present0 libx11-xcb1`; the conformance tests also need
 `qemu-system-x86 busybox-static cpio zstd`.
 
 ## Roadmap
@@ -439,8 +469,11 @@ vulkan-validationlayers vulkan-tools`; the conformance tests also need
 - [x] Screen recording through PipeWire
 - [x] Vulkan with Wayland windows, on the phone's driver or your own
 - [x] Vulkan for X11 windows, and GPU rendering in Xwayland (glamor)
+- [x] The card's older modesetting calls and dumb buffers
+- [x] Fences on the session's buffers, and GPU timestamps
+- [x] A session recorder, a report and a probe for bug reports
 - [ ] Windows of any other GPU driver
-- [ ] A release
+- [ ] Each app window as an Android window of its own
 
 ## Notes
 
