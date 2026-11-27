@@ -62,8 +62,16 @@ static void timestamp_checks(struct fake_state *st, void *fake, int fences_tell_
     CHECK(counter && result && release, "glQueryCounterEXT and glGetQueryObjectui64vEXT through glvnd");
     if (!counter || !result || !release)
         return;
-    GLint64 now = 0;
+    GLint64 now = 0, by_name = 0;
     glGetInteger64v(TIMESTAMP, &now);
+    /* the extension's own name for it, which the driver here doesn't have
+     * (OpenGL ES 3 drivers needn't): the same clock all the same */
+    void (*stamp_ext)(GLenum, GLint64 *) = (void (*)(GLenum, GLint64 *))eglGetProcAddress("glGetInteger64vEXT");
+    if (stamp_ext)
+        stamp_ext(TIMESTAMP, &by_name);
+    CHECK(by_name >= now && by_name - now < 1000000000,
+          "glGetInteger64vEXT, which the driver lacks, is glGetInteger64v's clock (%lld after it)",
+          (long long)(by_name - now));
     if (!fences_tell_time) {
         CHECK(now == 761072096440, "fences without times: GL_TIMESTAMP stays the driver's (%lld)", (long long)now);
         counter(1, TIMESTAMP);

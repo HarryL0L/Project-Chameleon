@@ -323,6 +323,10 @@ static void resolve_stamps(void)
         *(void **)&G.delete = dlsym(g_lib, "glDeleteQueries");
         *(void **)&G.test_fence_time = dlsym(g_lib, "cham_test_fence_time");
     }
+    /* An OpenGL ES 3 driver may leave out the extension's name for a function
+     * ES 3 has itself (Mali does): it is the same function. */
+    if (!G.get_int64_ext)
+        G.get_int64_ext = G.get_i64;
 }
 
 static pthread_once_t g_stamps_once = PTHREAD_ONCE_INIT;
