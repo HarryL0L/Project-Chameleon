@@ -74,6 +74,20 @@ shown, every card request by name with its count, refusals and time, each
 kind of refusal with the program that first got it, and the card's reason for
 every refused commit.
 
+`chameleon --probe` tests the GPU drivers as the session's programs get them
+(`chameleon-probe`, `shim/probe/probe.c`), and a recorded session starts with
+it. It doesn't stop at what the drivers list: on a gbm device it makes a
+buffer of every format, draws into it, takes its fence and reads it back in
+both byte orders; compiles a shader and checks the colours it computed;
+uploads a texture as RGBA and as BGRA; compares a fence's time and the GPU's
+clock with the system's; and through the Vulkan loader draws on every device
+and reads that back, each with the time it took. Its lines say `ok`, `FAIL`
+(a thing that should work didn't), `none` (an optional thing isn't there) or
+`info`. Each part runs in a process of its own and says what it is about to
+do, so a crash or a hang inside a driver is reported with that step and the
+other parts still run. Inside a session run it from a terminal there; with no
+session running it starts one of its own that doesn't wait for the app.
+
 ### The EGL vendor for other programs
 
 `chameleon-vendor-install` registers `libEGL_chameleon.so` with
@@ -214,7 +228,11 @@ over, whoever reads it; see the buffers' fences below).
   doesn't; its size is the swapchain's. Android stores an opaque window's
   images as RGBA all the same, so the compositor's dmabuf import reads
   alpha as 1 from a buffer declared XBGR or XRGB, as a driver importing
-  that format does (`egl/egl.c`). An X11 window (xcb or Xlib) is fed the
+  that format does (`egl/egl.c`). A limit the other way round: an XRGB8888
+  buffer is a BGRA one (Android has RGBX buffers but no BGRX), so a program
+  that draws into it and reads it back, or blends against its alpha, gets
+  the alpha it wrote where a format without alpha gives 1
+  (`chameleon --probe` reports it). An X11 window (xcb or Xlib) is fed the
   same way, but its frames go to the X server as Mesa's drivers send
   theirs: each buffer becomes a DRI3 pixmap once (Xwayland's gbm finds the
   session's buffer behind the dmabuf), each frame a `PresentPixmap`;
@@ -281,6 +299,8 @@ libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
   process too;
 - `chameleon-init` adopting and reaping a program that detached, signals and
   the exit status passing through (`init_test`);
+- `chameleon-probe`'s card part against a service, and a part that crashes
+  and one that hangs, each reported with its step;
 - the session's report after `kms_test` (its requests, refusals and the
   card's reasons), the recorder of `--debug-log` keeping a long session's
   start and end under its limit, and the launcher's option with a stand-in

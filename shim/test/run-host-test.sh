@@ -102,6 +102,30 @@ log_check "the terminal gets the same, and the file's place" \
     'grep -q "^to stderr$" "$OUT/dl/out.txt" && grep -q "the debug log is $DL" "$OUT/dl/out.txt"'
 log_check "no wait for a program that stays" '! grep -q "\\] late$" "$DL"'
 log_check "the pipe is gone" '[ -z "$(ls "$OUT/dl/run")" ]'
+# The probe of the session's graphics stack (chameleon --probe): the card's
+# part against a service, and a part that crashes and one that hangs, which
+# it must report with the step they were at and outlive. (What it finds of
+# EGL and Vulkan depends on the machine's drivers; a phone's are its subject.)
+cc -O1 -g -Wall -Wextra -Ishim/include -o "$OUT/chameleon-probe" shim/probe/probe.c -ldl
+start_kernel "$OUT/runtime-probe" "$OUT/presenter-probe" 1
+status=0
+CHAMELEON_PROBE_TEST=1 CHAMELEON_DRM_PATH="$OUT/card9" XDG_RUNTIME_DIR="$OUT/runtime-probe" \
+    LD_PRELOAD="$OUT/libchameleon.so" "$OUT/chameleon-probe" card > "$OUT/probe.txt" 2>&1 || status=$?
+for want in '^probe:   ok   /dev/dri/card0 opens$' '^probe:   ok   /dev/dri/renderD128 opens$' \
+    '^probe:   info capability DUMB_BUFFER = 1$' '^probe:   ok   client capability ATOMIC$' \
+    '^probe:   none client capability PLANE_COLOR_PIPELINE: ' \
+    '^probe:   FAIL .*: CRASHED (signal 11, .*) while: a step of the probe.s own test$' \
+    '^probe:   FAIL .*: HUNG for 1 s while: another step of the probe.s own test$' \
+    '^probe: == done in .* s: 2 failed, 2 optional things not there$'; do
+    if grep -q -- "$want" "$OUT/probe.txt"; then
+        echo "ok: the probe says: $want"
+    else
+        echo "FAIL: the probe doesn't say: $want"
+        cat "$OUT/probe.txt"
+        exit 1
+    fi
+done
+log_check "the probe's exit status says something failed" '[ "$status" = 1 ]'
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)

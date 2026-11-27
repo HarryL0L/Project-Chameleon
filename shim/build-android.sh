@@ -35,6 +35,8 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -o "$OUT/chameleon-init" shim/init/init.c
 # The recorder of `chameleon --debug-log`.
 "$CC" $CFLAGS -o "$OUT/chameleon-log" shim/log/log.c
+# The test of the session's graphics stack (chameleon --probe).
+"$CC" $CFLAGS -Ishim/include -o "$OUT/chameleon-probe" shim/probe/probe.c -ldl
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a
