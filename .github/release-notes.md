@@ -1,5 +1,3 @@
-Chameleon makes an Android phone look like a Linux PC with a graphics card, so Termux's KWin, or a full Plasma session, runs on the phone's screen and its own GPU. No root needed.
-
 > ⚠️ Experimental. Needs an **arm64 phone on Android 10+** and Termux from **[GitHub](https://github.com/termux/termux-app/releases)** or **[F-Droid](https://f-droid.org/packages/com.termux/)** (not the Play Store version). See [What a phone needs](https://github.com/HarryL0L/Project-Chameleon#what-a-phone-needs).
 
 > ⚠️ **Coming from v0.1.0 or a development build: uninstall the Chameleon app first.** The app's signing key changed with this release, so Android can't update the old app. Its settings start fresh.
