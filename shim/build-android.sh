@@ -14,7 +14,7 @@ CFLAGS="-O2 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -fvisibility=
 # buffers in chameleon-kernel.
 LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c shim/core/wlsync.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
-    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c shim/core/dmabuf.c"
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c shim/core/dmabuf.c shim/core/report.c"
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon.so" $LIB_SRC -ldl -Wl,-soname,libchameleon.so
 "$CC" $CFLAGS -fPIE -pie -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl
 "$CC" $CFLAGS -shared -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
@@ -33,6 +33,8 @@ KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c s
 "$CC" $CFLAGS -o "$OUT/chameleon-ime" shim/ime/ime.c -ldl
 # The session's init: adopts and reaps the programs that detach in it.
 "$CC" $CFLAGS -o "$OUT/chameleon-init" shim/init/init.c
+# The recorder of `chameleon --debug-log`.
+"$CC" $CFLAGS -o "$OUT/chameleon-log" shim/log/log.c
 cp shim/chameleon shim/chameleon-vendor-install "$OUT/"
 
 # The fake libgbm.so must export exactly what Termux's Mesa libgbm does: a

@@ -17,7 +17,7 @@ mkdir -p "$OUT"
 CFLAGS="-O1 -g -Wall -Wextra -Wno-missing-field-initializers -fPIC -DCHAM_HOST_TEST $(pkg-config --cflags libdrm)"
 LIB_SRC="shim/core/interpose.c shim/core/crash.c shim/core/ahb.c shim/core/wlsync.c"
 KERNEL_SRC="shim/core/main.c shim/core/card.c shim/core/kms.c shim/core/link.c shim/core/evdev.c shim/core/input.c \
-    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c shim/core/dmabuf.c"
+    shim/core/keymap.c shim/core/clipboard.c shim/core/text.c shim/core/ahb.c shim/core/wlpath.c shim/core/dmabuf.c shim/core/report.c"
 cc $CFLAGS -shared -fvisibility=hidden -Ishim/include/libdrm -o "$OUT/libchameleon.so" $LIB_SRC -ldl -lpthread \
     -Wl,-soname,libchameleon.so
 cc $CFLAGS -Ishim/include/libdrm -o "$OUT/chameleon-kernel" $KERNEL_SRC -ldl -lpthread
@@ -38,7 +38,70 @@ ln -sf "$OUT/libgbm.so" "$OUT/names/libgbm.so.1"
 ln -sf "$(pkg-config --variable=libdir libdrm)/libdrm.so" "$OUT/names/libdrm.so.2"
 start_kernel "$OUT/runtime-kms" "$OUT/presenter" 5
 CHAMELEON_DRM_PATH="$OUT/card0" CHAMELEON_SOCKET="$OUT/presenter" XDG_RUNTIME_DIR="$OUT/runtime-kms" \
+    KMS_TEST_REPORT="exec '$OUT/chameleon-kernel' --report > '$OUT/report.txt'" \
     LD_LIBRARY_PATH="$OUT/names" LD_PRELOAD="$OUT/libchameleon.so" "$OUT/kms_test"
+# The report of that session's card (chameleon --report): requests by name,
+# the refusals kms_test provoked and the card's reasons.
+for want in '^chameleon report: ' '^frames: [1-9][0-9]* commits' '^card requests: [1-9][0-9]*, [1-9][0-9]* refused' \
+    '^  MODE_ATOMIC  *[1-9]' ' x MODE_ATOMIC: Invalid argument (kms_test)' ' x commit, .*: ' ' x test commit, .*: ' \
+    ' x ioctl 0x.* (not one of the card.s): Invalid argument'; do
+    if grep -q -- "$want" "$OUT/report.txt"; then
+        echo "ok: the report has: $want"
+    else
+        echo "FAIL: the report lacks: $want"
+        cat "$OUT/report.txt"
+        exit 1
+    fi
+done
+if XDG_RUNTIME_DIR="$OUT/nowhere" "$OUT/chameleon-kernel" --report 2>/dev/null; then
+    echo "FAIL: a report without a session"
+    exit 1
+fi
+# The recorder of chameleon --debug-log: every line with its time, passed on
+# unchanged, and a long session's file kept small with its start and its end.
+cc -O1 -g -Wall -Wextra -o "$OUT/chameleon-log" shim/log/log.c
+seq 1 200000 | sed 's/$/ a line of a session/' > "$OUT/log-in.txt"
+"$OUT/chameleon-log" "$OUT/log.txt" 400000 < "$OUT/log-in.txt" > "$OUT/log-out.txt"
+log_check() {
+    if eval "$2"; then
+        echo "ok: the recorder: $1"
+    else
+        echo "FAIL: the recorder: $1"
+        exit 1
+    fi
+}
+log_check "passes everything on" 'head -n 200000 "$OUT/log-out.txt" | cmp -s - "$OUT/log-in.txt"'
+log_check "says where the file is" 'tail -n 1 "$OUT/log-out.txt" | grep -q "the debug log is $OUT/log.txt"'
+log_check "the file is under its limit" '[ "$(wc -c < "$OUT/log.txt")" -le 400000 ]'
+log_check "and not much under it" '[ "$(wc -c < "$OUT/log.txt")" -ge 200000 ]'
+log_check "it starts with the start" 'head -n 1 "$OUT/log.txt" | grep -q "^\[ *[0-9]*\.[0-9][0-9][0-9]\] 1 a line of a session$"'
+log_check "it ends with the end" 'tail -n 1 "$OUT/log.txt" | grep -q "\] 200000 a line of a session$"'
+log_check "it says what is left out" '[ "$(grep -c "bytes of the session are left out here" "$OUT/log.txt")" = 1 ]'
+log_check "its lines are whole and in order" \
+    'grep -v "left out here" "$OUT/log.txt" | sed "s/^\[[^]]*\] //" | awk "{ if (\$1 <= last || NF != 6) exit 1; last = \$1 }"'
+log_check "the working files are gone" '[ ! -e "$OUT/log.txt.0" ] && [ ! -e "$OUT/log.txt.1" ]'
+printf 'short\nno newline at the end' | "$OUT/chameleon-log" "$OUT/log2.txt" > /dev/null
+log_check "a short session whole" '[ "$(sed "s/^\[[^]]*\] //" "$OUT/log2.txt" | tr "\n" "|")" = "short|no newline at the end|" ]'
+# The launcher's part: the session's output and exit status through the
+# recorder, which doesn't wait for a program that outlives the session.
+mkdir -p "$OUT/dl/home"
+sed '1s|.*|#!/bin/sh|' shim/chameleon > "$OUT/dl/chameleon"
+printf '#!/bin/sh\nshift\nexec "$@"\n' > "$OUT/dl/chameleon-init"
+cp "$OUT/chameleon-log" "$OUT/dl/"
+chmod +x "$OUT/dl/chameleon" "$OUT/dl/chameleon-init"
+status=0
+XDG_RUNTIME_DIR="$OUT/dl/run" CHAMELEON_DEBUG_DIR="$OUT/dl/home" "$OUT/dl/chameleon" --debug-log \
+    sh -c 'echo "to stdout, log $CHAMELEON_DEBUG_LOG"; echo to stderr >&2; (sleep 20; echo late) & exit 7' \
+    > "$OUT/dl/out.txt" 2>&1 || status=$?
+DL=$(ls "$OUT"/dl/home/chameleon-debug-*.log)
+log_check "the session's exit status" '[ "$status" = 7 ]'
+log_check "the session knows its log" 'grep -q "\] to stdout, log $DL$" "$DL"'
+log_check "stderr too" 'grep -q "\] to stderr$" "$DL"'
+log_check "what was run and on what" 'grep -q "\] chameleon: debug log of: sh -c" "$DL" && grep -q "\] chameleon: system: " "$DL"'
+log_check "the terminal gets the same, and the file's place" \
+    'grep -q "^to stderr$" "$OUT/dl/out.txt" && grep -q "the debug log is $DL" "$OUT/dl/out.txt"'
+log_check "no wait for a program that stays" '! grep -q "\\] late$" "$DL"'
+log_check "the pipe is gone" '[ -z "$(ls "$OUT/dl/run")" ]'
 # udev monitors are Chameleon's; libinput's udev backend starts on them.
 cc $CFLAGS -shared -fvisibility=hidden -o "$OUT/libchameleon_udev.so" shim/udev/*.c -Wl,-soname,libchameleon_udev.so
 cc -O1 -g -Wall -Wextra -o "$OUT/udev_test" shim/test/udev_test.c $(pkg-config --cflags --libs libinput libudev)

@@ -5,6 +5,7 @@
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -242,6 +243,7 @@ enum {
     CARD_DMABUF,   /* id = DMABUF_* | argument << 8, a and b = st_dev and st_ino of a
                     * dmabuf, maybe + a fence: see dmabuf.c. -ENOENT if it isn't
                     * one of the session's buffers */
+    CARD_REPORT,   /* -> 0 and a file with the session's report (report.c), to read */
     CARD_DONE = 100,
     /* While an ioctl runs the service may ask its caller, as the kernel's
      * fget and fd_install use the caller's fd table: */
@@ -278,6 +280,20 @@ enum {
 /* Takes over `fence` (-1 if none came); *out gets an fd for the caller, or -1. */
 int64_t dmabuf_sync(dev_t dev, ino_t ino, int op, unsigned arg, int fence, int *out);
 int is_sync_file(int fd); /* kms.c */
+
+/* ---- report.c: what the card was asked and answered, for `chameleon --report` ---- */
+void report_start(void);
+int report_debug(void); /* the session records a debug log (chameleon --debug-log) */
+/* A card request `nr` (name NULL: not one of the card's) answered `ret` after
+ * ns; waits: its caller asked to wait, the time says nothing. */
+void report_request(unsigned nr, const char *name, int waits, int ret, uint64_t ns);
+enum { REPORT_COMMIT, REPORT_TEST, REPORT_LEGACY };
+/* Why a commit (REPORT_*) was refused with err. */
+void report_refusal(int kind, int err, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+enum { REPORT_INPUT_DROPPED, REPORT_COUNTS };
+void report_count(int what);
+void report_write(FILE *out);
+void link_report(FILE *out); /* link.c's part: the frames */
 
 /* ---- interpose.c (libchameleon.so), main.c (chameleon-kernel) ---- */
 /* A card file's event pipe holds one page, as the kernel gives a DRM file

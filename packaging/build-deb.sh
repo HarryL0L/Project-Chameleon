@@ -6,7 +6,7 @@
 #
 # Layout under $PREFIX (/data/data/com.termux/files/usr):
 #   lib/chameleon/          libchameleon.so, libchameleon_udev.so, libEGL_chameleon.so, libvulkan_chameleon.so, the launch
-#                           scripts, chameleon-kernel, chameleon-ime, chameleon-init - and the fake libgbm.so,
+#                           scripts, chameleon-kernel, chameleon-ime, chameleon-init, chameleon-log - and the fake libgbm.so,
 #                           which must stay out of $PREFIX/lib where it would replace Mesa's
 #                           outside Chameleon sessions too
 #   bin/chameleon, bin/chameleon-vendor-install -> ../lib/chameleon/...
@@ -34,7 +34,7 @@ mkdir -p "$LIB" "$ROOT$PREFIX/bin" "$ROOT$PREFIX/share/doc/chameleon" "$ROOT$PRE
 install -m 644 "$SHIM/libchameleon.so" "$SHIM/libchameleon_udev.so" "$SHIM/libgbm.so" "$SHIM/libEGL_chameleon.so" \
     "$SHIM/libvulkan_chameleon.so" "$LIB/"
 install -m 755 "$SHIM/chameleon" "$SHIM/chameleon-vendor-install" "$SHIM/chameleon-kernel" "$SHIM/chameleon-ime" \
-    "$SHIM/chameleon-init" "$LIB/"
+    "$SHIM/chameleon-init" "$SHIM/chameleon-log" "$LIB/"
 ln -s ../lib/chameleon/chameleon "$ROOT$PREFIX/bin/chameleon"
 ln -s ../lib/chameleon/chameleon-vendor-install "$ROOT$PREFIX/bin/chameleon-vendor-install"
 install -m 755 "$PROBE" "$ROOT$PREFIX/bin/chameleon-probe"

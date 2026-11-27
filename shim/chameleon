@@ -10,6 +10,12 @@
 #   chameleon sway                      # sway
 #   chameleon --install                 # put `chameleon` in $PREFIX/bin
 #
+#   chameleon --debug-log PROGRAM...    # the same, recorded for a bug report:
+#                                       # all the session prints, with times,
+#                                       # and what the card was asked
+#   chameleon --report                  # what the running session's card was
+#                                       # asked and answered so far
+#
 # chameleon-kernel serves the card, the input devices and the link to the app
 # for the whole session, as the kernel would, below chameleon-init. Every program in the session
 # gets the same device layer: libchameleon.so (the card node, gbm's buffers),
@@ -19,13 +25,53 @@ SHIM_DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 
 case "$1" in
 "" | -h | --help)
-    sed -n '2,17s/^# \{0,1\}//p' "$0"
+    sed -n '2,23s/^# \{0,1\}//p' "$0"
     exit 0
     ;;
 --install)
     ln -sf "$SHIM_DIR/chameleon" "$PREFIX/bin/chameleon"
     echo "installed: $PREFIX/bin/chameleon -> $SHIM_DIR/chameleon"
     exit 0
+    ;;
+--report)
+    export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+    exec "$SHIM_DIR/chameleon-kernel" --report
+    ;;
+--debug-log)
+    # The session as without it, with everything it prints going through
+    # the recorder (shim/log/log.c) into a file of at most 28 MiB;
+    # CHAMELEON_DEBUG_LOG makes chameleon-kernel say more (shim/core/report.c).
+    shift
+    if [ $# -eq 0 ]; then
+        echo "usage: chameleon --debug-log PROGRAM..." >&2
+        exit 2
+    fi
+    run=${XDG_RUNTIME_DIR:-$PREFIX/tmp/runtime-$(id -u)}
+    mkdir -p "$run" && chmod 700 "$run"
+    export CHAMELEON_DEBUG_LOG="${CHAMELEON_DEBUG_DIR:-$HOME}/chameleon-debug-$(date +%Y%m%d-%H%M%S).log"
+    pipe="$run/chameleon-debug.$$"
+    rm -f "$pipe"
+    mkfifo -m 600 "$pipe"
+    "$SHIM_DIR/chameleon-log" "$CHAMELEON_DEBUG_LOG" < "$pipe" &
+    recorder=$!
+    trap : INT # ^C is the session's: this waits for it to end
+    status=0
+    {
+        echo "chameleon: debug log of: $*"
+        dpkg-query -W -f 'chameleon: package ${Package} ${Version}\n' chameleon 2>/dev/null || true
+        echo "chameleon: system: $(uname -srm)"
+        if [ -x /system/bin/getprop ]; then
+            for prop in ro.product.manufacturer ro.product.model ro.build.version.release ro.build.version.sdk \
+                ro.soc.model ro.board.platform ro.hardware.egl ro.hardware.vulkan; do
+                echo "chameleon: $prop: $(env -u LD_PRELOAD -u LD_LIBRARY_PATH /system/bin/getprop "$prop")"
+            done
+        fi
+        "$0" "$@"
+    } > "$pipe" 2>&1 || status=$?
+    kill -TERM "$recorder" 2>/dev/null || true
+    wait "$recorder" || true
+    rm -f "$pipe"
+    exit "$status"
     ;;
 esac
 

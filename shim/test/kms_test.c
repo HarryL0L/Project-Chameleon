@@ -2044,6 +2044,12 @@ int main(int argc, char **argv)
     close(inherited);
     CHECK(run_self("pipes", NULL) == 0, "a program using only ordinary pipes never contacts chameleon-kernel");
 
+    /* What the service counted of all this, for run-host-test.sh to look at
+     * (`chameleon --report`), and one request no card has, for its list. */
+    drmIoctl(fda, DRM_IOWR(0xe0, struct drm_get_cap), &(struct drm_get_cap){0});
+    if (getenv("KMS_TEST_REPORT") && system(getenv("KMS_TEST_REPORT")) != 0)
+        CHECK(0, "the session's report can be asked for");
+
     /* Last: chameleon-kernel goes away (its pid from the card socket). */
     struct sockaddr_un kaddr = {.sun_family = AF_UNIX};
     snprintf(kaddr.sun_path, sizeof kaddr.sun_path, "%s/chameleon-card", getenv("XDG_RUNTIME_DIR"));

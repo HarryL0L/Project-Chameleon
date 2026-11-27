@@ -322,6 +322,10 @@ void input_post(const struct cham_msg *m)
         return;
     /* A pipe write of one message is atomic; if the thread is stuck the pipe
      * fills and input is dropped rather than blocking the presenter link. */
-    if (write(g_pipe[1], m, sizeof *m) != (ssize_t)sizeof *m && errno != EAGAIN)
+    if (write(g_pipe[1], m, sizeof *m) == (ssize_t)sizeof *m)
+        return;
+    if (errno == EAGAIN)
+        report_count(REPORT_INPUT_DROPPED);
+    else
         cham_log("input: cannot queue event: %s", strerror(errno));
 }

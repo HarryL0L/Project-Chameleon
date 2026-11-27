@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -334,6 +335,20 @@ static void handle(struct caller *c, const struct cham_msg *m, int fd)
         answer(c, ret, out);
         if (out >= 0)
             close(out);
+        break;
+    }
+    case CARD_REPORT: {
+        /* a file, not a pipe: the report is longer than a pipe holds */
+        int mem = (int)syscall(__NR_memfd_create, "chameleon-report", 1u /* MFD_CLOEXEC */);
+        FILE *out = mem >= 0 ? fdopen(dup(mem), "w") : NULL;
+        if (out) {
+            report_write(out);
+            fclose(out);
+            lseek(mem, 0, SEEK_SET);
+        }
+        answer(c, out ? 0 : -ENOMEM, out ? mem : -1);
+        if (mem >= 0)
+            close(mem);
         break;
     }
     case CARD_SEND_FD:

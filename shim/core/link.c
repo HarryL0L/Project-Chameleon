@@ -104,7 +104,7 @@ static struct {
     unsigned second;                /* flips only a second frame in Android let through */
     unsigned on_vsync;              /* flips on the display's vsync grid */
     uint64_t since;
-} g_stats;
+} g_stats, g_total; /* g_total: the session's, without what g_stats still holds */
 
 static void stats_maybe_log_locked(void)
 {
@@ -122,8 +122,36 @@ static void stats_maybe_log_locked(void)
                  shown ? g_stats.wait_sum / shown / 1e6 : 0.0, g_stats.wait_max / 1e6, g_stats.held,
                  g_stats.second, g_stats.on_vsync);
     }
+    g_total.commits += g_stats.commits;
+    g_total.presented += g_stats.presented;
+    g_total.not_shown += g_stats.not_shown;
+    g_total.flips += g_stats.flips;
+    g_total.simulated += g_stats.simulated;
+    g_total.wait_sum += g_stats.wait_sum;
+    if (g_stats.wait_max > g_total.wait_max)
+        g_total.wait_max = g_stats.wait_max;
+    g_total.held += g_stats.held;
+    g_total.second += g_stats.second;
+    g_total.on_vsync += g_stats.on_vsync;
     memset(&g_stats, 0, sizeof g_stats);
     g_stats.since = now;
+}
+
+void link_report(FILE *out)
+{
+    pthread_mutex_lock(&g_lock);
+    unsigned commits = g_total.commits + g_stats.commits, flips = g_total.flips + g_stats.flips;
+    unsigned simulated = g_total.simulated + g_stats.simulated, shown = flips - simulated;
+    uint64_t max = g_total.wait_max > g_stats.wait_max ? g_total.wait_max : g_stats.wait_max;
+    fprintf(out,
+            "frames: %u commits, %u presented by the app, %u not shown (no app surface); %u page flips, %u of "
+            "them simulated (nothing on screen)\n"
+            "frames shown: commit to shown %.1f ms avg, %.1f max; %u waited for Android, %u used a second frame "
+            "there; %u on the display's vsync\n",
+            commits, g_total.presented + g_stats.presented, g_total.not_shown + g_stats.not_shown, flips,
+            simulated, shown ? (g_total.wait_sum + g_stats.wait_sum) / shown / 1e6 : 0.0, max / 1e6,
+            g_total.held + g_stats.held, g_total.second + g_stats.second, g_total.on_vsync + g_stats.on_vsync);
+    pthread_mutex_unlock(&g_lock);
 }
 
 static const char *socket_path(void)

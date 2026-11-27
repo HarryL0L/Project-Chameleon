@@ -55,6 +55,25 @@ The compositor loads the EGL vendor through Termux's own glvnd
 `__EGL_VENDOR_LIBRARY_FILENAMES` for the whole session, with this vendor
 first and the installed ones (Mesa) after it.
 
+### A record for a bug report
+
+`chameleon --debug-log PROGRAM...` runs the session as usual and records it:
+everything its programs print, each line with its time, in
+`~/chameleon-debug-DATE-TIME.log` (`CHAMELEON_DEBUG_DIR` names another
+directory). The file starts with the package's version and the phone's model,
+Android version and chipset; `chameleon-kernel` adds the first of every
+request the card gets and of every refusal with the program that got it,
+requests a program waited 8 ms or more for, and at the end the session's
+report. The file stays under 28 MiB: of a longer session its start and its
+most recent part are kept. It holds what programs printed, which can name
+files: read it before sharing it.
+
+`chameleon --report` prints the report of the running session from another
+terminal: frames committed, shown and simulated with the time from commit to
+shown, every card request by name with its count, refusals and time, each
+kind of refusal with the program that first got it, and the card's reason for
+every refused commit.
+
 ### The EGL vendor for other programs
 
 `chameleon-vendor-install` registers `libEGL_chameleon.so` with
@@ -262,6 +281,10 @@ libxcb-present0 libx11-xcb1`) runs, with memfd stand-ins for `AHardwareBuffer`:
   process too;
 - `chameleon-init` adopting and reaping a program that detached, signals and
   the exit status passing through (`init_test`);
+- the session's report after `kms_test` (its requests, refusals and the
+  card's reasons), the recorder of `--debug-log` keeping a long session's
+  start and end under its limit, and the launcher's option with a stand-in
+  session;
 - typed text and `chameleon-ime` against a real libwayland-server with stub
   `wl_seat` and input-method globals (`input_test`);
 - the evdev touchscreen, keyboard, mouse and touchpad seen by the system's

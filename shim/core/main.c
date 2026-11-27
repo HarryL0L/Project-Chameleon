@@ -11,6 +11,10 @@
  *
  * returns once its sockets answer, and keeps running in the background until
  * SESSION_PID is gone.
+ *
+ *   chameleon-kernel --report
+ *
+ * asks the session's running service for its report (report.c) and prints it.
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -18,10 +22,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <ucontext.h>
 #include <unistd.h>
 
+#include "../../common/cham_io.h"
 #include "internal.h"
 
 int real_fstat(int fd, struct stat *st)
@@ -66,8 +74,36 @@ static void crashed(int sig, siginfo_t *info, void *context)
         raise(sig);
 }
 
+static int print_report(void)
+{
+    const char *dir = getenv("XDG_RUNTIME_DIR");
+    struct sockaddr_un addr = {.sun_family = AF_UNIX};
+    struct cham_msg m = {CARD_REPORT, 0, 0, 0};
+    int s = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0), fd = -1;
+    if (!dir || s < 0 ||
+        snprintf(addr.sun_path, sizeof addr.sun_path, "%s/%s", dir, CHAM_CARD_SOCKET_NAME) >=
+            (int)sizeof addr.sun_path ||
+        connect(s, (struct sockaddr *)&addr, sizeof addr) != 0) {
+        fprintf(stderr, "chameleon: no session is running (nothing answers at %s/%s)\n", dir ? dir : "",
+                CHAM_CARD_SOCKET_NAME);
+        return 1;
+    }
+    if (cham_send(s, &m, -1) != 0 || cham_recv(s, &m, &fd) != 1 || fd < 0) {
+        fprintf(stderr, "chameleon: the session's service gave no report (an older chameleon-kernel?)\n");
+        return 1;
+    }
+    char buf[4096];
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof buf)) > 0)
+        if (write(1, buf, (size_t)n) != n)
+            return 1;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc > 1 && !strcmp(argv[1], "--report"))
+        return print_report();
     pid_t session = argc > 1 ? (pid_t)atoi(argv[1]) : 0;
     if (session <= 0) {
         fprintf(stderr, "usage: %s SESSION_PID\n", argv[0]);
@@ -91,6 +127,7 @@ int main(int argc, char **argv)
     static const int k_fatal[] = {SIGSEGV, SIGBUS, SIGABRT, SIGFPE, SIGILL};
     for (size_t i = 0; i < sizeof k_fatal / sizeof k_fatal[0]; i++)
         sigaction(k_fatal[i], &crash, NULL);
+    report_start();
     evdev_start();
     if (card_start() != 0)
         return 1;
@@ -99,6 +136,8 @@ int main(int argc, char **argv)
     close(ready[1]);
     while (kill(session, 0) == 0 || errno == EPERM)
         sleep(1);
+    if (report_debug())
+        report_write(stderr);
     cham_log("the session ended: chameleon-kernel stops");
     return 0;
 }

@@ -1209,6 +1209,9 @@ static int plane_geometry(const struct plane_state *p, const struct fb *fb, cons
 static int g_refusals;
 #define REFUSE(err, ...)                                                                           \
     do {                                                                                           \
+        report_refusal(flags & COMMIT_LEGACY ? REPORT_LEGACY                                       \
+                       : flags & DRM_MODE_ATOMIC_TEST_ONLY ? REPORT_TEST : REPORT_COMMIT,          \
+                       (err), __VA_ARGS__);                                                        \
         if (!(flags & (DRM_MODE_ATOMIC_TEST_ONLY | COMMIT_LEGACY)) && g_refusals < 20) {           \
             g_refusals++;                                                                          \
             cham_log("refusing the compositor's commit: " __VA_ARGS__);                            \
@@ -2237,8 +2240,9 @@ struct ioctl_def {
     unsigned int cmd;
     int (*fn)(struct fake_fd *, void *);
     int flags;
+    const char *name; /* for the report (report.c), without "DRM_IOCTL_" */
 };
-#define DEF(c, f, fl) [_IOC_NR(c)] = {(unsigned int)(c), (f), (fl)}
+#define DEF(c, f, fl) [_IOC_NR(c)] = {(unsigned int)(c), (f), (fl), &#c[10]}
 /* Linux 6.8's core ioctls (drm_ioctls[], without the legacy ones 6.8 no
  * longer builds), with its flags. Those the card doesn't implement have no
  * function: after the permission checks they answer EINVAL. */
@@ -2337,11 +2341,9 @@ static int permit(const struct fake_fd *f, int flags)
 /* As the kernel: the ioctl is found by number, the argument is copied in
  * and out by the size the caller declares (the rest zero-filled), and only
  * then are permission and the handler applied. */
-int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
+static int ioctl_run(struct fake_fd *f, unsigned int cmd, void *user_arg, const struct ioctl_def **found)
 {
     static int unknown_warnings, non_master_commits;
-    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE)
-        return -ENOTTY;
     unsigned int nr = _IOC_NR(cmd);
     const struct ioctl_def *def = nr < DRM_CORE_IOCTL_COUNT && !(nr >= DRM_COMMAND_BASE && nr < DRM_COMMAND_END)
                                       ? &k_ioctls[nr]
@@ -2351,6 +2353,7 @@ int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
             cham_log("unsupported DRM ioctl 0x%08x (nr 0x%02x)", cmd, nr);
         return -EINVAL;
     }
+    *found = def;
     unsigned int drv_size = _IOC_SIZE(def->cmd), in_size = _IOC_SIZE(cmd), out_size = in_size;
     if (!(cmd & def->cmd & IOC_IN))
         in_size = 0;
@@ -2383,5 +2386,18 @@ int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
     }
     if (kdata != stack)
         free(kdata);
+    return ret;
+}
+
+int kms_ioctl(struct fake_fd *f, unsigned int cmd, void *user_arg)
+{
+    if (_IOC_TYPE(cmd) != DRM_IOCTL_BASE)
+        return -ENOTTY;
+    const struct ioctl_def *def = NULL;
+    uint64_t start = now_ns();
+    int ret = ioctl_run(f, cmd, user_arg, &def);
+    /* WAIT_VBLANK's caller asked to wait */
+    report_request(_IOC_NR(cmd), def ? def->name : NULL, _IOC_NR(cmd) == _IOC_NR(DRM_IOCTL_WAIT_VBLANK), ret,
+                   now_ns() - start);
     return ret;
 }
